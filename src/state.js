@@ -36,6 +36,17 @@ export function getPort({ file = defaultStateFile() } = {}) {
   return typeof port === "number" && Number.isInteger(port) && port > 0 ? port : null;
 }
 
+export function loadModelErrors({ file = defaultStateFile() } = {}) {
+  const errors = readState(file).modelErrors;
+  return errors && typeof errors === "object" && !Array.isArray(errors) ? errors : {};
+}
+
+export function saveModelErrors(errors, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, modelErrors: errors });
+  return errors;
+}
+
 function readState(file) {
   try {
     const saved = JSON.parse(readFileSync(file, "utf8"));

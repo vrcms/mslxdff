@@ -1,5 +1,8 @@
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_REFRESH_MS = 2 * 60 * 60 * 1000;
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 export function isFreeModel(id) {
   return (typeof id === "string" && id.endsWith("-free")) ||
@@ -19,10 +22,19 @@ export function filterFreeModels(list) {
   return out;
 }
 
-export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS } = {}) {
+export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, refreshMs = DEFAULT_REFRESH_MS, cacheFile } = {}) {
   let cache = null;
   let fetchedAt = 0;
   let inflight = null;
+  let timer = null;
+
+  async function load() {
+    const data = await fetchUpstreamModels({ baseUrl, headers });
+    cache = data;
+    fetchedAt = Date.now();
+    if (cacheFile) persistModels(data, cacheFile);
+    return data;
+  }
 
   async function get() {
     const now = Date.now();
@@ -31,10 +43,7 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS } =
 
     inflight = (async () => {
       try {
-        const data = await fetchUpstreamModels({ baseUrl, headers });
-        cache = data;
-        fetchedAt = Date.now();
-        return data;
+        return await load();
       } catch (err) {
         // serve stale on failure if we have it, else rethrow
         if (cache) return cache;
@@ -46,7 +55,25 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS } =
     return inflight;
   }
 
-  return { get };
+  function startAutoRefresh(intervalMs = refreshMs) {
+    if (timer) return stopAutoRefresh;
+    timer = setInterval(() => {
+      void load().catch(() => {
+        // keep serving stale cache on background refresh failure
+      });
+    }, intervalMs);
+    timer.unref?.();
+    return stopAutoRefresh;
+  }
+
+  function stopAutoRefresh() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  return { get, startAutoRefresh, stopAutoRefresh };
 }
 
 async function fetchUpstreamModels({ baseUrl, headers, connectTimeoutMs = 30_000 }) {
@@ -82,6 +109,15 @@ async function attemptFetch(url, headers, connectTimeoutMs) {
 
 function isRetryable(status) {
   return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function persistModels(data, cacheFile) {
+  try {
+    mkdirSync(dirname(cacheFile), { recursive: true });
+    writeFileSync(cacheFile, JSON.stringify({ cachedAt: Date.now(), ...data }));
+  } catch {
+    // persistence is best-effort
+  }
 }
 
 function sleep(ms) {
