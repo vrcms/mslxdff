@@ -1,0 +1,5 @@
+---
+description: Build and sharpen a project's domain model. Use when the user wants to pin down domain terminology or a ubiquitous language, record an architectural decision, or when another skill needs to maintain the domain model.
+---
+
+Load the skill named "domain-modeling" via the skill tool and follow its instructions. Apply any arguments: $ARGUMENTS
