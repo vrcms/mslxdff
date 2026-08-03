@@ -1,6 +1,6 @@
-# mslxdfree
+# mslxdff
 
-Standalone **OpenCode Free** proxy — an OpenAI-compatible `/v1` gateway that forwards requests to the free zen gateway at `opencode.ai` (no account required) and exposes only the free models.
+测试项目，请勿使用。
 
 Zero runtime dependencies: Node ≥ 20, built-in `node:http`, `node:crypto`, `node:test`.
 
