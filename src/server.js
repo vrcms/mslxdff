@@ -20,9 +20,8 @@ export function startServer({ router }, port = Number(process.env.PORT) || 8080)
       server.close(resolve);
     });
 
-  const shutdown = () => close();
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", close);
+  process.on("SIGTERM", close);
 
   return { server, ready, close };
 }

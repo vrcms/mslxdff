@@ -45,7 +45,7 @@ The `/v1/*` routes are protected by a bearer token that is randomly generated on
 - **reasoning injection**: `PLACEHOLDER = " "`; rules `[kimi-* → toolCalls, deepseek → all]`; only assistant messages without set `reasoning_content`. (ADR-0001.)
 - **Models filter**: `id.endsWith("-free")` OR `KNOWN_FREE_OPENCODE_MODELS.includes(id)` where `KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"]`; response shape `{object:"list",data:[…]}`; tolerate upstream array ordering via `data ?? models ?? json`. (ADR-0002.)
 - **Models cache**: in-memory Map ttl 10min; single-flight refresh; on upstream failure serve stale (if any) else error.
-- **Retry/timeouts**: connect timeout 30s (env `UPSTREAM_CONNECT_TIMEOUT`); retry 429 backoff up to 2 attempts; 502/503/504 up to 2 attempts at ~2s delay; env-configurable. Free quota is shared → prefer not to hammer; keep configurable.
+- **Retry/timeouts**: connect timeout 30s (env `UPSTREAM_CONNECT_TIMEOUT_MS`); retry 429 backoff up to 2 attempts; 502/503/504 up to 2 attempts at ~2s delay; env-configurable. Free quota is shared → prefer not to hammer; keep configurable.
 - **Env surface**: `PORT` (8080), `UPSTREAM_BASE_URL`, `UPSTREAM_AUTH_TOKEN` (default `public`), `MSLXDFREE_STATE_FILE`, timeout/retry section vars, `LOG_LEVEL`.
 - **oc/ prefix**: strip a single `oc/` prefix from `model` before forwarding; otherwise verbatim.
 
