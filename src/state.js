@@ -3,9 +3,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
 
+export const DEFAULT_PORT = 8989;
+
 export function defaultStateFile() {
-  return process.env.MSLXDFREE_STATE_FILE ||
-    join(os.homedir(), ".config", "mslxdfree", "state.json");
+  return process.env.MSLXDFF_STATE_FILE ||
+    join(os.homedir(), ".config", "mslxdff", "state.json");
 }
 
 export function generateToken() {
@@ -13,27 +15,39 @@ export function generateToken() {
 }
 
 export async function loadToken({ file = defaultStateFile() } = {}) {
-  try {
-    const saved = JSON.parse(readFileSync(file, "utf8"));
-    if (typeof saved.token === "string" && saved.token.length > 0) {
-      return { token: saved.token, created: false };
-    }
-  } catch {
-    // missing or unreadable → generate fresh below
+  const state = readState(file);
+  if (typeof state.token === "string" && state.token.length > 0) {
+    return { token: state.token, created: false };
   }
-  return { token: writeToken(file), created: true };
+  return { token: writeState(file, { token: generateToken(), createdAt: new Date().toISOString() }).token, created: true };
 }
 
 export async function refreshToken({ file = defaultStateFile() } = {}) {
-  return writeToken(file);
+  return writeState(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
 }
 
-function writeToken(file) {
-  const state = {
-    token: generateToken(),
-    createdAt: new Date().toISOString(),
-  };
+export function setPort(port, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, port: Number(port) });
+}
+
+export function getPort({ file = defaultStateFile() } = {}) {
+  const port = readState(file).port;
+  return typeof port === "number" && Number.isInteger(port) && port > 0 ? port : null;
+}
+
+function readState(file) {
+  try {
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    return typeof saved === "object" && saved !== null ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeState(file, patch) {
+  const merged = { ...readState(file), ...patch };
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(state, null, 2), { mode: 0o600 });
-  return state.token;
+  writeFileSync(file, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  return merged;
 }

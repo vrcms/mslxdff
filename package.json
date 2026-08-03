@@ -4,10 +4,10 @@
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
-    "mslxdfree": "bin/mslxdfree.js"
+    "mslxdff": "bin/mslxdff.js"
   },
   "scripts": {
-    "start": "node bin/mslxdfree.js",
+    "start": "node bin/mslxdff.js",
     "test": "node --test test/"
   },
   "engines": {

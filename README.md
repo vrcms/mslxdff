@@ -14,31 +14,42 @@ Zero runtime dependencies: Node ≥ 20, built-in `node:http`, `node:crypto`, `no
 
 ```
 npm install      # no deps actually fetched; just links the bin
-mslxdfree        # or: node bin/mslxdfree.js
+mslxdff          # or: node bin/mslxdff.js
 ```
 
 First run generates a bearer token, writes it to the state file, and prints it:
 
 ```
-mslxdfree listening on http://localhost:8080
+mslxdff listening on http://localhost:8989
 auth token: 9b5de021e914...
-endpoint:   http://localhost:8080/v1
+endpoint:   http://localhost:8989/v1
 ```
+
+### Port
+
+Default port is **8989**. Persist a different port (and hot-restart the daemon onto it if one is running):
+
+```
+mslxdff -port 8000     # set port to 8000; restarts the daemon on 8000
+mslxdff -d             # next starts reuse the persisted port (8000)
+```
+
+Priority: `-port` arg > persisted port > `PORT` env > default `8989`.
 
 ### Daemon (background, stays resident)
 
 ```
-mslxdfree -d        # start detached background daemon
-mslxdfree -stop     # stop it
+mslxdff -d        # start detached background daemon
+mslxdff -stop     # stop it
 ```
 
-Logs go to `~/.config/mslxdfree/daemon.log`, the daemon pid to `daemon.pid` (both overridable via `MSLXDFREE_DAEMON_DIR`). The daemon keeps running after your shell exits.
+Logs go to `~/.config/mslxdff/daemon.log`, the daemon pid to `daemon.pid` (both overridable via `MSLXDFF_DAEMON_DIR`). The daemon keeps running after your shell exits.
 
 ### Token
 
 ```
-mslxdfree -showtoken      # print the current token (creates one on first use)
-mslxdfree -refresh-token  # rotate it (prints the new token, does not start the server)
+mslxdff -showtoken      # print the current token (creates one on first use)
+mslxdff -refresh-token  # rotate it (prints the new token, does not start the server)
 ```
 
 ## Client configuration
@@ -46,7 +57,7 @@ mslxdfree -refresh-token  # rotate it (prints the new token, does not start the 
 Point any OpenAI-compatible client at the endpoint with the token:
 
 ```
-Endpoint:   http://localhost:8080/v1
+Endpoint:   http://localhost:8989/v1
 API Key:    <the bearer token>      (sent as Authorization: Bearer <token>)
 Model:      oc/deepseek-v4-flash-free   (the oc/ prefix is optional)
 ```
@@ -54,7 +65,7 @@ Model:      oc/deepseek-v4-flash-free   (the oc/ prefix is optional)
 <x-model list>
 
 ```
-$ curl -H "Authorization: Bearer <token>" http://localhost:8080/v1/models
+$ curl -H "Authorization: Bearer <token>" http://localhost:8989/v1/models
 {"object":"list","data":[{"id":"big-pickle",...},{"id":"deepseek-v4-flash-free",...}, ...]}
 </x-model list>
 
@@ -62,9 +73,9 @@ $ curl -H "Authorization: Bearer <token>" http://localhost:8080/v1/models
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PORT` | `8080` | listen port |
-| `MSLXDFREE_STATE_FILE` | `~/.config/mslxdfree/state.json` | token state file (mode 0600) |
-| `MSLXDFREE_DAEMON_DIR` | `~/.config/mslxdfree` | daemon pid + log directory |
+| `PORT` | `8989` | listen port (used when no `-port` arg and no persisted port) |
+| `MSLXDFF_STATE_FILE` | `~/.config/mslxdff/state.json` | token/port state file (mode 0600) |
+| `MSLXDFF_DAEMON_DIR` | `~/.config/mslxdff` | daemon pid + log directory |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | upstream base |
 | `UPSTREAM_AUTH_TOKEN` | `public` | upstream `Authorization: Bearer <…>` value |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | upstream connect timeout |
@@ -72,7 +83,7 @@ $ curl -H "Authorization: Bearer <token>" http://localhost:8080/v1/models
 
 ## Clients
 
-Point your OpenAI client at `http://<host>:8080/v1` (or the equivalent config seen above). Works for streaming and non-streaming chat completions.
+Point your OpenAI client at `http://<host>:8989/v1` (or the equivalent config seen above). Works for streaming and non-streaming chat completions.
 
 ## Development
 

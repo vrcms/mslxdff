@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pidFile, logFile, writePid, readPid, stopDaemon, startDaemon } from "../src/daemon.js";
 
-const DIR = mkdtempSync(join(tmpdir(), "mslxdfree-daemon-"));
+const DIR = mkdtempSync(join(tmpdir(), "mslxdff-daemon-"));
 
-process.env.MSLXDFREE_DAEMON_DIR = DIR;
+process.env.MSLXDFF_DAEMON_DIR = DIR;
 
 test("pidFile and logFile live under daemon dir", () => {
   assert.equal(pidFile(), join(DIR, "daemon.pid"));
