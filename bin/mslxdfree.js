@@ -13,6 +13,12 @@ if (args.includes("-refresh-token") || args.includes("--refresh-token")) {
   process.exit(0);
 }
 
+if (args.includes("-showtoken") || args.includes("--showtoken")) {
+  const { token } = await loadToken();
+  console.log(token);
+  process.exit(0);
+}
+
 const { token, created } = await loadToken();
 const upstream = createUpstreamClient({});
 const baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
