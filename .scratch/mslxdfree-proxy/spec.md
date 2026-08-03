@@ -1,4 +1,4 @@
-# Spec: mslxdfree — standalone OpenCode Free proxy
+# Spec: mslxdff — standalone OpenCode Free proxy
 
 Status: ready-for-agent
 
@@ -18,13 +18,13 @@ The `/v1/*` routes are protected by a bearer token that is randomly generated on
 
 ## User Stories
 
-1. As an operator, I want to run `mslxdfree` once so that a server starts on `PORT` (default 8080).
+1. As an operator, I want to run `mslxdff` once so that a server starts on `PORT` (default 8080).
 2. As an operator, I want the first run to generate a random bearer token and print it once, so I can configure my OpenAI client.
 3. As an operator, I want the token persisted in a state file, so the same token works across restarts.
-4. As an operator, I want `mslxdfree -refresh-token` to rotate the token, rewrite the state file, print the new token, and exit without starting the server.
+4. As an operator, I want `mslxdff -refresh-token` to rotate the token, rewrite the state file, print the new token, and exit without starting the server.
 5. As an operator, I want `/v1/*` to return `401` (constant-time compare) and `WWW-Authenticate: Bearer` when the header token doesn't match.
 6. As an operator, I want `/health` to be public so load-balancer / uptime probes work without a token.
-7. As an operator, I want to override the state file path via `MSLXDFREE_STATE_FILE` and the upstream settings via env vars.
+7. As an operator, I want to override the state file path via `MSLXDFF_STATE_FILE` and the upstream settings via env vars.
 8. As an operator, I want the token never to appear in logs.
 9. As an OpenAI client, I want `POST /v1/chat/completions` to accept a standard OpenAI chat body and receive an upstream-compatible completion.
 10. As an OpenAI client, I want to set `model` to any id, including with an `oc/` prefix that is stripped before forwarding.
@@ -37,16 +37,16 @@ The `/v1/*` routes are protected by a bearer token that is randomly generated on
 
 ## Implementation Decisions
 
-- **Server**: Node's `node:http` `createServer`, zero runtime dependencies. Single-entry `server.js` with `bin` script `mslxdfree` handling `-refresh-token`.
+- **Server**: Node's `node:http` `createServer`, zero runtime dependencies. Single-entry `server.js` with `bin` script `mslxdff` handling `-refresh-token`.
 - **Runtime stack**: Node 20+ (system has 20.19.6; best-go is Node's built-in `crypto`, `fs`, `http`, `node:test` — no npm deps beyond types runtimes).
 - **Upstream**: base `https://opencode.ai`; `POST /zen/v1/chat/completions`, `GET /zen/v1/models`. Always send `x-opencode-client: desktop` and `Authorization: Bearer public`; add `Accept: text/event-stream` only when streaming (harmless to always send).
 - **Auth**: constant-time equality on `Authorization: Bearer <token>`; `401` + `WWW-Authenticate: Bearer` on mismatch. `/v1/models` is also protected; `/health` is public.
-- **Token**: 32 random bytes hex; written as `{"token": "…", "createdAt": …}` into state file; default `~/.config/mslxdfree/state.json`, `MSLXDFREE_STATE_FILE` overrides; `0600`. Generated-and-persisted on first server start and printed once. `-refresh-token` regenerates, persists, prints, exits 0.
+- **Token**: 32 random bytes hex; written as `{"token": "…", "createdAt": …}` into state file; default `~/.config/mslxdff/state.json`, `MSLXDFF_STATE_FILE` overrides; `0600`. Generated-and-persisted on first server start and printed once. `-refresh-token` regenerates, persists, prints, exits 0.
 - **reasoning injection**: `PLACEHOLDER = " "`; rules `[kimi-* → toolCalls, deepseek → all]`; only assistant messages without set `reasoning_content`. (ADR-0001.)
 - **Models filter**: `id.endsWith("-free")` OR `KNOWN_FREE_OPENCODE_MODELS.includes(id)` where `KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"]`; response shape `{object:"list",data:[…]}`; tolerate upstream array ordering via `data ?? models ?? json`. (ADR-0002.)
 - **Models cache**: in-memory Map ttl 10min; single-flight refresh; on upstream failure serve stale (if any) else error.
 - **Retry/timeouts**: connect timeout 30s (env `UPSTREAM_CONNECT_TIMEOUT_MS`); retry 429 backoff up to 2 attempts; 502/503/504 up to 2 attempts at ~2s delay; env-configurable. Free quota is shared → prefer not to hammer; keep configurable.
-- **Env surface**: `PORT` (8080), `UPSTREAM_BASE_URL`, `UPSTREAM_AUTH_TOKEN` (default `public`), `MSLXDFREE_STATE_FILE`, timeout/retry section vars, `LOG_LEVEL`.
+- **Env surface**: `PORT` (8080), `UPSTREAM_BASE_URL`, `UPSTREAM_AUTH_TOKEN` (default `public`), `MSLXDFF_STATE_FILE`, timeout/retry section vars, `LOG_LEVEL`.
 - **oc/ prefix**: strip a single `oc/` prefix from `model` before forwarding; otherwise verbatim.
 
 ## Testing Decisions

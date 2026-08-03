@@ -5,7 +5,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 export function daemonDir() {
-  return process.env.MSLXDFREE_DAEMON_DIR || join(os.homedir(), ".config", "mslxdfree");
+  return process.env.MSLXDFF_DAEMON_DIR || join(os.homedir(), ".config", "mslxdff");
 }
 
 export function pidFile() {
@@ -18,16 +18,16 @@ export function logFile() {
 
 export function startDaemon(args = []) {
   const here = fileURLToPath(import.meta.url);
-  const entry = here.endsWith("bin/mslxdfree.js")
+  const entry = here.endsWith("bin/mslxdff.js")
     ? here
-    : join(dirname(here), "..", "bin", "mslxdfree.js");
+    : join(dirname(here), "..", "bin", "mslxdff.js");
   const dir = daemonDir();
   mkdirSync(dir, { recursive: true });
   const logFd = openSync(logFile(), "a", 0o600);
   const child = spawn(process.execPath, [entry, ...args, "--daemon"], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    env: { ...process.env, MSLXDFREE_DAEMON: "1" },
+    env: { ...process.env, MSLXDFF_DAEMON: "1" },
   });
   child.unref();
   return child.pid;

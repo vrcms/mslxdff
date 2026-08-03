@@ -3,9 +3,9 @@
 The proxy requires a bearer token on `/v1/*` so an accidentally-exposed port
 isn't an open relay. There is no account system: the token is a random
 `crypto` 32-byte value (hex), generated once on first run, persisted to a
-state file (default `~/.config/mslxdfree/state.json`, `0600`, path overridable
-via `MSLXDFREE_STATE_FILE`), and printed to stdout on creation. Rotate with
-`mslxdfree -refresh-token`, which regenerates, rewrites the file, prints the
+state file (default `~/.config/mslxdff/state.json`, `0600`, path overridable
+via `MSLXDFF_STATE_FILE`), and printed to stdout on creation. Rotate with
+`mslxdff -refresh-token`, which regenerates, rewrites the file, prints the
 new token, and exits (does not start the server).
 
 Auth is enforced with a constant-time string compare on

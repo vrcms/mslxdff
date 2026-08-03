@@ -1,4 +1,4 @@
-# mslxdfree Context
+# mslxdff Context
 
 A standalone, private, zero-config OpenAI-compatible proxy whose only job is forwarding requests to the opencode.ai free Zen gateway, handling model listing and thinking mode.
 
@@ -29,7 +29,7 @@ Relaying a request body or SSE chunk to the client without rewriting its fields,
 _Avoid_: translation, mapping, transformation
 
 **Bearer token 访问令牌**:
-A random 32-byte hex secret stored in the state file (default `~/.config/mslxdfree/state.json`) that clients must send as `Authorization: Bearer <token>` on `/v1/*`. Generated on first run, rotated with `-refresh-token`. See ADR-0004.
+A random 32-byte hex secret stored in the state file (default `~/.config/mslxdff/state.json`) that clients must send as `Authorization: Bearer <token>` on `/v1/*`. Generated on first run, rotated with `-refresh-token`. See ADR-0004.
 _Avoid_: API key, auth provider, account token
 
 **Zero-state 无状态**:

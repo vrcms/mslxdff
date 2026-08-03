@@ -7,7 +7,7 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 
 - **Reference repo**: `/root/9router` (git tag `v0.5.45`). Original implementation and request chains
   are defined there. Never guess behavior from memory — look it up in `/root/9router` when in doubt.
-- `/root/mslxdfree` currently has **no code yet** — only `CLAUDE.md` + this file. A skeleton
+- `/root/mslxdff` currently has **no code yet** — only `CLAUDE.md` + this file. A skeleton
   layout (server, `/v1/*` routes, models cache, SSE forwarder) is proposed in `CLAUDE.md` §5.
 
 ## Verified upstream contract (opencode.ai zen gateway)
@@ -42,4 +42,4 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 4. Stream SSE per-chunk; non-stream non-JSON passthrough.
 5. `/models` returns the filtered free model list (10-min cache).
 6. `/v1/*` requires `Authorization: Bearer <token>` (constant-time compare, `401` otherwise); `/health` is public.
-7. Token lives in the state file (default `~/.config/mslxdfree/state.json`, env `MSLXDFREE_STATE_FILE`), generated on first run, rotated via `mslxdfree -refresh-token`. See `docs/adr/0004.md`.
+7. Token lives in the state file (default `~/.config/mslxdff/state.json`, env `MSLXDFF_STATE_FILE`), generated on first run, rotated via `mslxdff -refresh-token`. See `docs/adr/0004.md`.

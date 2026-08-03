@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadToken, refreshToken } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort } from "../src/state.js";
 
 function tmpStateFile() {
-  const dir = mkdtempSync(join(tmpdir(), "mslxdfree-"));
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-"));
   return join(dir, "state.json");
 }
 
@@ -53,4 +53,28 @@ test("refreshToken writes mode 0600", async () => {
   assert.equal(statSync(file).mode & 0o777, 0o600);
   const entries = readdirSync(join(file, ".."));
   assert.equal(entries.length, 1);
+});
+
+test("setPort persists a port, getPort reads it back", async () => {
+  const file = tmpStateFile();
+  await loadToken({ file });
+  setPort(8989, { file });
+  assert.equal(getPort({ file }), 8989);
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(saved.port, 8989);
+  assert.ok(saved.token, "token must be preserved");
+});
+
+test("setPort overrides a previous port", async () => {
+  const file = tmpStateFile();
+  await loadToken({ file });
+  setPort(8989, { file });
+  setPort(8000, { file });
+  assert.equal(getPort({ file }), 8000);
+});
+
+test("getPort returns null when no port persisted", async () => {
+  const file = tmpStateFile();
+  await loadToken({ file });
+  assert.equal(getPort({ file }), null);
 });

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { startServer } from "../src/server.js";
+import { startServer, resolvePort } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken } from "../src/state.js";
-import { startDaemon, stopDaemon, writePid, pidFile, logFile } from "../src/daemon.js";
+import { loadToken, refreshToken, setPort } from "../src/state.js";
+import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid } from "../src/daemon.js";
 
 const args = process.argv.slice(2);
 
@@ -23,19 +23,43 @@ if (args.includes("-showtoken") || args.includes("--showtoken")) {
 if (args.includes("-stop") || args.includes("--stop")) {
   const { stopped, pid, reason } = stopDaemon();
   if (stopped) {
-    console.log(`mslxdfree daemon stopped (pid ${pid})`);
+    console.log(`mslxdff daemon stopped (pid ${pid})`);
   } else {
-    console.log(`mslxdfree daemon not running${reason ? ` (${reason})` : ""}`);
+    console.log(`mslxdff daemon not running${reason ? ` (${reason})` : ""}`);
+  }
+  process.exit(0);
+}
+
+// -port N: persist the port, then restart the daemon on it if one is running.
+// Skip when we ARE the daemon child (it already carries the port via args).
+const portArg = argValue("-port", "--port");
+if (portArg && !process.env.MSLXDFF_DAEMON) {
+  const port = Number(portArg);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    console.error(`invalid port: ${portArg}`);
+    process.exit(1);
+  }
+  setPort(port);
+  const daemon = readPid();
+  if (daemon) {
+    stopDaemon();
+    startDaemon(["-port", String(port)]);
+    await waitForHealth(port, 4000);
+    console.log(`mslxdff restarted on port ${port} (pid ${readPid()})`);
+    console.log(`endpoint:   http://localhost:${port}/v1`);
+  } else {
+    console.log(`port saved: ${port} (daemon not running; takes effect on next start)`);
   }
   process.exit(0);
 }
 
 if (args.includes("-d") || args.includes("--daemon")) {
-  if (!process.env.MSLXDFREE_DAEMON) {
+  if (!process.env.MSLXDFF_DAEMON) {
     // foreground: spawn the detached background instance, then wait for health
+    const port = effectivePort();
     const spawnedPid = startDaemon(args.filter((a) => a !== "-d" && a !== "--daemon"));
-    await waitForHealth(4000);
-    console.log(`mslxdfree daemon started (pid ${spawnedPid})`);
+    await waitForHealth(port, 4000);
+    console.log(`mslxdff daemon started (pid ${spawnedPid})`);
     console.log(`log: ${logFile()}`);
     console.log(`pid: ${pidFile()}`);
     process.exit(0);
@@ -52,20 +76,32 @@ const router = createRouter({ token, upstream, models });
 const srv = startServer({ router });
 
 await srv.ready();
-if (process.env.MSLXDFREE_DAEMON) {
+if (process.env.MSLXDFF_DAEMON) {
   writePid(process.pid);
 }
 const addr = srv.server.address();
 const host = addr.address === "0.0.0.0" || addr.address === "::" ? "localhost" : addr.address;
-console.log(`mslxdfree listening on http://${host}:${addr.port}`);
+console.log(`mslxdff listening on http://${host}:${addr.port}`);
 if (created) {
   console.log(`auth token: ${token}`);
 }
 console.log(`endpoint:   http://${host}:${addr.port}/v1`);
 
-async function waitForHealth(timeoutMs) {
+function argValue(...names) {
+  for (let i = 0; i < args.length; i++) {
+    if (names.includes(args[i])) return args[i + 1];
+  }
+  return null;
+}
+
+function effectivePort() {
+  const arg = argValue("-port", "--port");
+  if (arg) return Number(arg);
+  return resolvePort();
+}
+
+async function waitForHealth(port, timeoutMs) {
   const start = Date.now();
-  const port = Number(process.env.PORT) || 8080;
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/health`);
