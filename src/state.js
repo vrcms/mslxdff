@@ -15,11 +15,13 @@ export function generateToken() {
 export async function loadToken({ file = defaultStateFile() } = {}) {
   try {
     const saved = JSON.parse(readFileSync(file, "utf8"));
-    if (typeof saved.token === "string" && saved.token.length > 0) return saved.token;
+    if (typeof saved.token === "string" && saved.token.length > 0) {
+      return { token: saved.token, created: false };
+    }
   } catch {
     // missing or unreadable → generate fresh below
   }
-  return writeToken(file);
+  return { token: writeToken(file), created: true };
 }
 
 export async function refreshToken({ file = defaultStateFile() } = {}) {

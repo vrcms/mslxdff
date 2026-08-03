@@ -1,5 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { injectReasoningContent, normalizeModel } from "./reasoning.js";
+
+export const errMsg = (err) => String(err?.message || err);
 
 export function createRouter({ token, upstream, models }) {
   return async function router(req, res) {
@@ -23,9 +25,8 @@ function authorized(req, token) {
   const header = req.headers["authorization"] || "";
   const match = /^Bearer (.+)$/.exec(header);
   if (!match) return false;
-  const provided = match[1];
-  if (provided.length !== token.length) return false;
-  return timingSafeEqual(Buffer.from(provided), Buffer.from(token));
+  const digests = (s) => createHash("sha256").update(s).digest();
+  return timingSafeEqual(digests(match[1]), digests(token));
 }
 
 function json(res, status, body) {
@@ -77,7 +78,7 @@ const ROUTES = [
       try {
         upRes = await upstream.chat(forwarded);
       } catch (err) {
-        return json(res, 502, { error: String(err?.message || err) });
+        return json(res, 502, { error: errMsg(err) });
       }
 
       const contentType = upRes.headers.get("content-type") || "";
@@ -117,7 +118,7 @@ const ROUTES = [
         const data = await models.get();
         json(res, 200, data);
       } catch (err) {
-        json(res, 502, { error: String(err?.message || err) });
+        json(res, 502, { error: errMsg(err) });
       }
     },
   },

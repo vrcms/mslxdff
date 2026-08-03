@@ -18,7 +18,8 @@ test("generateToken returns a 64-char hex secret", async () => {
 
 test("first load persists a token to a 0600 state file and returns it", async () => {
   const file = tmpStateFile();
-  const token = await loadToken({ file });
+  const { token, created } = await loadToken({ file });
+  assert.equal(created, true);
   assert.match(token, /^[0-9a-f]{64}$/);
   const stat = statSync(file);
   assert.equal(stat.mode & 0o777, 0o600);
@@ -27,21 +28,23 @@ test("first load persists a token to a 0600 state file and returns it", async ()
   assert.ok(saved.createdAt);
 });
 
-test("second load reuses the persisted token", async () => {
+test("second load reuses the persisted token and reports not-created", async () => {
   const file = tmpStateFile();
   const first = await loadToken({ file });
-  const second = await loadToken({ file });
-  assert.equal(second, first);
+  const { token: second, created } = await loadToken({ file });
+  assert.equal(second, first.token);
+  assert.equal(created, false);
 });
 
 test("refreshToken rotates the persisted token", async () => {
   const file = tmpStateFile();
   const old = await loadToken({ file });
   const fresh = await refreshToken({ file });
-  assert.notEqual(fresh, old);
+  assert.notEqual(fresh, old.token);
   const saved = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(saved.token, fresh);
-  assert.equal(await loadToken({ file }), fresh);
+  const { token } = await loadToken({ file });
+  assert.equal(token, fresh);
 });
 
 test("refreshToken writes mode 0600", async () => {

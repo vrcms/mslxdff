@@ -32,7 +32,7 @@ test("client posts to upstream with required headers", async () => {
   });
   try {
     const client = createUpstreamClient({ baseUrl: urlOf(srv) });
-    const res = await client.chat({ model: "deepseek-v4-flash-free", messages: [] }, false);
+    const res = await client.chat({ model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
     assert.equal(seen.headers["x-opencode-client"], "desktop");
     assert.equal(seen.headers["authorization"], "Bearer public");
@@ -52,7 +52,7 @@ test("client honors UPSTREAM_AUTH_TOKEN override", async () => {
   });
   try {
     const client = createUpstreamClient({ baseUrl: urlOf(srv), authToken: "sekret" });
-    await client.chat({}, false);
+    await client.chat({});
     assert.equal(seen.authorization, "Bearer sekret");
   } finally {
     await closeSrv(srv);
@@ -73,7 +73,7 @@ test("client retries 429 with backoff up to the configured attempts", async () =
   });
   try {
     const client = createUpstreamClient({ baseUrl: urlOf(srv), retry: { 429: { attempts: 1, delayMs: 1 } } });
-    const res = await client.chat({}, false);
+    const res = await client.chat({});
     assert.equal(res.status, 200);
     assert.equal(calls, 2);
   } finally {
@@ -90,7 +90,7 @@ test("client does not retry 400", async () => {
   });
   try {
     const client = createUpstreamClient({ baseUrl: urlOf(srv), retry: { 429: { attempts: 3, delayMs: 1 } } });
-    const res = await client.chat({}, false);
+    const res = await client.chat({});
     assert.equal(res.status, 400);
     assert.equal(calls, 1);
   } finally {
@@ -107,8 +107,23 @@ test("connect timeout aborts a slow upstream", async () => {
   });
   try {
     const client = createUpstreamClient({ baseUrl: urlOf(srv), connectTimeoutMs: 50, retry: {} });
-    await assert.rejects(() => client.chat({}, false), /timed out|abort/i);
+    await assert.rejects(() => client.chat({}), /timed out|abort/i);
   } finally {
     await closeSrv(srv);
   }
+});
+
+test("network failure is retried per retry.network then rethrown", async () => {
+  let calls = 0;
+  const neverWorks = () => {
+    calls++;
+    return Promise.reject(new Error("ECONNRESET"));
+  };
+  const client = createUpstreamClient({
+    baseUrl: "http://127.0.0.1:1",
+    retry: { network: { attempts: 2, delayMs: 1 } },
+    fetchImpl: neverWorks,
+  });
+  await assert.rejects(() => client.chat({}), /ECONNRESET/);
+  assert.equal(calls, 3); // initial + 2 retries
 });

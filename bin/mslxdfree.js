@@ -13,7 +13,7 @@ if (args.includes("-refresh-token") || args.includes("--refresh-token")) {
   process.exit(0);
 }
 
-const token = await loadToken();
+const { token, created } = await loadToken();
 const upstream = createUpstreamClient({});
 const baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
 const models = createModelsService({ baseUrl, headers: upstream.headers });
@@ -25,5 +25,7 @@ await srv.ready();
 const addr = srv.server.address();
 const host = addr.address === "0.0.0.0" || addr.address === "::" ? "localhost" : addr.address;
 console.log(`mslxdfree listening on http://${host}:${addr.port}`);
-console.log(`auth token: ${token}`);
+if (created) {
+  console.log(`auth token: ${token}`);
+}
 console.log(`endpoint:   http://${host}:${addr.port}/v1`);

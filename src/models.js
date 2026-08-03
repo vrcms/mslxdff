@@ -49,14 +49,44 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS } =
   return { get };
 }
 
-async function fetchUpstreamModels({ baseUrl, headers }) {
-  const res = await fetch(`${baseUrl}/zen/v1/models`, { headers });
-  if (!res.ok) throw new Error(`models fetch failed: HTTP ${res.status}`);
-  const json = await res.json().catch(() => ({}));
-  const raw = Array.isArray(json) ? json : json.data ?? json.models ?? [];
-  const free = filterFreeModels(raw);
-  return {
-    object: "list",
-    data: free,
-  };
+async function fetchUpstreamModels({ baseUrl, headers, connectTimeoutMs = 30_000 }) {
+  const url = `${baseUrl}/zen/v1/models`;
+  for (let attempt = 0; ; attempt++) {
+    const res = await attemptFetch(url, headers, connectTimeoutMs);
+    if (res instanceof Error) {
+      if (attempt < NETWORK_RETRIES) continue;
+      throw res;
+    }
+    if (isRetryable(res.status) && attempt < STATUS_RETRIES) {
+      await sleep(2000);
+      continue;
+    }
+    if (!res.ok) throw new Error(`models fetch failed: HTTP ${res.status}`);
+    const json = await res.json().catch(() => ({}));
+    const raw = Array.isArray(json) ? json : json.data ?? json.models ?? [];
+    return { object: "list", data: filterFreeModels(raw) };
+  }
 }
+
+async function attemptFetch(url, headers, connectTimeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
+  try {
+    return await fetch(url, { headers, signal: controller.signal });
+  } catch (err) {
+    return err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRetryable(status) {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+const NETWORK_RETRIES = 2;
+const STATUS_RETRIES = 2;
