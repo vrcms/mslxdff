@@ -31,6 +31,12 @@ Rotate the token at any time (prints the new token, does not start the server):
 mslxdfree -refresh-token
 ```
 
+Show the current token at any time (does not start the server; creates one on first use):
+
+```
+mslxdfree -showtoken
+```
+
 ## Client configuration
 
 Point any OpenAI-compatible client at the endpoint with the token:
