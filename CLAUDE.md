@@ -9,6 +9,22 @@
 
 ---
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as markdown under `.scratch/<feature>/` (local markdown tracker — no git remote). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles map 1:1 to label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) stored as `Status:` lines in issue files. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+---
+
 ## 1. 功能本质（一句话）
 
 OpenCode Free 是 9Router 里的一个 **零配置免费 provider**：无需任何凭据，把请求带上
