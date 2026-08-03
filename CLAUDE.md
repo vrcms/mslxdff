@@ -23,6 +23,9 @@ Five canonical roles map 1:1 to label strings (`needs-triage`, `needs-info`, `re
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+Key domain terms (glossary): `CONTEXT.md` — Zen upstream, oc/ 前缀, reasoning 注入, free model, passthrough, zero-state.
+Key decisions (ADRs): `docs/adr/0001` (reasoning placeholder injection), `0002` (models free filter + big-pickle whitelist), `0003` (zero-state no-auth).
+
 ---
 
 ## 1. 功能本质（一句话）
