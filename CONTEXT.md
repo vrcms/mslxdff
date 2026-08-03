@@ -28,6 +28,10 @@ _Avoid_: free tier, free quota (that is an upstream rate quirk, not a model prop
 Relaying a request body or SSE chunk to the client without rewriting its fields, preserving `usage`, `cost`, `finish_reason`, and `[DONE]` as received.
 _Avoid_: translation, mapping, transformation
 
+**Bearer token 访问令牌**:
+A random 32-byte hex secret stored in the state file (default `~/.config/mslxdfree/state.json`) that clients must send as `Authorization: Bearer <token>` on `/v1/*`. Generated on first run, rotated with `-refresh-token`. See ADR-0004.
+_Avoid_: API key, auth provider, account token
+
 **Zero-state 无状态**:
-The proxy keeps no authentication, no database, no token store, and no persisted cache — everything is per-process memory with at most an in-memory models cache. It is a local open proxy by design.
-_Avoid_: auth, DB, session (explicit non-features, see ADR-0003)
+The proxy keeps no database, no account rotation, no cloud sync, and no persisted cache — everything is per-process memory at most. The single exception is the bearer token in the state file. It is a local proxy by design.
+_Avoid_: DB, sessions, oauth, cloud sync (explicit non-features, see ADR-0003)

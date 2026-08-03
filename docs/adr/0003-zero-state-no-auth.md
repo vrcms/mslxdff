@@ -1,11 +1,10 @@
-# ADR-0003: Zero-state, no-auth, no-DB local proxy
+# ADR-0003: Zero-state, no-DB, no-account local proxy
 
-By design this proxy holds no authentication, no database, no token store,
-and no persisted state — a deliberately local, open OpenAI-format endpoint
-(`Authorization: Bearer public` is a constant passthrough, validated nowhere).
-The only state kept is an in-memory, process-local models cache.
+Status: partially superseded by [ADR-0004](./0004-bearer-token.md) — the
+no-auth clause below is replaced; the zero-DB / no-account / no-cloud principles
+stand.
 
-9Router's surrounding feature set (oauth, account rotation, cloud sync,
-token saver) is out of scope on purpose: the strip-down exists to do exactly
-one thing, and adding an auth layer would require the very provisioning DB we
-are explicitly cut in this stripped project. See also `CLAUDE.md` §6.
+By design this proxy holds no database, no token store, no account rotation,
+and no cloud sync. A single static bearer token is the only credential, kept
+in a 0600 state file (see ADR-0004); everything else is stateless per-process
+memory at most.

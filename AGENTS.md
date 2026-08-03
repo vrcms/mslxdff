@@ -41,3 +41,5 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 3. reasoning_content injection before send (all-deepseek / tool-tiered-kimi).
 4. Stream SSE per-chunk; non-stream non-JSON passthrough.
 5. `/models` returns the filtered free model list (10-min cache).
+6. `/v1/*` requires `Authorization: Bearer <token>` (constant-time compare, `401` otherwise); `/health` is public.
+7. Token lives in the state file (default `~/.config/mslxdfree/state.json`, env `MSLXDFREE_STATE_FILE`), generated on first run, rotated via `mslxdfree -refresh-token`. See `docs/adr/0004.md`.

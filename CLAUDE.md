@@ -24,7 +24,7 @@ Five canonical roles map 1:1 to label strings (`needs-triage`, `needs-info`, `re
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 Key domain terms (glossary): `CONTEXT.md` — Zen upstream, oc/ 前缀, reasoning 注入, free model, passthrough, zero-state.
-Key decisions (ADRs): `docs/adr/0001` (reasoning placeholder injection), `0002` (models free filter + big-pickle whitelist), `0003` (zero-state no-auth).
+Key decisions (ADRs): `docs/adr/0001` (reasoning placeholder injection), `0002` (models free filter + big-pickle whitelist), `0003` (zero-state no-DB), `0004` (single bearer token).
 
 ---
 
@@ -246,7 +246,7 @@ mslxdfree/
 
 ## 6. 已知陷阱 / 注意
 - OpenCode Free 是**公共免费额度**，可能限流/不稳定 → 预留可配超时与失败重试（429 退避）。
-- 不要实现 oauth/token/云同步/工单 DB —— 那不是本功能职责。
+- 不要实现账户体系/DB/云同步/工单 DB —— 那不是本功能职责。唯一凭据是自建的 Bearer token（见 `docs/adr/0004.md`，首建 + `-refresh-token` 轮换）。
 - `Accept: text/event-stream` 对非流式也带上无影响（上游忽略）。
 - 上游 models 结构 `{ object:"list", data:[…] }`（OpenAI 风格），不是裸数组；route 里的取值顺序 `data ?? models ?? json` 保留这个鲁棒性。
 - `big-pickle` 无 `-free` 后缀，必须白名单，否则丢模型。
