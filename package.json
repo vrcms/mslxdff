@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "Standalone OpenCode Free proxy — OpenAI-compatible /v1 gateway to opencode.ai zen (free models)",
   "type": "module",
-  "private": true,
   "bin": {
     "mslxdfree": "./bin/mslxdfree.js"
   },
@@ -14,5 +13,17 @@
   "engines": {
     "node": ">=20"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "openai",
+    "proxy",
+    "free",
+    "zen"
+  ],
   "license": "MIT"
 }

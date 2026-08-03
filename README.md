@@ -25,16 +25,20 @@ auth token: 9b5de021e914...
 endpoint:   http://localhost:8080/v1
 ```
 
-Rotate the token at any time (prints the new token, does not start the server):
+### Daemon (background, stays resident)
 
 ```
-mslxdfree -refresh-token
+mslxdfree -d        # start detached background daemon
+mslxdfree -stop     # stop it
 ```
 
-Show the current token at any time (does not start the server; creates one on first use):
+Logs go to `~/.config/mslxdfree/daemon.log`, the daemon pid to `daemon.pid` (both overridable via `MSLXDFREE_DAEMON_DIR`). The daemon keeps running after your shell exits.
+
+### Token
 
 ```
-mslxdfree -showtoken
+mslxdfree -showtoken      # print the current token (creates one on first use)
+mslxdfree -refresh-token  # rotate it (prints the new token, does not start the server)
 ```
 
 ## Client configuration
@@ -60,6 +64,7 @@ $ curl -H "Authorization: Bearer <token>" http://localhost:8080/v1/models
 |---|---|---|
 | `PORT` | `8080` | listen port |
 | `MSLXDFREE_STATE_FILE` | `~/.config/mslxdfree/state.json` | token state file (mode 0600) |
+| `MSLXDFREE_DAEMON_DIR` | `~/.config/mslxdfree` | daemon pid + log directory |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | upstream base |
 | `UPSTREAM_AUTH_TOKEN` | `public` | upstream `Authorization: Bearer <…>` value |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `30000` | upstream connect timeout |
