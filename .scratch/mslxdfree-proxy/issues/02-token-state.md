@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Token = 32 random bytes, hex
 - [ ] State file default path + `MSLXDFREE_STATE_FILE` override

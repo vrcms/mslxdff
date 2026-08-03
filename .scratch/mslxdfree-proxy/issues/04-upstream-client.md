@@ -4,7 +4,7 @@
 
 **Blocked by:** None — upstream caller, depends only on Node fetch.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Builds upstream URL + required headers
 - [ ] POST passthrough with injected body

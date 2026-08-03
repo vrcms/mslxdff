@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02, 03, 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] `401` + `WWW-Authenticate` on missing/wrong token
 - [ ] Streaming body relays SSE chunks verbatim (`finish_reason`, `[DONE]`)

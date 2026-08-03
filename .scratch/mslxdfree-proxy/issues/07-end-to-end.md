@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02, 03, 04, 05, 06
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Full test suite green (node:test, no network in tests)
 - [ ] README covers CLI, token flow, endpoints, env vars

@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] `node:http` server binds to `PORT`, default 8080
 - [ ] `GET /health` → 200 `{"status":"ok"}`, public

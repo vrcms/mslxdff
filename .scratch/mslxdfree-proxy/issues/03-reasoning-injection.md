@@ -4,7 +4,7 @@
 
 **Blocked by:** None — pure functions, can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] deepseek assistant messages get `reasoning_content: " "`
 - [ ] kimi-* scoped only to assistant messages with tool_calls

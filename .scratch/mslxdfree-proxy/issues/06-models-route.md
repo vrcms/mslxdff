@@ -4,7 +4,7 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] `-free` suffix or `big-pickle` included; paid models excluded
 - [ ] `{object:"list",data:[...]}` response shape
