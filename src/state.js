@@ -47,6 +47,61 @@ export function saveModelErrors(errors, { file = defaultStateFile() } = {}) {
   return errors;
 }
 
+export function loadPeers({ file = defaultStateFile() } = {}) {
+  const peers = readState(file).peers;
+  return Array.isArray(peers) ? peers : [];
+}
+
+export function savePeers(peers, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, peers });
+  return peers;
+}
+
+export function loadPeerErrors({ file = defaultStateFile() } = {}) {
+  const errors = readState(file).peerErrors;
+  return errors && typeof errors === "object" && !Array.isArray(errors) ? errors : {};
+}
+
+export function savePeerErrors(errors, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, peerErrors: errors });
+  return errors;
+}
+
+export function loadGroups({ file = defaultStateFile() } = {}) {
+  const groups = readState(file).groups;
+  return groups && typeof groups === "object" && !Array.isArray(groups) ? groups : {};
+}
+
+export function loadGroupsJoined({ file = defaultStateFile() } = {}) {
+  const joined = readState(file).groupsJoined;
+  return Array.isArray(joined) ? joined : [];
+}
+
+export function saveGroupsJoined(joined, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, groupsJoined: joined });
+  return joined;
+}
+
+export function loadBans({ file = defaultStateFile() } = {}) {
+  const bans = readState(file).bans;
+  return bans && typeof bans === "object" && !Array.isArray(bans) ? bans : {};
+}
+
+export function saveBans(bans, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, bans });
+  return bans;
+}
+
+export function saveGroups(groups, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, groups });
+  return groups;
+}
+
 function readState(file) {
   try {
     const saved = JSON.parse(readFileSync(file, "utf8"));

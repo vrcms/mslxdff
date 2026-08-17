@@ -35,3 +35,19 @@ _Avoid_: API key, auth provider, account token
 **Zero-state 无状态**:
 The proxy keeps no database, no account rotation, no cloud sync, and no persisted cache — everything is per-process memory at most. The single exception is the bearer token in the state file. It is a local proxy by design.
 _Avoid_: DB, sessions, oauth, cloud sync (explicit non-features, see ADR-0003)
+
+**Peer 对等节点**:
+Another reachable mslxdff instance that this instance can forward chat requests to when the local upstream fails. Peers are configured via named groups (`-group create` / `-addtogroup`): the group leader keeps the member map, and each member periodically re-registers and rebuilds its local peer list (persisted in the state file). The local instance always tries itself first.
+_Avoid_: node, remote proxy, upstream alias
+
+**Model lock 模型锁定**:
+A forwarding header (`x-mslxdff-model-lock`) that tells a receiving peer to use exactly the named model — the peer must not re-select or fall back to another model for that request. Keeps the same model across machines.
+_Avoid_: model pinning, model forcing, alias mapping
+
+**Hop 转发跳数**:
+The forwarding depth counter (`x-mslxdff-hops`) attached to peer-forwarded requests, bounded by `maxHops` (default 3) to prevent forwarding loops. Each peer that receives a request with hops ≥ max stops forwarding further.
+_Avoid_: TTL, depth, recursion limit
+
+**Peer cooldown 节点冷却**:
+A time window (default 30s, `MSLXDFF_PEER_COOLDOWN_MS`) during which a peer that just failed a chat request is skipped, so the mesh keeps trying other peers instead of hammering a down one.
+_Avoid_: peer ban, peer quarantine
