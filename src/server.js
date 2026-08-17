@@ -31,6 +31,7 @@ export function resolvePort() {
   const persisted = getPort();
   if (persisted) return persisted;
   const env = Number(process.env.PORT);
-  if (Number.isInteger(env) && env > 0) return env;
+  // 0 = OS-assigned ephemeral port (valid; used by tests/containers)
+  if (Number.isInteger(env) && env >= 0) return env;
   return DEFAULT_PORT;
 }

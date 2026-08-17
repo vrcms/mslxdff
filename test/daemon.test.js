@@ -8,6 +8,7 @@ import { pidFile, logFile, writePid, readPid, stopDaemon, startDaemon } from "..
 const DIR = mkdtempSync(join(tmpdir(), "mslxdff-daemon-"));
 
 process.env.MSLXDFF_DAEMON_DIR = DIR;
+process.env.MSLXDFF_STATE_FILE = join(DIR, "state.json");
 
 test("pidFile and logFile live under daemon dir", () => {
   assert.equal(pidFile(), join(DIR, "daemon.pid"));
