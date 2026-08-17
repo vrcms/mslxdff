@@ -16,7 +16,7 @@ test("generateToken returns a 64-char hex secret", async () => {
   assert.match(token, /^[0-9a-f]{64}$/);
 });
 
-test("first load persists a token to a 0600 state file and returns it", async () => {
+test("first load persists a token to a 0600 state file and returns it", { skip: process.platform === "win32" && "POSIX permission bits are meaningless on Windows" }, async () => {
   const file = tmpStateFile();
   const { token, created } = await loadToken({ file });
   assert.equal(created, true);
@@ -47,7 +47,7 @@ test("refreshToken rotates the persisted token", async () => {
   assert.equal(token, fresh);
 });
 
-test("refreshToken writes mode 0600", async () => {
+test("refreshToken writes mode 0600", { skip: process.platform === "win32" && "POSIX permission bits are meaningless on Windows" }, async () => {
   const file = tmpStateFile();
   await refreshToken({ file });
   assert.equal(statSync(file).mode & 0o777, 0o600);

@@ -85,10 +85,15 @@ export function createAutoSelector({
     await persist({ ...lastErrorAt });
   }
 
+  function isCooling(id) {
+    return inCooldown(id, lastErrorAt, now(), cooldownMs);
+  }
+
   return {
     candidates,
     candidatesFor,
     recordError,
+    isCooling,
     errors: () => ({ ...lastErrorAt }),
   };
 }

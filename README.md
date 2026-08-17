@@ -83,7 +83,25 @@ last error:
 mslxdff -update    # install the latest published version; restarts a running daemon
 ```
 
-### Token
+### Groups (join several machines by name)
+
+Run mslxdff on several machines (e.g. locally + a VPS) and join them into a named group — **the group name is the password**. When the local upstream fails for a model, the request is forwarded to a group member running the **same model** — your task keeps the model it asked for, just served from another machine with its own upstream quota.
+
+```
+# on the leader machine B (must be reachable from the others):
+mslxdff -creategroup mygroup        # group name IS the password, no address needed
+
+# on machine A (and C, D, …) — give the leader's host; your own address is auto-registered:
+mslxdff -addtogroup <B-ip> mygroup
+```
+
+- Anyone who knows the group name can join — pick something unguessable, like `mygroup@mslxd-7f3k`. The leader's first joiner seeds the leader's own entry from the address it connects from, so `-creategroup` takes no address argument (default port 8989; `-addtogroup` also accepts `host:port`).
+- Joining registers your node with the leader (membership is keyed by your bearer token) and immediately pulls the member list into local failover targets.
+- Membership is persisted and re-synced on every start + every `MSLXDFF_GROUP_SYNC_MS` (default 60s), so a newly joined machine becomes a failover target on all nodes automatically.
+- Local-first: every request tries the local upstream before any group member. On local failure, members are tried round-robin for the same model; a member that just failed is skipped for `MSLXDFF_PEER_COOLDOWN_MS` (default 30s).
+- Forwarded requests carry a hop limit (`MSLXDFF_MAX_HOPS`, default 3) to prevent forwarding loops, and a model-lock so the member doesn't switch models. A→B→C chaining works as long as each member knows the others.
+- Wrong group names (or wrong tokens) are counted per source IP: `MSLXDFF_BAN_THRESHOLD` (default 5) failures ban the IP for `MSLXDFF_BAN_WINDOW_MS` (default 48h). `mslxdff -resetban [ip]` clears bans (all, or one IP).
+- `mslxdff -group sync` pulls once manually; `mslxdff -group leave <name>` detaches from a group and clears its members; `mslxdff -group list` shows groups. See `docs/adr/0005-peer-mesh.md`.
 
 ```
 mslxdff -showtoken      # print the current token (creates one on first use)
@@ -120,6 +138,11 @@ $ curl -H "Authorization: Bearer <token>" http://localhost:8989/v1/models
 | `LOG_LEVEL` | `info` | (reserved) |
 | `MODELS_REFRESH_MS` | `7200000` | background model-list refresh interval (2h) |
 | `MSLXDFF_MODEL_COOLDOWN_MS` | `60000` | fallback cooldown after a model error |
+| `MSLXDFF_PEER_COOLDOWN_MS` | `30000` | peer failover cooldown |
+| `MSLXDFF_GROUP_SYNC_MS` | `60000` | group membership sync interval |
+| `MSLXDFF_MAX_HOPS` | `3` | max peer-forwarding depth |
+| `MSLXDFF_BAN_THRESHOLD` | `5` | failed joins before an IP is banned |
+| `MSLXDFF_BAN_WINDOW_MS` | `172800000` | ban duration after too many join failures (48h) |
 
 ## Clients
 
