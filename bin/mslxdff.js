@@ -20,6 +20,7 @@ const logs = { appendCall, appendError, appendEvent };
 
 const args = process.argv.slice(2);
 const VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
+const HEALTH_TIMEOUT_MS = 4000;
 
 if (args.includes("-help") || args.includes("--help") || args.includes("-h")) {
   printHelp();
@@ -288,7 +289,6 @@ function errMsg(err) { return String(err?.message || err); }
 
 // Probe a member's health endpoint concurrently (v1/health preferred,
 // falling back to /health). Returns { id, url, ms, rank } or { id, url, fail }.
-const HEALTH_TIMEOUT_MS = 4000;
 async function probeHealth({ id, url } = {}) {
   if (!url) return { id, url, fail: "no url", rank: 3 };
   const base = String(url).replace(/\/+$/, "");
