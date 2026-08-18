@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFileSync, existsSync, statSync, watch, openSync } from "node:fs";
+import { readFileSync, existsSync, statSync, watch, openSync, closeSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
@@ -685,7 +685,8 @@ async function liveDebug() {
   // ensure the event file exists so watch() doesn't fail on a fresh daemon dir
   if (!existsSync(file)) {
     try {
-      openSync(file, "a").close();
+      mkdirSync(dirname(file), { recursive: true });
+      closeSync(openSync(file, "a"));
     } catch {
       console.error(`cannot create event file: ${file}`);
       process.exit(1);
