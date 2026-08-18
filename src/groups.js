@@ -91,6 +91,35 @@ export function listGroups({ file } = {}) {
   return loadGroups(file ? { file } : {});
 }
 
+// Leader side: remove a member by exact url (a member leaving the group).
+export function removeGroupMember(name, { url, file } = {}) {
+  const groups = loadGroups(file ? { file } : {});
+  const group = groups[name];
+  if (!group) return null;
+  if (!url) throw new Error("member url is required");
+  for (const [id, m] of Object.entries(group.members || {})) {
+    if (m.url === String(url).replace(/\/+$/, "")) {
+      delete group.members[id];
+      saveGroups(groups, file ? { file } : {});
+      return { removed: { id, url: m.url } };
+    }
+  }
+  return null;
+}
+
+// Leader side: disband a group entirely — deletes the group and all its members.
+// Used by -leavegroup on the leader node. Also returns the member list so the
+// caller can notify members before (or after) the group is gone.
+export function deleteGroup(name, { file } = {}) {
+  const groups = loadGroups(file ? { file } : {});
+  const group = groups[name];
+  if (!group) return null;
+  const members = group.members || {};
+  delete groups[name];
+  saveGroups(groups, file ? { file } : {});
+  return { members };
+}
+
 export function createGroupsService({ file } = {}) {
   const opts = (o = {}) => (file ? { ...o, file } : o);
   return {
@@ -99,6 +128,8 @@ export function createGroupsService({ file } = {}) {
     upsertMember: (name, o = {}) => upsertMember(name, opts(o)),
     listMembers: (name, o = {}) => listGroupMembers(name, opts(o)),
     membersForToken: (name, token) => membersForToken(name, token, opts()),
+    removeMember: (name, o = {}) => removeGroupMember(name, opts(o)),
+    delete: (name, o = {}) => deleteGroup(name, opts(o)),
     list: () => listGroups(opts()),
   };
 }
