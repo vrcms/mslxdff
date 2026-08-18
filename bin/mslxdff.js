@@ -758,7 +758,7 @@ Usage:
   mslxdff -help                    show this help
 
 Environment:
-  PORT                    listen port (default 8989)
+  MSLXDFF_PORT          listen port (default 8989; use mslxdff -port N to persist)
   MSLXDFF_STATE_FILE      token/port state file
   MSLXDFF_DAEMON_DIR      daemon pid/log/models dir
   UPSTREAM_BASE_URL       upstream base (default https://opencode.ai)
