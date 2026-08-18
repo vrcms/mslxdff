@@ -166,6 +166,93 @@ async function forwardToPeer(peer, body, model, hops) {
   }
 }
 
+// Resolve the model a peer should serve for this request: reuse its hot-cache
+// model only when it matches the requested one; otherwise probe /v1/models/status
+// and prefer the requested model, falling back to the peer's first healthy one.
+// Returns { peer, target } or null when the peer is unusable.
+async function resolvePeerTarget(ctx, peer) {
+  const prevModel = ctx.peers.stat(peer.url)?.model;
+  const hot = ctx.peers.isHot(peer.url) && prevModel === ctx.model;
+  if (hot) return { peer, target: prevModel };
+  const healthy = await peerHealthyModels(peer);
+  if (!healthy.length) {
+    // peer unreachable or every model unhealthy — mark it and move on
+    await ctx.peers.recordError(peer.url);
+    ctx.logError(ctx.model, 0, `peer ${peer.url} has no healthy models`);
+    ctx.evt("peer-health", { peer: peer.url, healthy: [], count: 0 });
+    return null;
+  }
+  ctx.evt("peer-health", { peer: peer.url, healthy, count: healthy.length });
+  return { peer, target: healthy.includes(ctx.model) ? ctx.model : healthy[0] };
+}
+
+// Race a batch of candidates: up to PEER_RACE_LIMIT at a time, first success
+// wins. Uses ctx.model/body/hops/peers to resolve targets and forward. Retries
+// remaining candidates in subsequent batches. Returns the winning
+// { peer, target, res, latencyMs } or null when everyone failed.
+export const PEER_RACE_LIMIT = Number(process.env.MSLXDFF_PEER_RACE_LIMIT) > 0
+  ? Number(process.env.MSLXDFF_PEER_RACE_LIMIT)
+  : 3;
+
+async function racePeerCandidates(candidates, ctx) {
+  for (let i = 0; i < candidates.length; i += PEER_RACE_LIMIT) {
+    const batch = candidates.slice(i, i + PEER_RACE_LIMIT);
+    // resolve targets for this batch first (may probe), then fire them together
+    const prepared = (await Promise.all(batch.map((peer) => resolvePeerTarget(ctx, peer)))).filter(Boolean);
+    if (!prepared.length) continue;
+    // fire every peer in the batch concurrently and record completion order —
+    // the first one to succeed wins the race
+    const completed = await new Promise((resolve) => {
+      const order = [];
+      const total = prepared.length;
+      for (const { peer, target } of prepared) {
+        const t0 = performance.now();
+        forwardToPeer(peer, ctx.body, target, ctx.hops).then((res) => {
+          const latencyMs = Math.round(performance.now() - t0);
+          const failed = res instanceof Error || res.status >= 400;
+          ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1 });
+          if (failed) {
+            const status = res instanceof Error ? 502 : res.status;
+            ctx.logError(ctx.model,
+              status,
+              res instanceof Error ? errMsg(res) : `peer ${status}`);
+            ctx.evt("peer-error", {
+              peer: peer.url,
+              model: target,
+              status,
+              message: res instanceof Error ? errMsg(res) : null,
+            });
+            order.push({ ok: false, peer, target, res, status });
+          } else {
+            order.push({ ok: true, peer, target, res, latencyMs });
+          }
+          if (order.length === total) resolve(order);
+        });
+      }
+    });
+    const winner = completed.find((o) => o.ok);
+    if (winner) {
+      // every other responder also gets its memory cleared and its stats warmed
+      // so it becomes a candidate next time too
+      for (const o of completed) {
+        if (o === winner) continue;
+        if (!o.ok) {
+          await ctx.peers.recordError(o.peer.url);
+          await ctx.peers.recordResult(o.peer.url, { ok: false });
+        } else {
+          await ctx.peers.recordResult(o.peer.url, { ok: true, latencyMs: o.latencyMs, model: o.target });
+        }
+      }
+      return { peer: winner.peer, target: winner.target, res: winner.res, latencyMs: winner.latencyMs };
+    }
+    for (const o of completed) {
+      await ctx.peers.recordError(o.peer.url);
+      await ctx.peers.recordResult(o.peer.url, { ok: false });
+    }
+  }
+  return null;
+}
+
 const ROUTES = [
   {
     method: "GET",
@@ -213,8 +300,21 @@ const ROUTES = [
       };
       evt("request", { hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body) });
 
+      // Shared context for the peer race helpers below (each model iteration
+      // reuses it; `model` is bound per iteration call).
+      const handlerCtx = {
+        model: null,
+        body,
+        hops,
+        peers,
+        evt,
+        logError,
+        logCall,
+      };
+
       let lastErr = null;
       for (const model of order) {
+        handlerCtx.model = model;
         let upRes = null;
         const forwarded = { ...injectReasoningContent(model, body), model };
         try {
@@ -239,63 +339,20 @@ const ROUTES = [
           return relay(res, upRes, body);
         }
 
-        // local failed for this model: try peers ordered hot-first (reuse
-        // their last successful model without probing when it matches the
-        // requested model), cold peers get a health probe before the forward
+        // local failed for this model: race the peers — send the request to
+        // up to N of them in parallel, first success wins (the winner's model
+        // is remembered for the next call). If every candidate fails, retry
+        // once ordered by recovery time (earliest failure first), which
+        // favours the peer that has had the longest to come back.
         if (canForwardPeers) {
-          for (const peer of peers.ordered()) {
-            let target = null;
-            const prevModel = peers.stat(peer.url)?.model;
-            const hot = peers.isHot(peer.url) && prevModel === model;
-            if (hot) {
-              target = prevModel;
-            } else {
-              const healthy = await peerHealthyModels(peer);
-              if (!healthy.length) {
-                // peer unreachable or every model unhealthy — mark it and move on
-                await peers.recordError(peer.url);
-                logError(model, 0, `peer ${peer.url} has no healthy models`);
-                evt("peer-health", { peer: peer.url, healthy: [], count: 0 });
-                continue;
-              }
-              evt("peer-health", { peer: peer.url, healthy, count: healthy.length });
-              target = healthy.includes(model) ? model : healthy[0];
-            }
-
-            const t0 = performance.now();
-            let peerRes = await forwardToPeer(peer, body, target, hops);
-            let latencyMs = Math.round(performance.now() - t0);
-            evt("peer-forward", { peer: peer.url, model: target, hops: hops + 1 });
-            if (peerRes instanceof Error || peerRes.status >= 400) {
-              // hot-cache miss: probe this peer once for a healthy model
-              if (hot) {
-                const healthy = await peerHealthyModels(peer);
-                if (healthy.length) {
-                  target = healthy.includes(model) ? model : healthy[0];
-                  const t1 = performance.now();
-                  peerRes = await forwardToPeer(peer, body, target, hops);
-                  latencyMs = Math.round(performance.now() - t1);
-                  evt("peer-forward", { peer: peer.url, model: target, hops: hops + 1, retry: true });
-                }
-              }
-            }
-            if (peerRes instanceof Error || peerRes.status >= 400) {
-              await peers.recordError(peer.url);
-              await peers.recordResult(peer.url, { ok: false });
-              logError(model, peerRes instanceof Error ? 502 : peerRes.status,
-                peerRes instanceof Error ? errMsg(peerRes) : `peer ${peerRes.status}`);
-              evt("peer-error", {
-                peer: peer.url,
-                model: target,
-                status: peerRes instanceof Error ? 502 : peerRes.status,
-                message: peerRes instanceof Error ? errMsg(peerRes) : null,
-              });
-              continue;
-            }
-            await peers.recordResult(peer.url, { ok: true, latencyMs, model: target });
-            logCall(target, peerRes.status);
-            evt("result", { model: target, status: peerRes.status, via: "peer" });
-            return relay(res, peerRes, body);
+          const win =
+            (await racePeerCandidates(peers.ordered(), handlerCtx)) ||
+            (await racePeerCandidates(peers.orderedByLastError(), handlerCtx));
+          if (win) {
+            await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
+            logCall(win.target, win.res.status);
+            evt("result", { model: win.target, status: win.res.status, via: "peer" });
+            return relay(res, win.res, body);
           }
         }
 

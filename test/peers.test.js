@@ -104,7 +104,7 @@ test("recordResult ok warms the hot cache (EMA latency, model, reset fails)", as
   assert.equal(svc.isHot("http://a"), true);
 });
 
-test("ordered() puts hot fast peers first, cold peers last", async () => {
+test("ordered() puts hot peers first, then by earliest failure, never-failed last", async () => {
   const t = 1_000_000;
   const svc = createPeersService({
     peers: [
@@ -112,10 +112,10 @@ test("ordered() puts hot fast peers first, cold peers last", async () => {
       { name: "b", url: "http://b", token: "t" },
       { name: "c", url: "http://c", token: "t" },
     ],
-    errors: {},
+    errors: { "http://b": t - 600_000, "http://a": t - 300_000 }, // b failed earlier
     stats: {
-      "http://b": { okAt: t - 1_000, latencyMs: 50, fails: 0, model: "m" },   // hot, fast
-      "http://c": { okAt: t - 2_000, latencyMs: 400, fails: 0, model: "m" },  // hot, slow
+      "http://b": { okAt: t - 1_000, latencyMs: 400, fails: 0, model: "m" },   // hot, slow
+      "http://c": { okAt: t - 2_000, latencyMs: 50, fails: 0, model: "m" },    // hot, fast
       "http://a": { okAt: t - 10_000_000, latencyMs: 80, fails: 0, model: "m" }, // cold (expired)
     },
     now: () => t,
@@ -123,6 +123,8 @@ test("ordered() puts hot fast peers first, cold peers last", async () => {
     cooldownMs: 60_000,
   });
   const order = svc.ordered().map((p) => p.url);
+  // hot peers first (b, c order amongst hot is stable), then cold by failure
+  // recency: b failed earliest -> b before a; never-failed peers last
   assert.deepEqual(order, ["http://b", "http://c", "http://a"]);
 });
 
@@ -152,6 +154,35 @@ test("isHot expires after heatMs", async () => {
   assert.equal(svc.isHot("http://a"), true);
   t = 1_000_000 + 60_001;
   assert.equal(svc.isHot("http://a"), false);
+});
+
+test("orderedByLastError prefers the peer that failed earliest (more time to recover)", async () => {
+  const t = 1_000_000;
+  const svc = createPeersService({
+    peers: [
+      { name: "a", url: "http://a", token: "t" },
+      { name: "b", url: "http://b", token: "t" },
+      { name: "c", url: "http://c", token: "t" },
+    ],
+    errors: { "http://b": t - 600_000, "http://a": t - 300_000 }, // b failed earlier
+    stats: {},
+    now: () => t,
+    cooldownMs: 60_000,
+  });
+  // both are outside cooldown (failed >60s ago); b failed first -> b first
+  assert.deepEqual(svc.orderedByLastError().map((p) => p.url), ["http://b", "http://a", "http://c"]);
+});
+
+test("recordResult ok clears the long-lived error memory", async () => {
+  const t = 1_000_000;
+  const svc = createPeersService({
+    peers: [{ name: "a", url: "http://a", token: "t" }],
+    errors: { "http://a": t - 300_000 },
+    stats: {},
+    now: () => t,
+  });
+  await svc.recordResult("http://a", { ok: true, latencyMs: 50, model: "m-free" });
+  assert.equal(svc.errors()["http://a"], undefined, "success clears the error memory");
 });
 
 async function stubChatServer(onChat, onStatus) {
@@ -607,5 +638,127 @@ test("peer status endpoint unreachable -> peer skipped, local fallback serves", 
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
+  }
+});
+
+test("two peers race: the fast responder wins even when the slow peer also succeeds", async () => {
+  const slowHits = [];
+  const fastHits = [];
+  const slowSrv = await stubChatServer(
+    (req, res, body) => {
+      slowHits.push(JSON.parse(body).model);
+      setTimeout(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ from: "slow", model: JSON.parse(body).model }));
+      }, 250);
+    },
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
+  );
+  const fastSrv = await stubChatServer(
+    (req, res, body) => {
+      fastHits.push(JSON.parse(body).model);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ from: "fast", model: JSON.parse(body).model }));
+    },
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
+  );
+  const slowUrl = `http://127.0.0.1:${slowSrv.address().port}`;
+  const fastUrl = `http://127.0.0.1:${fastSrv.address().port}`;
+  const peers = createPeersService({
+    peers: [
+      { name: "slow", url: slowUrl, token: "t" },
+      { name: "fast", url: fastUrl, token: "t" },
+    ],
+    errors: {},
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.from, "fast", "fast responder wins the race");
+    // both peers were hit concurrently (both were prepared and forwarded)
+    assert.equal(slowHits.length, 1, "slow peer was also raced");
+    assert.equal(fastHits.length, 1, "fast peer was raced");
+    // winner remembered: fast cached with the winning model; the late-arriving
+    // slow success is also warmed so it stays a candidate next round
+    assert.equal(peers.stat(fastUrl).model, "deepseek-v4-flash-free");
+    assert.equal(peers.stat(slowUrl)?.model, "deepseek-v4-flash-free", "late slow success also warmed");
+  } finally {
+    await app.close();
+    await new Promise((r) => slowSrv.close(r));
+    await new Promise((r) => fastSrv.close(r));
+  }
+});
+
+test("all peers fail -> retry ordered by earliest error, success clears error memory", async () => {
+  let t = 1_000_000;
+  let bFail = true;
+  const slowHits = [];
+  // B failed 10 min ago, A failed 2 min ago -> B must be retried first
+  const srvB = await stubChatServer(
+    (req, res, body) => {
+      slowHits.push(JSON.parse(body).model);
+      if (bFail) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ from: "b", model: JSON.parse(body).model }));
+    },
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
+  );
+  const srvA = await stubChatServer(
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ from: "a" }));
+    },
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
+  );
+  const urlB = `http://127.0.0.1:${srvB.address().port}`;
+  const urlA = `http://127.0.0.1:${srvA.address().port}`;
+  const peers = createPeersService({
+    peers: [
+      { name: "a", url: urlA, token: "t" },
+      { name: "b", url: urlB, token: "t" },
+    ],
+    errors: { [urlB]: t - 600_000, [urlA]: t - 120_000 }, // both cooled off
+    now: () => t,
+    cooldownMs: 30_000,
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    // First race: both A and B succeed, but B is still failing -> A wins and
+    // clears its own failure memory; B keeps its failure record.
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.from, "a", "A wins the concurrent race");
+    assert.ok(peers.errors()[urlB], "B keeps its failure record (long-lived until success)");
+    assert.equal(peers.errors()[urlA], undefined, "A's failure memory cleared by its success");
+
+    // Next race: B recovers; A succeeds first again (still hot from before),
+    // but the late-arriving success from B must ALSO clear B's memory.
+    bFail = false;
+    t += 60_000; // let cooldowns pass so B is eligible again
+    await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(peers.errors()[urlB], undefined, "success clears B's error memory");
+  } finally {
+    await app.close();
+    await new Promise((r) => srvB.close(r));
+    await new Promise((r) => srvA.close(r));
   }
 });

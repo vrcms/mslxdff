@@ -91,10 +91,36 @@ export function createPeersService({
     return hot * 1_000_000_000 + latency * 1_000 + fails;
   }
 
-  // Available peers ordered for failover: hot (recent success, low latency,
-  // few failures) first, cold/unused peers last.
+  // Available peers ordered for failover: hot peers (recent success) first —
+  // the winner of the last race is reused next. Everyone else is ordered by
+  // when they last failed, earliest first: a peer that failed longer ago has
+  // had more time to recover, so it is tried before a more recent failure.
+  // Peers with no recorded error go after any that failed.
   function ordered(t = now()) {
-    return available().sort((a, b) => rankScore(a, t) - rankScore(b, t));
+    return available().sort((a, b) => {
+      const hotA = stats[a.url]?.okAt && t - stats[a.url].okAt < heatMs ? 0 : 1;
+      const hotB = stats[b.url]?.okAt && t - stats[b.url].okAt < heatMs ? 0 : 1;
+      if (hotA !== hotB) return hotA - hotB;
+      const ea = lastErrorAt[a.url];
+      const eb = lastErrorAt[b.url];
+      if (ea == null && eb == null) return 0;
+      if (ea == null) return 1; // never-failed peers go after any that failed
+      if (eb == null) return -1;
+      return ea - eb; // earliest failure first
+    });
+  }
+
+  // Available peers ordered specifically for recovery-time retry: earliest
+  // failure first (it has had the longest to come back), never-failed last.
+  function orderedByLastError(t = now()) {
+    return available().sort((a, b) => {
+      const ea = lastErrorAt[a.url];
+      const eb = lastErrorAt[b.url];
+      if (ea == null && eb == null) return 0;
+      if (ea == null) return 1; // never-failed peers go after any that failed
+      if (eb == null) return -1;
+      return ea - eb; // earliest failure first
+    });
   }
 
   let cursor = 0;
@@ -106,6 +132,9 @@ export function createPeersService({
     return avail[cursor++];
   }
 
+  // Long-lived error memory: a peer keeps its last-error timestamp until a
+  // subsequent success resets it (success clears the failure record) or the
+  // error is no longer in the persist store on next load.
   async function recordError(url) {
     if (!url) return;
     lastErrorAt[url] = now();
@@ -113,10 +142,15 @@ export function createPeersService({
   }
 
   // Outcome of a forwarded request: ok updates the hot-cache (EMA latency,
-  // last successful model); failures bump the consecutive-failure counter.
+  // last successful model) and clears the error memory; failures keep the
+  // error timestamp so the retry pass can order by recovery time.
   async function recordResult(url, { ok, latencyMs, model } = {}) {
     if (!url) return;
     if (ok) {
+      if (lastErrorAt[url] != null) {
+        delete lastErrorAt[url];
+        await persistErrors({ ...lastErrorAt });
+      }
       const prev = stats[url] || {};
       stats[url] = {
         okAt: now(),
@@ -133,5 +167,8 @@ export function createPeersService({
     await persistStats({ ...stats });
   }
 
-  return { all, add, remove, removeByGroup, isCooling, isHot, stat, ordered, available, next, recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }) };
+  return {
+    all, add, remove, removeByGroup, isCooling, isHot, stat, ordered, orderedByLastError, available, next,
+    recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
+  };
 }
