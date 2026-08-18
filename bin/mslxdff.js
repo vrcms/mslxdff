@@ -8,7 +8,7 @@ import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
 import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors } from "../src/state.js";
-import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid } from "../src/daemon.js";
+import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid, readPidVersion, isPidAlive } from "../src/daemon.js";
 import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
@@ -303,6 +303,26 @@ async function syncAllJoinedGroups({ peers, groups }) {
   return results;
 }
 
+// Upgrade-aware handling of a running daemon: keep it when it already runs
+// our version, otherwise stop it so the spawn below takes over. Cleans up
+// stale pid files (daemon died without -stop).
+function stopDaemonIfOutdated() {
+  const pid = readPid();
+  if (!pid) return;
+  if (!isPidAlive(pid)) {
+    console.log(`daemon pid ${pid} is stale (not running) — starting fresh`);
+    return;
+  }
+  const runningVersion = readPidVersion();
+  if (runningVersion === VERSION) return;
+  console.log(
+    runningVersion
+      ? `daemon running v${runningVersion} — upgrading to v${VERSION}, restarting...`
+      : `daemon version unknown — restarting with v${VERSION}...`
+  );
+  stopDaemon();
+}
+
 // -port N: persist the port, then restart the daemon on it if one is running.
 // Skip when we ARE the daemon child (it already carries the port via args).
 const portArg = argValue("-port", "--port");
@@ -330,6 +350,7 @@ if (args.includes("-d") || args.includes("--daemon")) {
   if (!process.env.MSLXDFF_DAEMON) {
     // foreground: spawn the detached background instance, then wait for health
     const port = effectivePort();
+    stopDaemonIfOutdated();
     const spawnedPid = startDaemon(args.filter((a) => a !== "-d" && a !== "--daemon"));
     await waitForHealth(port, 4000);
     console.log(`mslxdff daemon started (pid ${spawnedPid})`);
@@ -343,12 +364,14 @@ if (args.includes("-d") || args.includes("--daemon")) {
 // Bare run: show status + help when the daemon is already up; otherwise spawn it
 // as a background daemon and exit — never holds the terminal (npx-friendly).
 if (!process.env.MSLXDFF_DAEMON) {
-  if (readPid()) {
+  const pid = readPid();
+  if (pid && isPidAlive(pid) && readPidVersion() === VERSION) {
     await printStatus();
     printHelp();
     process.exit(0);
   }
   const port = effectivePort();
+  stopDaemonIfOutdated();
   const spawnedPid = startDaemon([]);
   await waitForHealth(port, 4000);
   console.log(`mslxdff v${VERSION} started as a background daemon (pid ${spawnedPid})`);
@@ -388,7 +411,7 @@ const srv = startServer({ router });
 await srv.ready();
 models.startAutoRefresh();
 if (process.env.MSLXDFF_DAEMON) {
-  writePid(process.pid);
+  writePid(process.pid, VERSION);
 }
 const addr = srv.server.address();
 const host = addr.address === "0.0.0.0" || addr.address === "::" ? "localhost" : addr.address;
