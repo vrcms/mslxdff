@@ -48,7 +48,7 @@ test("stopDaemon returns stopped:false when no pid", () => {
 });
 
 test("startDaemon spawns a detached child and stopDaemon kills it", async () => {
-  process.env.PORT = "0";
+  process.env.MSLXDFF_PORT = "0";
   const pid = startDaemon([]);
   assert.ok(pid > 0);
   // poll for the pid file to appear (child writes it after server ready)

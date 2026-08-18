@@ -33,9 +33,13 @@ export function startServer({ router, signals = true }, port = resolvePort()) {
 }
 
 export function resolvePort() {
+  // 8989 is the hard default. Port only changes via an explicit, mslxdff-owned
+  // override: the persisted `-port N` setting, or the MSLXDFF_PORT env var.
+  // Bare `PORT` is deliberately NOT read — an ssh session / wrapper script
+  // commonly injects it and would silently override the default.
   const persisted = getPort();
   if (persisted) return persisted;
-  const env = Number(process.env.PORT);
+  const env = Number(process.env.MSLXDFF_PORT);
   // 0 = OS-assigned ephemeral port (valid; used by tests/containers)
   if (Number.isInteger(env) && env >= 0) return env;
   return DEFAULT_PORT;
