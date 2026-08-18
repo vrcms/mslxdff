@@ -250,10 +250,22 @@ if (args.includes("-d") || args.includes("--daemon")) {
   // we ARE the daemon; stdout/stderr already point at the log file via startDaemon stdio
 }
 
-// Bare run: if a daemon is already running, show status + help instead of starting another.
-if (!process.env.MSLXDFF_DAEMON && readPid()) {
-  await printStatus();
-  printHelp();
+// Bare run: show status + help when the daemon is already up; otherwise spawn it
+// as a background daemon and exit — never holds the terminal (npx-friendly).
+if (!process.env.MSLXDFF_DAEMON) {
+  if (readPid()) {
+    await printStatus();
+    printHelp();
+    process.exit(0);
+  }
+  const port = effectivePort();
+  const spawnedPid = startDaemon([]);
+  await waitForHealth(port, 4000);
+  console.log(`mslxdff v${VERSION} started as a background daemon (pid ${spawnedPid})`);
+  console.log(`endpoint:   http://localhost:${port}/v1`);
+  console.log(`log:        ${logFile()}`);
+  console.log(`pid:        ${pidFile()}`);
+  console.log(`status:     run \`mslxdff\` again (or \`mslxdff -status\`)`);
   process.exit(0);
 }
 
@@ -383,7 +395,7 @@ function printHelp() {
   console.log(`mslxdff v${VERSION} — OpenCode Free OpenAI-compatible proxy
 
 Usage:
-  mslxdff                          start the server (if none running); shows status when a daemon is already up
+  mslxdff                          start as a background daemon and exit (status + help if one is already running)
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon, models, recent calls, last error)
   mslxdff -stop                    stop the running daemon

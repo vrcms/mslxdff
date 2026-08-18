@@ -46,16 +46,21 @@ Priority: `-port` arg > persisted port > `PORT` env > default `8989`.
 
 ### Daemon (background, stays resident)
 
+Just run `mslxdff` (no args): if no daemon is running yet, it **starts a background
+daemon and exits** — the command never holds your terminal, so `npx mslxdff` works
+the same way. If a daemon is already up, the bare command shows status + help.
+
 ```
-mslxdff -d        # start detached background daemon
-mslxdff -stop     # stop it
+mslxdff        # starts the background daemon (if none running); exits immediately
+mslxdff -d     # same, explicit
+mslxdff -stop  # stop it
 ```
 
 Logs go to `~/.config/mslxdff/daemon.log`, the daemon pid to `daemon.pid` (both overridable via `MSLXDFF_DAEMON_DIR`). The daemon keeps running after your shell exits.
 
 ### Status
 
-Running `mslxdff` with no args shows a status panel when a daemon is already up (or use `mslxdff -status` anytime): the free model list, the last 5 calls (model/status/latency), and the most recent error. Call and error history are stored as JSON-lines at `calls.log` / `errors.log` in the state dir.
+Running `mslxdff` with no args shows a status panel when a daemon is already up: joined groups with their members, failover targets, the free model list, the last 5 calls (model/status/latency), and the most recent error (`mslxdff -status` for status only, `mslxdff -help` for the full command reference). Call and error history are stored as JSON-lines at `calls.log` / `errors.log` in the state dir.
 
 ```
 $ mslxdff -status
