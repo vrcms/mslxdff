@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
-import { DEFAULT_PORT } from "../src/state.js";
+import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
@@ -51,6 +51,37 @@ if (args.includes("-stop") || args.includes("--stop")) {
   } else {
     console.log(`mslxdff daemon not running${reason ? ` (${reason})` : ""}`);
   }
+  process.exit(0);
+}
+
+if (args.includes("-uninstall") || args.includes("--uninstall")) {
+  const { stopped, pid } = stopDaemon();
+  if (stopped) console.log(`mslxdff daemon stopped (pid ${pid})`);
+  else console.log("mslxdff daemon not running");
+
+  const stateFile = defaultStateFile();
+  const dir = dirname(stateFile);
+  const removed = [];
+  for (const f of [
+    stateFile,
+    pidFile(),
+    logFile(),
+    join(dir, "calls.log"),
+    join(dir, "errors.log"),
+    join(dir, "events.log"),
+  ]) {
+    try {
+      rmSync(f, { force: true });
+      removed.push(f);
+    } catch {
+      // already gone, fine
+    }
+  }
+  if (removed.length) console.log(`removed ${removed.length} file(s):\n  ${removed.join("\n  ")}`);
+  else console.log("no state/log files to remove");
+
+  console.log("\npackage still installed — finish with:");
+  console.log("  npm uninstall -g mslxdff");
   process.exit(0);
 }
 
@@ -604,6 +635,7 @@ Usage:
   mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
   mslxdff -stop                    stop the running daemon
+  mslxdff -uninstall               stop the daemon and delete all state/log files
   mslxdff -port N                  persist the listen port (restarts the daemon on it if running)
   mslxdff -update                  update mslxdff to the latest published version
   mslxdff -showtoken               print the current auth token
