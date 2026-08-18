@@ -19,6 +19,9 @@ export function startServer({ router }, port = resolvePort()) {
   const close = () =>
     new Promise((resolve) => {
       server.close(resolve);
+      // SSE debug streams keep connections open — force-close so shutdown
+      // never waits on them.
+      server.closeAllConnections?.();
     });
 
   process.on("SIGINT", close);

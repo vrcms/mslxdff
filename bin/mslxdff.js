@@ -4,6 +4,7 @@ import { readFileSync, existsSync, statSync, watch, openSync, closeSync, mkdirSy
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
+import { DEFAULT_PORT } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
@@ -11,6 +12,7 @@ import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroups
 import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid, readPidVersion, isPidAlive } from "../src/daemon.js";
 import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
+import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
 import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, eventsFile, recentEvents } from "../src/logs.js";
 
@@ -405,7 +407,8 @@ const peers = createPeersService({ cooldownMs: peerCooldownMs(), heatMs: peerHea
 const groups = createGroupsService({});
 const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshold() });
 
-const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans });
+const bus = createEventBus();
+const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus });
 const srv = startServer({ router });
 
 await srv.ready();
@@ -706,12 +709,27 @@ function fmtEvent(e) {
   }
 }
 
-// Live-follow the daemon's event stream: print the recent tail, then stream
-// new lines as they are appended (Ctrl+C to exit).
+// Live-follow the daemon: replay the file backlog, then stream events over
+// HTTP (SSE) which the daemon pushes from memory — no filesystem watch/poll
+// involved on the live path. Falls back to file polling if the stream fails.
 async function liveDebug() {
   const file = eventsFile();
-  // ensure the event file exists so watch() doesn't fail on a fresh daemon dir
   const dir = dirname(file);
+  const recent = recentEvents(100);
+  if (recent.length) {
+    console.log(`--- last ${recent.length} event(s) ---`);
+    for (const e of recent) console.log(fmtEvent(e));
+  }
+  console.log("--- live (Ctrl+C to exit) ---");
+
+  try {
+    await streamEventsHttp();
+    return; // stream kept running until Ctrl+C
+  } catch (err) {
+    console.error(`[debug] streaming failed (${err.message}) — falling back to file polling`);
+  }
+
+  // File-poll fallback (daemon too old to expose the SSE endpoint).
   if (!existsSync(file)) {
     try {
       mkdirSync(dir, { recursive: true });
@@ -721,15 +739,6 @@ async function liveDebug() {
       process.exit(1);
     }
   }
-  const recent = recentEvents(100);
-  if (recent.length) {
-    console.log(`--- last ${recent.length} event(s) ---`);
-    for (const e of recent) console.log(fmtEvent(e));
-  }
-  console.log("--- live (Ctrl+C to exit) ---");
-  console.log(`watching: ${file}`);
-  if (!existsSync(file)) console.log("(no events yet — trigger a chat request to see the flow)");
-
   let pos = existsSync(file) ? statSync(file).size : 0;
   let buf = "";
   const pump = () => {
@@ -741,7 +750,7 @@ async function liveDebug() {
       }
       const size = statSync(file).size;
       if (size < pos) {
-        pos = 0; // file trimmed/rewritten: re-follow from the start of what remains
+        pos = 0;
         buf = "";
       }
       if (size === pos) return;
@@ -761,22 +770,71 @@ async function liveDebug() {
       console.error(`[debug] poll error: ${err.message}`);
     }
   };
-  // fs.watch is unreliable across platforms for freshly-created/rotated files,
-  // so polling is the source of truth (200ms); the directory watch just adds
-  // low-latency wake-ups and silently degrades when it misbehaves.
-  try {
-    mkdirSync(dir, { recursive: true });
-    watch(dir, (_evt, filename) => {
-      if (!filename || basename(String(filename)) !== basename(file)) return;
-      pump();
-    });
-  } catch {
-    console.error(`cannot watch event dir: ${dir} (falling back to polling only)`);
-  }
-  // Poll is the source of truth; 200ms keeps human-perceived latency negligible.
-  setInterval(pump, 200);
+  setInterval(pump, 500);
   pump();
   await new Promise(() => {}); // run until Ctrl+C
+}
+
+// Connect to the daemon's SSE stream (authenticated), print each event.
+// Resolves when the connection ends; throws on connect failure.
+async function streamEventsHttp() {
+  const { token } = await loadToken();
+  const port = getPort() || DEFAULT_PORT;
+  const url = `http://127.0.0.1:${port}/v1/_debug/stream`;
+  // daemon may still be starting when -debug is launched right after it —
+  // retry a few times before giving up on the stream.
+  let res = null;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 10 && !res; attempt++) {
+    try {
+      res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  if (!res) throw lastErr || new Error("cannot reach daemon");
+  if (res.status === 401) throw new Error("unauthorized (token mismatch?)");
+  if (res.status === 404) throw new Error("daemon too old (no stream endpoint)");
+  if (!res.ok) throw new Error(`daemon responded ${res.status}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let chunk = "";
+  const first = await Promise.race([
+    reader.read(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("no data from stream")), 15_000)),
+  ]);
+  if (first.done) return;
+  console.log(`streaming from http://127.0.0.1:${port} (Ctrl+C to exit)`);
+  chunk += decoder.decode(first.value, { stream: true });
+  const lines = chunk.split("\n");
+  chunk = lines.pop() || "";
+  for (const l of lines) {
+    if (!l.startsWith("data: ")) continue;
+    try {
+      console.log(fmtEvent(JSON.parse(l.slice(6))));
+    } catch {
+      // skip malformed frames
+    }
+  }
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunk += decoder.decode(value, { stream: true });
+    const frameLines = chunk.split("\n");
+    chunk = frameLines.pop() || "";
+    for (const l of frameLines) {
+      if (!l.startsWith("data: ")) continue;
+      try {
+        console.log(fmtEvent(JSON.parse(l.slice(6))));
+      } catch {
+        // skip malformed frames
+      }
+    }
+  }
 }
 
 function fmtTs(iso) {  if (!iso) return "-";
