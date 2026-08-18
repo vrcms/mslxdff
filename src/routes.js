@@ -117,6 +117,26 @@ export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_
   }
 }
 
+export const PROMPT_MAX_LEN = 160;
+
+// Human-debuggable summary of the request body: the last non-empty message
+// text (multi-modal parts joined), whitespace-flattened and truncated.
+export function summarizePrompt(body) {
+  const msgs = body?.messages;
+  if (!Array.isArray(msgs) || !msgs.length) return "";
+  const msg = msgs[msgs.length - 1];
+  const c = msg?.content;
+  let text = "";
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c)) {
+    text = c
+      .map((p) => (typeof p === "string" ? p : p && typeof p.text === "string" ? p.text : ""))
+      .join(" ");
+  }
+  text = String(text || "").replace(/\s+/g, " ").trim();
+  return text.length > PROMPT_MAX_LEN ? text.slice(0, PROMPT_MAX_LEN) + "…" : text;
+}
+
 function parseHops(header) {
   const n = Number(header);
   return Number.isInteger(n) && n >= 0 ? n : 0;
@@ -186,7 +206,7 @@ const ROUTES = [
       const logError = (model, status, message) =>
         logs?.appendError({ model, auto: useAuto, status, message });
       const evt = (type, data) => logs?.appendEvent?.({ type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt });
-      evt("request", { hops, ip: clientIp(req), stream: Boolean(body.stream) });
+      evt("request", { hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body) });
 
       let lastErr = null;
       for (const model of order) {

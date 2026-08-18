@@ -6,11 +6,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
+import { summarizePrompt, PROMPT_MAX_LEN } from "../src/routes.js";
 import { createPeersService } from "../src/peers.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { appendCall, recentCalls, appendError, lastError, appendEvent, recentEvents } from "../src/logs.js";
 
 const TOKEN = "a".repeat(64);
+
+test("summarizePrompt picks the last message text", () => {
+  assert.equal(summarizePrompt({ messages: [{ role: "user", content: "hi" }] }), "hi");
+  assert.equal(
+    summarizePrompt({ messages: [{ role: "user", content: "" }, { role: "assistant", content: "  a\nb  c " }] }),
+    "a b c"
+  );
+});
+
+test("summarizePrompt flattens multi-modal content parts", () => {
+  assert.equal(
+    summarizePrompt({ messages: [{ role: "user", content: [{ type: "image_url" }, { type: "text", text: "what is this" }] }] }),
+    "what is this"
+  );
+});
+
+test("summarizePrompt truncates long prompts", () => {
+  const long = "x".repeat(PROMPT_MAX_LEN * 2);
+  const out = summarizePrompt({ messages: [{ role: "user", content: long }] });
+  assert.ok(out.length <= PROMPT_MAX_LEN + 1, "truncated with ellipsis");
+  assert.ok(out.endsWith("…"));
+});
+
+test("summarizePrompt handles missing bodies", () => {
+  assert.equal(summarizePrompt(undefined), "");
+  assert.equal(summarizePrompt({}), "");
+  assert.equal(summarizePrompt({ messages: [] }), "");
+});
 
 function tmpLogs() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-routelogs-"));
@@ -150,7 +179,7 @@ test("event stream records request and result for a local success", async () => 
     const res = await fetch(`http://127.0.0.1:${app.port}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}`, "x-mslxdff-hops": "2" },
-      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [] }),
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hello world" }] }),
     });
     assert.equal(res.status, 200);
     const events = recentEvents(10, { file: logs.events });
@@ -159,6 +188,7 @@ test("event stream records request and result for a local success", async () => 
     assert.equal(events[0].model, "deepseek-v4-flash-free");
     assert.equal(events[0].hops, 2);
     assert.equal(events[0].auto, false);
+    assert.equal(events[0].prompt, "hello world");
     assert.ok(events[0].ip);
     assert.equal(events[1].status, 200);
     assert.equal(events[1].via, "local");
