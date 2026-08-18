@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync, existsSync, statSync, watch, openSync, closeSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
@@ -662,7 +662,7 @@ function fmtEvent(e) {
   const m = (x) => x || "-";
   switch (e?.type) {
     case "request":
-      return `${head} request       ${m(e.model)}${e.auto ? " (auto)" : ""} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}`;
+      return `${head} request       ${m(e.model)}${e.auto ? " (auto)" : ""} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""}`;
     case "upstream-error":
       return `${head} upstream err  ${m(e.model)} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
     case "peer-health":
@@ -728,11 +728,18 @@ async function liveDebug() {
     }
   };
   try {
-    watch(file, { persistent: true }, pump);
+    mkdirSync(dirname(file), { recursive: true });
+    watch(dirname(file), (_evt, filename) => {
+      if (!filename || basename(String(filename)) !== basename(file)) return;
+      pump();
+    });
   } catch {
-    console.error(`cannot watch event file: ${file}`);
+    console.error(`cannot watch event dir: ${dirname(file)}`);
     process.exit(1);
   }
+  // fs.watch is unreliable for freshly-created files on Windows — poll as a
+  // safety net so events are never missed.
+  setInterval(pump, 250);
   pump();
   await new Promise(() => {}); // run until Ctrl+C
 }
