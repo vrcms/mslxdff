@@ -13,16 +13,6 @@ export function createRouter({ token, upstream, models, auto, logs, peers, maxHo
 
     const route = ROUTES.find((r) => r.method === method && r.path === path);
 
-    if (bus && path === "/v1/_debug/stream") {
-      // live debug stream (SSE): auth REQUIRED, then replay backlog + push
-      if (!authorized(req, token)) {
-        res.statusCode = 401;
-        res.setHeader("WWW-Authenticate", "Bearer");
-        return json(res, 401, { error: "Unauthorized" });
-      }
-      return streamEvents(req, res, bus);
-    }
-
     if (!route) return notFound(res);
 
     if (route.requiresAuth && !authorized(req, token)) {
@@ -33,35 +23,6 @@ export function createRouter({ token, upstream, models, auto, logs, peers, maxHo
 
     await route.handler({ req, res, upstream, models, auto, logs, peers, maxHops, groups, bans, token, bus });
   };
-}
-
-// SSE endpoint consumed by `mslxdff -debug`: replays the buffered backlog,
-// then pushes each new event as it happens. One second heartbeat keeps
-// proxies/NAT from closing the connection.
-function streamEvents(req, res, bus) {
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-
-  for (const e of bus.replayAll()) {
-    res.write(`data: ${JSON.stringify(e)}\n\n`);
-  }
-  const unsubscribe = bus.subscribe((e) => {
-    res.write(`data: ${JSON.stringify(e)}\n\n`);
-  });
-  const heartbeat = setInterval(() => {
-    res.write(`: ping\n\n`);
-  }, 15_000);
-  res.on("close", () => {
-    clearInterval(heartbeat);
-    unsubscribe();
-  });
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    unsubscribe();
-  });
 }
 
 function clientIp(req) {

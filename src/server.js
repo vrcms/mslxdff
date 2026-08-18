@@ -1,7 +1,7 @@
 import { createServer as httpCreateServer } from "node:http";
 import { DEFAULT_PORT, getPort } from "./state.js";
 
-export function startServer({ router }, port = resolvePort()) {
+export function startServer({ router, signals = true }, port = resolvePort()) {
   const server = httpCreateServer((req, res) => {
     router(req, res).catch((err) => {
       res.statusCode = 500;
@@ -24,8 +24,10 @@ export function startServer({ router }, port = resolvePort()) {
       server.closeAllConnections?.();
     });
 
-  process.on("SIGINT", close);
-  process.on("SIGTERM", close);
+  if (signals) {
+    process.on("SIGINT", close);
+    process.on("SIGTERM", close);
+  }
 
   return { server, ready, close };
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFileSync, existsSync, statSync, watch, openSync, closeSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
@@ -14,7 +14,7 @@ import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
 import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
-import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, eventsFile, recentEvents } from "../src/logs.js";
+import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents } from "../src/logs.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -132,11 +132,22 @@ if (args.includes("-model") || args.includes("-models")) {
   process.exit(0);
 }
 
-// -debug: live-follow the daemon's event stream (requests, upstream errors,
-// peer forwards, peer errors, results) for investigation
+// -debug: stop the background daemon and run the server in THIS terminal
+// (foreground), printing every event to stdout in real time via the in-memory
+// event bus — no filesystem polling. Ctrl+C / SIGTERM restarts the daemon in
+// the background, then exits. See the daemon body below for the stream wiring.
 if (args.includes("-debug") || args.includes("--debug")) {
-  await liveDebug();
-  process.exit(0);
+  const recent = recentEvents(100);
+  if (recent.length) {
+    console.log(`--- last ${recent.length} event(s) ---`);
+    for (const e of recent) console.log(fmtEvent(e));
+  }
+  console.log("--- live (Ctrl+C: stop debugging and restore background daemon) ---");
+  const { stopped, pid } = stopDaemon();
+  if (stopped) console.log(`[debug] stopped background daemon (pid ${pid})`);
+  process.env.MSLXDFF_DEBUG = "1";
+  process.env.MSLXDFF_DAEMON = "1";
+  // fall through to the daemon body below — no process.exit() here
 }
 
 // -creategroup <name> | -group create <name> | -group sync | -group leave <name> | -group list |
@@ -407,9 +418,34 @@ const peers = createPeersService({ cooldownMs: peerCooldownMs(), heatMs: peerHea
 const groups = createGroupsService({});
 const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshold() });
 
+const isDebug = process.env.MSLXDFF_DEBUG === "1";
 const bus = createEventBus();
 const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus });
-const srv = startServer({ router });
+const srv = startServer({ router, signals: !isDebug });
+
+// -debug: push every event straight to this terminal.
+if (isDebug) {
+  bus.subscribe((e) => {
+    try {
+      console.log(fmtEvent(e));
+    } catch {
+      // malformed event — skip
+    }
+  });
+  // Ctrl+C / SIGTERM: restore the background daemon, then exit.
+  const restore = () => {
+    console.log("\n[debug] restoring background daemon...");
+    try {
+      const restoredPid = startDaemon([]);
+      console.log(`[debug] daemon restored (pid ${restoredPid})`);
+    } catch (err) {
+      console.error(`[debug] could not restore daemon: ${err.message}`);
+    }
+    setTimeout(() => process.exit(0), 300);
+  };
+  process.on("SIGINT", restore);
+  process.on("SIGTERM", restore);
+}
 
 await srv.ready();
 models.startAutoRefresh();
@@ -709,135 +745,8 @@ function fmtEvent(e) {
   }
 }
 
-// Live-follow the daemon: replay the file backlog, then stream events over
-// HTTP (SSE) which the daemon pushes from memory — no filesystem watch/poll
-// involved on the live path. Falls back to file polling if the stream fails.
-async function liveDebug() {
-  const file = eventsFile();
-  const dir = dirname(file);
-  const recent = recentEvents(100);
-  if (recent.length) {
-    console.log(`--- last ${recent.length} event(s) ---`);
-    for (const e of recent) console.log(fmtEvent(e));
-  }
-  console.log("--- live (Ctrl+C to exit) ---");
-
-  try {
-    await streamEventsHttp();
-    return; // stream kept running until Ctrl+C
-  } catch (err) {
-    console.error(`[debug] streaming failed (${err.message}) — falling back to file polling`);
-  }
-
-  // File-poll fallback (daemon too old to expose the SSE endpoint).
-  if (!existsSync(file)) {
-    try {
-      mkdirSync(dir, { recursive: true });
-      closeSync(openSync(file, "a"));
-    } catch {
-      console.error(`cannot create event file: ${file}`);
-      process.exit(1);
-    }
-  }
-  let pos = existsSync(file) ? statSync(file).size : 0;
-  let buf = "";
-  const pump = () => {
-    try {
-      if (!existsSync(file)) {
-        pos = 0;
-        buf = "";
-        return;
-      }
-      const size = statSync(file).size;
-      if (size < pos) {
-        pos = 0;
-        buf = "";
-      }
-      if (size === pos) return;
-      buf += readFileSync(file, "utf8").slice(pos);
-      pos = size;
-      const lines = buf.split("\n");
-      buf = lines.pop() || "";
-      for (const l of lines) {
-        if (!l.trim()) continue;
-        try {
-          console.log(fmtEvent(JSON.parse(l)));
-        } catch {
-          // partial/corrupt line while trimming — skip
-        }
-      }
-    } catch (err) {
-      console.error(`[debug] poll error: ${err.message}`);
-    }
-  };
-  setInterval(pump, 500);
-  pump();
-  await new Promise(() => {}); // run until Ctrl+C
-}
-
-// Connect to the daemon's SSE stream (authenticated), print each event.
-// Resolves when the connection ends; throws on connect failure.
-async function streamEventsHttp() {
-  const { token } = await loadToken();
-  const port = getPort() || DEFAULT_PORT;
-  const url = `http://127.0.0.1:${port}/v1/_debug/stream`;
-  // daemon may still be starting when -debug is launched right after it —
-  // retry a few times before giving up on the stream.
-  let res = null;
-  let lastErr = null;
-  for (let attempt = 1; attempt <= 10 && !res; attempt++) {
-    try {
-      res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-  if (!res) throw lastErr || new Error("cannot reach daemon");
-  if (res.status === 401) throw new Error("unauthorized (token mismatch?)");
-  if (res.status === 404) throw new Error("daemon too old (no stream endpoint)");
-  if (!res.ok) throw new Error(`daemon responded ${res.status}`);
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let chunk = "";
-  const first = await Promise.race([
-    reader.read(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("no data from stream")), 15_000)),
-  ]);
-  if (first.done) return;
-  console.log(`streaming from http://127.0.0.1:${port} (Ctrl+C to exit)`);
-  chunk += decoder.decode(first.value, { stream: true });
-  const lines = chunk.split("\n");
-  chunk = lines.pop() || "";
-  for (const l of lines) {
-    if (!l.startsWith("data: ")) continue;
-    try {
-      console.log(fmtEvent(JSON.parse(l.slice(6))));
-    } catch {
-      // skip malformed frames
-    }
-  }
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunk += decoder.decode(value, { stream: true });
-    const frameLines = chunk.split("\n");
-    chunk = frameLines.pop() || "";
-    for (const l of frameLines) {
-      if (!l.startsWith("data: ")) continue;
-      try {
-        console.log(fmtEvent(JSON.parse(l.slice(6))));
-      } catch {
-        // skip malformed frames
-      }
-    }
-  }
-}
-
-function fmtTs(iso) {  if (!iso) return "-";
+function fmtTs(iso) {
+  if (!iso) return "-";
   try {
     return new Date(iso).toISOString().replace("T", " ").slice(5, 19);
   } catch {
