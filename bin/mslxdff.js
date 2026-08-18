@@ -253,24 +253,60 @@ if (groupCmd && groupCmd !== "create") {
           continue;
         }
       }
-      console.log(`${g.name}  (${Object.keys(members).length} members)`);
-      // probe every member endpoint concurrently for reachability + latency
-      const probes = Object.entries(members).map(([id, m]) => ({ id, url: m?.url || id }));
-      if (!isLeader && g.leaderUrl && !probes.some((p) => p.url === g.leaderUrl)) {
-        probes.push({ id: "leader", url: g.leaderUrl });
-      }
-      const results = await Promise.all(probes.map(probeHealth));
-      const rows = results.sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
-      for (const r of rows) {
+      const entries = Object.entries(members).filter(([id]) => id !== "leader");
+      console.log(`${g.name}  (${entries.length} member${entries.length === 1 ? "" : "s"})`);
+      // probe every member endpoint concurrently for reachability + latency;
+      // display order = state order so the sequence numbers stay stable for -group remove
+      const probes = await Promise.all(
+        entries.map(([id, m]) => probeHealth({ id, url: m?.url || id }))
+      );
+      const leaderEntry = members.leader ? Object.entries(members).find(([id]) => id === "leader") : null;
+      const leaderProbe = leaderEntry ? await probeHealth({ id: "leader", url: leaderEntry[1].url }) : null;
+      const display = leaderProbe ? [...probes, leaderProbe] : probes;
+      let seq = 0;
+      for (const r of display) {
         const state = r.fail ? `fail  ${r.fail}` : `ok    ${r.ms}ms`;
-        const label = r.id && r.id !== r.url ? r.id + "  " : "";
-        console.log(`  ${label}${r.url}  ${state}`);
+        if (r.id === "leader") {
+          console.log(`  leader  ${r.url}  ${state}`);
+          continue;
+        }
+        seq += 1;
+        const label = r.id && r.id !== r.url ? `  [${r.id}]` : "";
+        console.log(`  ${seq}. ${r.url}${label}  ${state}`);
       }
     }
     console.log(`\njoined groups (${joinedList.length}):`);
     for (const g of joinedList) console.log(`  ${g.name}  ${g.leaderUrl || "(this node is the leader)"}`);
+  } else if (action === "remove" && a) {
+    // leader-only: kick a member by its list sequence number (1-based, leader excluded)
+    const seq = Number(a);
+    if (!Number.isInteger(seq) || seq < 1) {
+      console.error(`usage: mslxdff -group remove <seq>`);
+      process.exit(1);
+    }
+    const joined = loadGroupsJoined().find((g) => !g.leaderUrl);
+    if (!joined) {
+      console.error("group remove requires being the leader — this node leads no group");
+      process.exit(1);
+    }
+    const members = groups.list()[joined.name]?.members || {};
+    const entries = Object.entries(members).filter(([id]) => id !== "leader");
+    const target = entries[seq - 1];
+    if (!target) {
+      console.error(`member #${seq} not found — group "${joined.name}" has ${entries.length} member(s)`);
+      process.exit(1);
+    }
+    const [id, m] = target;
+    try {
+      const removed = groups.removeMember(joined.name, { url: m.url });
+      if (removed) console.log(`removed ${m.url} from "${joined.name}"`);
+      else console.log(`member ${m.url} already gone from "${joined.name}"`);
+    } catch (err) {
+      console.error(`remove failed: ${errMsg(err)}`);
+      process.exit(1);
+    }
   } else {
-    console.error("usage: mslxdff -creategroup <name> | -group sync | -group leave <name> | -group list");
+    console.error("usage: mslxdff -group sync | -group leave <name> | -group list | -group remove <seq> | -creategroup <name>");
   }
   process.exit(0);
 }
@@ -714,7 +750,8 @@ Usage:
   mslxdff -addtogroup <leader-host> <name>  join a group via its leader host (default port 8989)
   mslxdff -group sync              pull the freshest member list for all joined groups
   mslxdff -group leave <name>      leave a group (removes its members from this node)
-  mslxdff -group list              list groups on this node
+  mslxdff -group list              list groups on this node (numbered members)
+  mslxdff -group remove <seq>      leader only: kick a member by its list sequence number
   mslxdff -leavegroup              leave every joined group as a member (leaders: use -delgroup)
   mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
