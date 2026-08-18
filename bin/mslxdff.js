@@ -196,33 +196,48 @@ if (groupCmd && groupCmd !== "create") {
     const removed = peers.removeByGroup(a);
     console.log(before ? `left group "${a}" (${removed} member(s) removed)` : `not a member of group "${a}"`);
   } else if (action === "list") {
-    const all = groups.list();
-    const names = Object.keys(all);
-    if (names.length) {
-      for (const n of names) {
-        console.log(`${n}  (${Object.keys(all[n].members || {}).length} members)`);
-        // probe every member endpoint concurrently to show reachability + latency
-        const probes = Object.entries(all[n].members || {}).map(([id, m]) => ({
-          id, url: m?.url,
-        }));
-        const joined = loadGroupsJoined().find((g) => g.name === n);
-        if (joined?.leaderUrl) probes.push({ id: "leader", url: joined.leaderUrl });
-        const results = await Promise.all(probes.map(probeHealth));
-        const rows = results.sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
-        for (const r of rows) {
-          const state = r.fail ? `fail  ${r.fail}` : `ok    ${r.ms}ms`;
-          const label = r.id && r.id !== r.url ? r.id + "  " : "";
-          console.log(`  ${label}${r.url}  ${state}`);
+    const joinedList = loadGroupsJoined();
+    if (!joinedList.length) {
+      console.log("no groups on this node");
+      process.exit(0);
+    }
+    const { token } = await loadToken();
+    const fetchImpl = (url, opts) => fetch(url, { ...opts, signal: AbortSignal.timeout(1500) });
+    for (const g of joinedList) {
+      const isLeader = !g.leaderUrl;
+      let members;
+      if (isLeader) {
+        members = groups.list()[g.name]?.members || {};
+      } else {
+        try {
+          members = await refreshGroupMembers(g.name, {
+            leaderUrl: g.leaderUrl,
+            memberName: g.memberName,
+            url: g.myUrl,
+            token,
+            fetchImpl,
+          });
+        } catch (err) {
+          console.log(`${g.name}  (members unavailable — leader unreachable: ${errMsg(err)})`);
+          continue;
         }
       }
-    } else {
-      console.log("no groups on this node");
+      console.log(`${g.name}  (${Object.keys(members).length} members)`);
+      // probe every member endpoint concurrently for reachability + latency
+      const probes = Object.entries(members).map(([id, m]) => ({ id, url: m?.url || id }));
+      if (!isLeader && g.leaderUrl && !probes.some((p) => p.url === g.leaderUrl)) {
+        probes.push({ id: "leader", url: g.leaderUrl });
+      }
+      const results = await Promise.all(probes.map(probeHealth));
+      const rows = results.sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
+      for (const r of rows) {
+        const state = r.fail ? `fail  ${r.fail}` : `ok    ${r.ms}ms`;
+        const label = r.id && r.id !== r.url ? r.id + "  " : "";
+        console.log(`  ${label}${r.url}  ${state}`);
+      }
     }
-    const joined = loadGroupsJoined();
-    if (joined.length) {
-      console.log(`\njoined groups (${joined.length}):`);
-      for (const g of joined) console.log(`  ${g.name}  ${g.leaderUrl || "(this node is the leader)"}`);
-    }
+    console.log(`\njoined groups (${joinedList.length}):`);
+    for (const g of joinedList) console.log(`  ${g.name}  ${g.leaderUrl || "(this node is the leader)"}`);
   } else {
     console.error("usage: mslxdff -creategroup <name> | -group sync | -group leave <name> | -group list");
   }
