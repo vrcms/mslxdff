@@ -200,6 +200,19 @@ if (groupCmd && groupCmd !== "create") {
     if (names.length) {
       for (const n of names) {
         console.log(`${n}  (${Object.keys(all[n].members || {}).length} members)`);
+        // probe every member endpoint concurrently to show reachability + latency
+        const probes = Object.entries(all[n].members || {}).map(([id, m]) => ({
+          id, url: m?.url,
+        }));
+        const joined = loadGroupsJoined().find((g) => g.name === n);
+        if (joined?.leaderUrl) probes.push({ id: "leader", url: joined.leaderUrl });
+        const results = await Promise.all(probes.map(probeHealth));
+        const rows = results.sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
+        for (const r of rows) {
+          const state = r.fail ? `  fail  ${r.fail}` : `  ok    ${r.ms}ms`;
+          const via = r.alt ? "  (v1/health)" : "";
+          console.log(`  ${String(r.id || "?")}  ${r.url}${state}${via}`);
+        }
       }
     } else {
       console.log("no groups on this node");
@@ -272,6 +285,36 @@ function markJoined(entry) {
 }
 
 function errMsg(err) { return String(err?.message || err); }
+
+// Probe a member's health endpoint concurrently (v1/health preferred,
+// falling back to /health). Returns { id, url, ms, rank } or { id, url, fail }.
+const HEALTH_TIMEOUT_MS = 4000;
+async function probeHealth({ id, url } = {}) {
+  if (!url) return { id, url, fail: "no url", rank: 3 };
+  const forBase = async (base) => {
+    const target = `${base}/v1/health`;
+    const startedAt = Date.now();
+    try {
+      const res = await fetch(target, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+      if (!res.ok) return { ok: false, alt: true };
+      return { ok: true, alt: false, ms: Date.now() - startedAt, rank: 0 };
+    } catch {
+      return { ok: false, alt: true };
+    }
+  };
+  const base = String(url).replace(/\/+$/, "");
+  const first = await forBase(base);
+  if (first.ok) return { id, url: base, ms: first.ms, rank: 0 };
+  // v1/health 404/refused → try plain /health (older nodes)
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    if (res.ok) return { id, url: base, ms: Date.now() - startedAt, rank: 1, via: "health" };
+  } catch {
+    // fall through
+  }
+  return { id, url: base, fail: "unreachable", rank: 2 };
+}
 
 function readModelsCache(cacheFile) {
   try {
