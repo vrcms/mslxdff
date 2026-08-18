@@ -55,6 +55,60 @@ if (args.includes("-status") || args.includes("--status") || args.includes("-s")
   process.exit(0);
 }
 
+// -model list | -models : show the free models this proxy serves (cache-first)
+// -model refresh : force a fresh fetch from the upstream and update the cache
+if (args.includes("-model") || args.includes("-models")) {
+  const idx = args.findIndex((x) => x === "-model" || x === "-models");
+  const sub = args[idx + 1];
+  if (sub === "refresh") {
+    const models = createModelsService({
+      baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
+      headers: createUpstreamClient({}).headers,
+      refreshMs: 0,
+      cacheFile: join(logDir(), "models.json"),
+    });
+    try {
+      const list = await models.get();
+      const ids = (list.data || []).map((m) => m.id).filter(Boolean);
+      console.log(`refreshed: ${ids.length} free model(s)`);
+      for (const id of ids) console.log(`  ${id}`);
+    } catch (err) {
+      console.error(`could not refresh models: ${String(err?.message || err)}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+  if (sub !== undefined && sub !== "list") {
+    console.error("usage: mslxdff -model list | mslxdff -model refresh");
+    process.exit(1);
+  }
+  const cacheFile = join(logDir(), "models.json");
+  try {
+    const cached = readModelsCache(cacheFile);
+    if (cached) {
+      const ids = (cached.data || []).map((m) => m.id).filter(Boolean);
+      const at = cached.cachedAt ? ` (cached ${new Date(cached.cachedAt).toISOString().slice(0, 16).replace("T", " ")})` : "";
+      console.log(`${ids.length} free model(s)${at}:`);
+      for (const id of ids) console.log(`  ${id}`);
+    } else {
+      const models = createModelsService({
+        baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
+        headers: createUpstreamClient({}).headers,
+        refreshMs: 0,
+        cacheFile,
+      });
+      const list = await models.get();
+      const ids = (list.data || []).map((m) => m.id).filter(Boolean);
+      console.log(`${ids.length} free model(s):`);
+      for (const id of ids) console.log(`  ${id}`);
+    }
+  } catch (err) {
+    console.error(`could not fetch models: ${String(err?.message || err)}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 // -creategroup <name> | -group create <name> | -group sync | -group leave <name> | -group list |
 // -addtogroup <leader-host> <name> | -resetban [ip]
 const createGroupArg = argValue("-creategroup", "--creategroup") || groupIs("create", args);
@@ -177,6 +231,14 @@ function markJoined(entry) {
 }
 
 const errMsg = (err) => String(err?.message || err);
+
+function readModelsCache(cacheFile) {
+  try {
+    return JSON.parse(readFileSync(cacheFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
 
 // Sync every joined group into the local peer list. Leaders read their local
 // groups state; members re-register with the leader (idempotent) to get the
@@ -398,6 +460,8 @@ Usage:
   mslxdff                          start as a background daemon and exit (status + help if one is already running)
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon, models, recent calls, last error)
+  mslxdff -model list              list the free models this proxy serves (cached)
+  mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -stop                    stop the running daemon
   mslxdff -port N                  persist the listen port (restarts the daemon on it if running)
   mslxdff -update                  update mslxdff to the latest published version
