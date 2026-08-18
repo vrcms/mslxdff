@@ -1,4 +1,5 @@
 import { timingSafeEqual, createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { injectReasoningContent, normalizeModel } from "./reasoning.js";
 import { isAutoModel } from "./auto.js";
 import { DEFAULT_MAX_HOPS } from "./peers.js";
@@ -92,6 +93,29 @@ async function relay(res, upRes, body) {
 }
 
 const PEER_TIMEOUT_MS = 30_000;
+const PEER_STATUS_TIMEOUT_MS = 2_000;
+
+// Ask a peer which of its models are healthy (status normal or never
+// failed). Returns model ids ordered as the peer listed them; empty when the
+// peer is unreachable, unauthorized, or has no healthy model.
+export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_MS, fetchImpl = fetch } = {}) {
+  try {
+    const res = await fetchImpl(`${peer.url}/v1/models/status`, {
+      headers: {
+        "Authorization": `Bearer ${peer.token || ""}`,
+        "Accept": "application/json",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return [];
+    const json = await res.json().catch(() => ({}));
+    return (json.data || [])
+      .filter((m) => m && typeof m.id === "string" && m.status === "normal")
+      .map((m) => m.id);
+  } catch {
+    return [];
+  }
+}
 
 function parseHops(header) {
   const n = Number(header);
@@ -161,6 +185,8 @@ const ROUTES = [
         logs?.appendCall({ model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(body.stream) });
       const logError = (model, status, message) =>
         logs?.appendError({ model, auto: useAuto, status, message });
+      const evt = (type, data) => logs?.appendEvent?.({ type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt });
+      evt("request", { hops, ip: clientIp(req), stream: Boolean(body.stream) });
 
       let lastErr = null;
       for (const model of order) {
@@ -169,47 +195,100 @@ const ROUTES = [
         try {
           upRes = await upstream.chat(forwarded);
         } catch (err) {
-          if (auto) await auto.recordError(model);
+          if (auto) await auto.recordError(model, { message: errMsg(err) });
           lastErr = { model, upstream: null, status: 502, message: errMsg(err) };
           logError(model, 502, errMsg(err));
+          evt("upstream-error", { model, status: 502, message: errMsg(err) });
         }
         if (upRes && upRes.status >= 400) {
-          if (auto) await auto.recordError(model);
+          if (auto) await auto.recordError(model, { status: upRes.status });
           lastErr = { model, upstream: upRes, status: upRes.status, message: null };
           logError(model, upRes.status, `upstream ${upRes.status}`);
+          evt("upstream-error", { model, status: upRes.status, message: null });
           upRes = null;
         }
         if (upRes) {
+          if (auto) await auto.recordOk(model);
           logCall(model, upRes.status);
+          evt("result", { model, status: upRes.status, via: "local" });
           return relay(res, upRes, body);
         }
 
-        // local failed for this model: try the same model on peers, round-robin over available ones
+        // local failed for this model: try peers ordered hot-first (reuse
+        // their last successful model without probing), cold peers get a
+        // health probe before the forward
         if (canForwardPeers) {
-          const count = peers.available().length;
-          for (let i = 0; i < count; i++) {
-            const peer = peers.next();
-            if (!peer) break;
-            let peerRes = await forwardToPeer(peer, body, model, hops);
+          for (const peer of peers.ordered()) {
+            let target = null;
+            const hot = peers.isHot(peer.url);
+            if (hot && peers.stat(peer.url)?.model) {
+              target = peers.stat(peer.url).model;
+            } else {
+              const healthy = await peerHealthyModels(peer);
+              if (!healthy.length) {
+                // peer unreachable or every model unhealthy — mark it and move on
+                await peers.recordError(peer.url);
+                logError(model, 0, `peer ${peer.url} has no healthy models`);
+                evt("peer-health", { peer: peer.url, healthy: [], count: 0 });
+                continue;
+              }
+              evt("peer-health", { peer: peer.url, healthy, count: healthy.length });
+              target = healthy[0];
+            }
+
+            const t0 = performance.now();
+            let peerRes = await forwardToPeer(peer, body, target, hops);
+            let latencyMs = Math.round(performance.now() - t0);
+            evt("peer-forward", { peer: peer.url, model: target, hops: hops + 1 });
+            if (peerRes instanceof Error || peerRes.status >= 400) {
+              // hot-cache miss: probe this peer once for a healthy model
+              if (hot) {
+                const healthy = await peerHealthyModels(peer);
+                if (healthy.length) {
+                  target = healthy[0];
+                  const t1 = performance.now();
+                  peerRes = await forwardToPeer(peer, body, target, hops);
+                  latencyMs = Math.round(performance.now() - t1);
+                  evt("peer-forward", { peer: peer.url, model: target, hops: hops + 1, retry: true });
+                }
+              }
+            }
             if (peerRes instanceof Error || peerRes.status >= 400) {
               await peers.recordError(peer.url);
+              await peers.recordResult(peer.url, { ok: false });
               logError(model, peerRes instanceof Error ? 502 : peerRes.status,
                 peerRes instanceof Error ? errMsg(peerRes) : `peer ${peerRes.status}`);
+              evt("peer-error", {
+                peer: peer.url,
+                model: target,
+                status: peerRes instanceof Error ? 502 : peerRes.status,
+                message: peerRes instanceof Error ? errMsg(peerRes) : null,
+              });
               continue;
             }
-            logCall(model, peerRes.status);
+            await peers.recordResult(peer.url, { ok: true, latencyMs, model: target });
+            logCall(target, peerRes.status);
+            evt("result", { model: target, status: peerRes.status, via: "peer" });
             return relay(res, peerRes, body);
           }
         }
 
         if (canFallback) continue;
         logCall(lastErr?.model ?? model, lastErr?.status ?? 502);
-        if (lastErr?.upstream) return relay(res, lastErr.upstream, body);
+        if (lastErr?.upstream) {
+          evt("result", { model: lastErr.model, status: lastErr.status, via: "local" });
+          return relay(res, lastErr.upstream, body);
+        }
+        evt("result", { model, status: lastErr?.status ?? 502, via: "none" });
         return json(res, 502, { error: lastErr?.message || "all auto models failed" });
       }
 
       logCall(lastErr?.model ?? requested, lastErr?.status ?? 502);
-      if (lastErr?.upstream) return relay(res, lastErr.upstream, body);
+      if (lastErr?.upstream) {
+        evt("result", { model: lastErr.model, status: lastErr.status, via: "local" });
+        return relay(res, lastErr.upstream, body);
+      }
+      evt("result", { model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none" });
       return json(res, 502, { error: lastErr?.message || "all auto models failed" });
     },
   },
@@ -304,6 +383,32 @@ const ROUTES = [
       } catch (err) {
         json(res, 502, { error: errMsg(err) });
       }
+    },
+  },
+  {
+    method: "GET",
+    path: "/v1/models/status",
+    requiresAuth: true,
+    handler: async ({ res, models, auto }) => {
+      const statuses = auto?.statuses?.() || {};
+      let ids = [];
+      try {
+        ids = (await models?.get?.())?.data?.map((m) => m.id) || [];
+      } catch {
+        // models list unavailable; fall back to status records only
+      }
+      const seen = new Set();
+      const data = [];
+      for (const id of [...ids, ...Object.keys(statuses)]) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const e = statuses[id];
+        const entry = typeof e === "number"
+          ? { id, status: "error", at: e }
+          : { id, status: e?.status || "normal", at: e?.at ?? null, code: e?.code ?? null };
+        data.push(entry);
+      }
+      json(res, 200, { object: "list", data });
     },
   },
 ];
