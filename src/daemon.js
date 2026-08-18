@@ -33,17 +33,34 @@ export function startDaemon(args = []) {
   return child.pid;
 }
 
-export function writePid(pid) {
+export function writePid(pid, version) {
   const dir = daemonDir();
   mkdirSync(dir, { recursive: true });
-  writeFileSync(pidFile(), String(pid), { mode: 0o600 });
+  writeFileSync(pidFile(), version ? `${pid}\n${version}` : String(pid), { mode: 0o600 });
 }
 
 export function readPid() {
   if (!existsSync(pidFile())) return null;
   const raw = readFileSync(pidFile(), "utf8").trim();
-  const n = Number(raw);
+  const n = Number(raw.split("\n")[0]);
   return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+export function readPidVersion() {
+  if (!existsSync(pidFile())) return null;
+  const raw = readFileSync(pidFile(), "utf8");
+  const lines = raw.split("\n");
+  return lines.length > 1 && lines[1].trim() ? lines[1].trim() : null;
+}
+
+// Best-effort liveness check (signal 0); ESRCH means the process is gone.
+export function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code !== "ESRCH";
+  }
 }
 
 export function stopDaemon() {
