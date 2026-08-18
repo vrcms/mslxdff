@@ -656,6 +656,11 @@ function fmtStatus(id, statuses) {
   return `${e.status}${when}${code}`;
 }
 
+function fmtDur(ms) {
+  if (!Number.isFinite(ms)) return "?";
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function fmtEvent(e) {
   const t = e?.ts ? new Date(e.ts).toISOString().slice(11, 19) : "--:--:--";
   const head = `[${t}]`;
@@ -672,7 +677,7 @@ function fmtEvent(e) {
     case "peer-error":
       return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
     case "result":
-      return `${head} result        ${e.status} ${m(e.model)} via=${e.via} ${e.durationMs ?? "?"}ms`;
+      return `${head} result        ${e.status} ${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}`;
     default:
       return `${head} ${e?.type || "?"} ${JSON.stringify(e || {})}`;
   }
