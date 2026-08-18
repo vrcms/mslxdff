@@ -240,14 +240,15 @@ const ROUTES = [
         }
 
         // local failed for this model: try peers ordered hot-first (reuse
-        // their last successful model without probing), cold peers get a
-        // health probe before the forward
+        // their last successful model without probing when it matches the
+        // requested model), cold peers get a health probe before the forward
         if (canForwardPeers) {
           for (const peer of peers.ordered()) {
             let target = null;
-            const hot = peers.isHot(peer.url);
-            if (hot && peers.stat(peer.url)?.model) {
-              target = peers.stat(peer.url).model;
+            const prevModel = peers.stat(peer.url)?.model;
+            const hot = peers.isHot(peer.url) && prevModel === model;
+            if (hot) {
+              target = prevModel;
             } else {
               const healthy = await peerHealthyModels(peer);
               if (!healthy.length) {
@@ -258,7 +259,7 @@ const ROUTES = [
                 continue;
               }
               evt("peer-health", { peer: peer.url, healthy, count: healthy.length });
-              target = healthy[0];
+              target = healthy.includes(model) ? model : healthy[0];
             }
 
             const t0 = performance.now();
@@ -270,7 +271,7 @@ const ROUTES = [
               if (hot) {
                 const healthy = await peerHealthyModels(peer);
                 if (healthy.length) {
-                  target = healthy[0];
+                  target = healthy.includes(model) ? model : healthy[0];
                   const t1 = performance.now();
                   peerRes = await forwardToPeer(peer, body, target, hops);
                   latencyMs = Math.round(performance.now() - t1);

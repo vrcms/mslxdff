@@ -456,7 +456,7 @@ test("peer with no healthy models is skipped; local fallback serves", async () =
   }
 });
 
-test("hot peer is reused without a status probe", async () => {
+test("hot peer is reused without a status probe when the remembered model matches", async () => {
   let statusHits = 0;
   const seenPeers = [];
   const peerSrv = await stubChatServer(
@@ -474,7 +474,7 @@ test("hot peer is reused without a status probe", async () => {
   const peers = createPeersService({
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: {},
-    stats: { [peerUrl]: { okAt: Date.now(), latencyMs: 100, fails: 0, model: "remembered-free" } },
+    stats: { [peerUrl]: { okAt: Date.now(), latencyMs: 100, fails: 0, model: "deepseek-v4-flash-free" } },
   });
   const app = await boot({
     upstreamHandler: (req, res) => {
@@ -488,14 +488,14 @@ test("hot peer is reused without a status probe", async () => {
     assert.equal(res.status, 200);
     assert.equal(statusHits, 0, "hot peer must not be probed");
     assert.equal(seenPeers.length, 1);
-    assert.equal(seenPeers[0].model, "remembered-free", "reuses the remembered model");
+    assert.equal(seenPeers[0].model, "deepseek-v4-flash-free", "reuses the remembered model");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
   }
 });
 
-test("hot peer model fails -> one probe retries with a healthy model", async () => {
+test("hot peer with a different remembered model probes and prefers the requested model", async () => {
   const seenModels = [];
   const peerSrv = await stubChatServer(
     (req, res, body) => {
@@ -509,7 +509,7 @@ test("hot peer model fails -> one probe retries with a healthy model", async () 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ from: "peer", model: m }));
     },
-    () => [{ id: "fresh-free", status: "normal" }]
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }, { id: "fresh-free", status: "normal" }]
   );
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
   const peers = createPeersService({
@@ -527,10 +527,43 @@ test("hot peer model fails -> one probe retries with a healthy model", async () 
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
-    assert.deepEqual(seenModels, ["stale-free", "fresh-free"], "probe retry after stale model miss");
+    assert.deepEqual(seenModels, ["deepseek-v4-flash-free"], "probes once and uses the requested model");
     const stat = peers.stat(peerUrl);
-    assert.equal(stat.model, "fresh-free", "cache updated with the probed model");
+    assert.equal(stat.model, "deepseek-v4-flash-free", "cache updated with the requested model");
     assert.equal(stat.fails, 0);
+  } finally {
+    await app.close();
+    await new Promise((r) => peerSrv.close(r));
+  }
+});
+
+test("peer without the requested model falls back to its first healthy model", async () => {
+  const seenModels = [];
+  const peerSrv = await stubChatServer(
+    (req, res, body) => {
+      const m = JSON.parse(body).model;
+      seenModels.push(m);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ from: "peer", model: m }));
+    },
+    () => [{ id: "hy3-free", status: "normal" }, { id: "nemotron-3-ultra-free", status: "normal" }]
+  );
+  const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
+  const peers = createPeersService({
+    peers: [{ name: "p", url: peerUrl, token: "t" }],
+    errors: {},
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(seenModels, ["hy3-free"], "falls back to the peer's first healthy model");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
