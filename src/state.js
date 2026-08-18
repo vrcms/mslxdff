@@ -69,6 +69,17 @@ export function savePeerErrors(errors, { file = defaultStateFile() } = {}) {
   return errors;
 }
 
+export function loadPeerStats({ file = defaultStateFile() } = {}) {
+  const stats = readState(file).peerStats;
+  return stats && typeof stats === "object" && !Array.isArray(stats) ? stats : {};
+}
+
+export function savePeerStats(stats, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, peerStats: stats });
+  return stats;
+}
+
 export function loadGroups({ file = defaultStateFile() } = {}) {
   const groups = readState(file).groups;
   return groups && typeof groups === "object" && !Array.isArray(groups) ? groups : {};

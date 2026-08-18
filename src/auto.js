@@ -14,12 +14,42 @@ export function isAutoModel(model) {
   return !model || model === "auto";
 }
 
+export const MODEL_STATUS = Object.freeze({
+  NORMAL: "normal",
+  LIMIT: "limit",
+  ERROR: "error",
+});
+
+// Legacy modelErrors entries are bare timestamps ({id: ts}); newer ones are
+// objects ({id: {status, at, code}}). Normalize both to an entry object.
+function normEntry(e) {
+  if (typeof e === "number") return { status: MODEL_STATUS.ERROR, at: e, code: null };
+  if (e && typeof e === "object") {
+    return {
+      status: e.status || MODEL_STATUS.ERROR,
+      at: typeof e.at === "number" ? e.at : 0,
+      code: e.code ?? null,
+    };
+  }
+  return null;
+}
+
+export function classifyErrorEvent(evt = {}) {
+  const code = Number(evt.status);
+  if (code === 429) return MODEL_STATUS.LIMIT;
+  const msg = String(evt.message || evt.note || "").toLowerCase();
+  if (msg.includes("rate limit") || msg.includes("limit exceeded") || msg.includes("429")) {
+    return MODEL_STATUS.LIMIT;
+  }
+  return MODEL_STATUS.ERROR;
+}
+
 export const DEFAULT_COOLDOWN_MS = 60_000;
 
 function inCooldown(id, errors, now, cooldownMs) {
   if (!cooldownMs) return false;
-  const err = errors[id];
-  return typeof err === "number" && now - err < cooldownMs;
+  const at = normEntry(errors[id])?.at ?? 0;
+  return at > 0 && now - at < cooldownMs;
 }
 
 export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0 } = {}) {
@@ -27,7 +57,7 @@ export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0 
     .filter(Boolean)
     .map((id) => ({
       id,
-      err: typeof errors[id] === "number" ? errors[id] : 0,
+      err: normEntry(errors[id])?.at ?? 0,
       isDeepseek: /deepseek/i.test(id),
       cooling: inCooldown(id, errors, now, cooldownMs),
     }))
@@ -79,20 +109,36 @@ export function createAutoSelector({
     return [requested, ...others];
   }
 
-  async function recordError(id) {
+  function isCooling(id) {
+    return inCooldown(id, lastErrorAt, now(), cooldownMs);
+  }
+
+  async function recordError(id, evt = {}) {
     if (!id) return;
-    lastErrorAt[id] = now();
+    lastErrorAt[id] = {
+      status: classifyErrorEvent(evt),
+      at: now(),
+      code: Number.isInteger(Number(evt.status)) ? Number(evt.status) : null,
+    };
     await persist({ ...lastErrorAt });
   }
 
-  function isCooling(id) {
-    return inCooldown(id, lastErrorAt, now(), cooldownMs);
+  async function recordOk(id) {
+    if (!id) return;
+    lastErrorAt[id] = { status: MODEL_STATUS.NORMAL, at: now(), code: 200 };
+    await persist({ ...lastErrorAt });
+  }
+
+  function statuses() {
+    return { ...lastErrorAt };
   }
 
   return {
     candidates,
     candidatesFor,
     recordError,
+    recordOk,
+    statuses,
     isCooling,
     errors: () => ({ ...lastErrorAt }),
   };

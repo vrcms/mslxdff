@@ -19,6 +19,10 @@ export function errorsFile() {
   return join(logDir(), "errors.log");
 }
 
+export function eventsFile() {
+  return join(logDir(), "events.log");
+}
+
 function ensureDir(dir) {
   mkdirSync(dir, { recursive: true });
 }
@@ -48,6 +52,16 @@ export function appendCall(entry, { file = callsFile() } = {}) {
 
 export function appendError(entry, { file = errorsFile() } = {}) {
   appendLine(file, entry);
+}
+
+// Structured debug event stream: one JSON line per request/error/forward
+// step, consumed live by `mslxdff -debug`.
+export function appendEvent(entry, { file = eventsFile() } = {}) {
+  appendLine(file, entry);
+}
+
+export function recentEvents(n = 100, { file = eventsFile() } = {}) {
+  return readLines(file).slice(-n);
 }
 
 function readLines(file) {

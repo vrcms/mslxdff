@@ -15,6 +15,7 @@ import {
   syncPeersFromMembers,
 } from "../src/groups.js";
 import { createPeersService } from "../src/peers.js";
+import { createAutoSelector } from "../src/auto.js";
 import { startServer } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
@@ -405,7 +406,14 @@ test("E2E: joined node fails locally, succeeds through a group member", async ()
     baseUrl: `http://127.0.0.1:${bUp.address().port}`,
     retry: {},
   });
-  const bSrv = startServer({ router: createRouter({ token: TOKEN, upstream: bUpstream, groups: leaderGroups }) }, 0);
+  const bAuto = createAutoSelector({ loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {} });
+  const bModels = {
+    get: async () => ({
+      object: "list",
+      data: [{ id: "deepseek-v4-flash-free" }, { id: "mimo-v2.5-free" }],
+    }),
+  };
+  const bSrv = startServer({ router: createRouter({ token: TOKEN, upstream: bUpstream, groups: leaderGroups, auto: bAuto, models: bModels }) }, 0);
   await bSrv.ready();
   const bPort = bSrv.server.address().port;
   const bUrl = `http://127.0.0.1:${bPort}`;

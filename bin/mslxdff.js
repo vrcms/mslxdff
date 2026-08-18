@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync, watch, openSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors } from "../src/state.js";
 import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid } from "../src/daemon.js";
 import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
-import { logDir, recentCalls, lastError, appendCall, appendError } from "../src/logs.js";
-const logs = { appendCall, appendError };
+import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, eventsFile, recentEvents } from "../src/logs.js";
+
+const logs = { appendCall, appendError, appendEvent };
 
 const args = process.argv.slice(2);
 const VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
@@ -78,8 +79,28 @@ if (args.includes("-model") || args.includes("-models")) {
     }
     process.exit(0);
   }
+  if (sub === "status") {
+    const statuses = loadModelErrors();
+    const cacheFile = join(logDir(), "models.json");
+    const cached = readModelsCache(cacheFile);
+    const ids = new Set([
+      ...(cached?.data || []).map((m) => m.id),
+      ...Object.keys(statuses),
+    ]);
+    for (const id of ids) {
+      const e = statuses[id];
+      const st = typeof e === "number" ? "error" : e?.status || "normal";
+      const at = typeof e === "number" ? e : e?.at;
+      const when = at
+        ? `  (${new Date(at).toISOString().slice(5, 19).replace("T", " ")})`
+        : "";
+      const extra = e?.code ? `  HTTP ${e.code}` : "";
+      console.log(`  ${id}  ${st}${when}${extra}`);
+    }
+    process.exit(0);
+  }
   if (sub !== undefined && sub !== "list") {
-    console.error("usage: mslxdff -model list | mslxdff -model refresh");
+    console.error("usage: mslxdff -model list | mslxdff -model status | mslxdff -model refresh");
     process.exit(1);
   }
   const cacheFile = join(logDir(), "models.json");
@@ -106,6 +127,13 @@ if (args.includes("-model") || args.includes("-models")) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
     process.exit(1);
   }
+  process.exit(0);
+}
+
+// -debug: live-follow the daemon's event stream (requests, upstream errors,
+// peer forwards, peer errors, results) for investigation
+if (args.includes("-debug") || args.includes("--debug")) {
+  await liveDebug();
   process.exit(0);
 }
 
@@ -230,7 +258,7 @@ function markJoined(entry) {
   saveGroupsJoined([...list, entry]);
 }
 
-const errMsg = (err) => String(err?.message || err);
+function errMsg(err) { return String(err?.message || err); }
 
 function readModelsCache(cacheFile) {
   try {
@@ -350,7 +378,7 @@ const auto = createAutoSelector({
     }
   },
 });
-const peers = createPeersService({ cooldownMs: peerCooldownMs() });
+const peers = createPeersService({ cooldownMs: peerCooldownMs(), heatMs: peerHeatMs() });
 const groups = createGroupsService({});
 const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshold() });
 
@@ -420,6 +448,11 @@ function peerCooldownMs() {
   return Number.isInteger(n) && n > 0 ? n : 30_000;
 }
 
+function peerHeatMs() {
+  const n = Number(process.env.MSLXDFF_PEER_HEAT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 5 * 60_000;
+}
+
 function maxHopsValue() {
   const n = Number(process.env.MSLXDFF_MAX_HOPS);
   return Number.isInteger(n) && n > 0 ? n : 3;
@@ -461,7 +494,9 @@ Usage:
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon, models, recent calls, last error)
   mslxdff -model list              list the free models this proxy serves (cached)
+  mslxdff -model status            show per-model health status (normal/limit/error)
   mslxdff -model refresh           force-refresh the model cache from the upstream
+  mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
   mslxdff -stop                    stop the running daemon
   mslxdff -port N                  persist the listen port (restarts the daemon on it if running)
   mslxdff -update                  update mslxdff to the latest published version
@@ -485,6 +520,7 @@ Environment:
   MODELS_REFRESH_MS       model-list background refresh interval (default 7200000)
   MSLXDFF_MODEL_COOLDOWN_MS  fallback cooldown after a model error (default 60000)
   MSLXDFF_PEER_COOLDOWN_MS   peer failover cooldown (default 30000)
+  MSLXDFF_PEER_HEAT_MS       how long a peer success stays hot for fast reuse (default 300000)
   MSLXDFF_GROUP_SYNC_MS   group membership sync interval (default 60000)
   MSLXDFF_MAX_HOPS           max peer-forwarding depth (default 3)
   MSLXDFF_BAN_THRESHOLD   failed joins before an ip is banned (default 5)
@@ -554,8 +590,14 @@ async function printStatus() {
   if (allPeers.length) {
     console.log(`\nfailover targets (${allPeers.length}):`);
     for (const p of allPeers) {
-      const cooling = peers.isCooling(p.url) ? "  [cooling]" : "";
-      console.log(`  ${p.name || p.url}  ${p.url}${cooling}`);
+      const tags = [];
+      if (peers.isCooling(p.url)) tags.push("cooling");
+      if (peers.isHot(p.url)) tags.push("hot");
+      const s = peers.stat(p.url);
+      if (s?.latencyMs != null) tags.push(`${s.latencyMs}ms`);
+      if (s?.fails) tags.push(`${s.fails} fail(s)`);
+      const tag = tags.length ? `  [${tags.join(", ")}]` : "";
+      console.log(`  ${p.name || p.url}  ${p.url}${tag}`);
     }
   }
 
@@ -566,12 +608,16 @@ async function printStatus() {
   }
 
   const modelsFile = join(logDir(), "models.json");
+  const statuses = loadModelErrors();
   if (existsSync(modelsFile)) {
     try {
       const cached = JSON.parse(readFileSync(modelsFile, "utf8"));
       const ids = (cached.data || []).map((m) => m.id).filter(Boolean);
       console.log(`\nmodels (${ids.length} free):`);
-      for (const id of ids) console.log(`  ${id}`);
+      for (const id of ids) {
+        const st = fmtStatus(id, statuses);
+        console.log(`  ${id}${st ? `  [${st}]` : ""}`);
+      }
     } catch {
       console.log("\nmodels: cache unreadable");
     }
@@ -601,8 +647,96 @@ async function printStatus() {
   else console.log(`\nnot running — start with: mslxdff -d`);
 }
 
-function fmtTs(iso) {
-  if (!iso) return "-";
+function fmtStatus(id, statuses) {
+  const e = statuses[id];
+  if (typeof e === "number") return `error ${fmtTs(new Date(e).toISOString())}`;
+  if (!e?.status || e.status === "normal") return "";
+  const when = e.at ? ` ${fmtTs(new Date(e.at).toISOString())}` : "";
+  const code = e.code ? ` HTTP ${e.code}` : "";
+  return `${e.status}${when}${code}`;
+}
+
+function fmtEvent(e) {
+  const t = e?.ts ? new Date(e.ts).toISOString().slice(11, 19) : "--:--:--";
+  const head = `[${t}]`;
+  const m = (x) => x || "-";
+  switch (e?.type) {
+    case "request":
+      return `${head} request       ${m(e.model)}${e.auto ? " (auto)" : ""} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}`;
+    case "upstream-error":
+      return `${head} upstream err  ${m(e.model)} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "peer-health":
+      return `${head} peer check    ${e.peer} -> ${e.count ? e.healthy.join(", ") : "no healthy models"}`;
+    case "peer-forward":
+      return `${head} forward ->    ${e.peer} model=${m(e.model)} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
+    case "peer-error":
+      return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "result":
+      return `${head} result        ${e.status} ${m(e.model)} via=${e.via} ${e.durationMs ?? "?"}ms`;
+    default:
+      return `${head} ${e?.type || "?"} ${JSON.stringify(e || {})}`;
+  }
+}
+
+// Live-follow the daemon's event stream: print the recent tail, then stream
+// new lines as they are appended (Ctrl+C to exit).
+async function liveDebug() {
+  const file = eventsFile();
+  // ensure the event file exists so watch() doesn't fail on a fresh daemon dir
+  if (!existsSync(file)) {
+    try {
+      openSync(file, "a").close();
+    } catch {
+      console.error(`cannot create event file: ${file}`);
+      process.exit(1);
+    }
+  }
+  const recent = recentEvents(100);
+  if (recent.length) {
+    console.log(`--- last ${recent.length} event(s) ---`);
+    for (const e of recent) console.log(fmtEvent(e));
+  }
+  console.log("--- live (Ctrl+C to exit) ---");
+  if (!existsSync(file)) console.log("(no events yet — trigger a chat request to see the flow)");
+
+  let pos = existsSync(file) ? statSync(file).size : 0;
+  let buf = "";
+  const pump = () => {
+    if (!existsSync(file)) {
+      pos = 0;
+      buf = "";
+      return;
+    }
+    const size = statSync(file).size;
+    if (size < pos) {
+      pos = 0; // file trimmed/rewritten: re-follow from the start of what remains
+      buf = "";
+    }
+    if (size === pos) return;
+    buf += readFileSync(file, "utf8").slice(pos);
+    pos = size;
+    const lines = buf.split("\n");
+    buf = lines.pop() || "";
+    for (const l of lines) {
+      if (!l.trim()) continue;
+      try {
+        console.log(fmtEvent(JSON.parse(l)));
+      } catch {
+        // partial/corrupt line while trimming — skip
+      }
+    }
+  };
+  try {
+    watch(file, { persistent: true }, pump);
+  } catch {
+    console.error(`cannot watch event file: ${file}`);
+    process.exit(1);
+  }
+  pump();
+  await new Promise(() => {}); // run until Ctrl+C
+}
+
+function fmtTs(iso) {  if (!iso) return "-";
   try {
     return new Date(iso).toISOString().replace("T", " ").slice(5, 19);
   } catch {

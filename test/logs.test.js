@@ -6,11 +6,14 @@ import { join } from "node:path";
 import {
   appendCall,
   appendError,
+  appendEvent,
+  recentEvents,
   recentCalls,
   lastError,
   recentErrors,
   callsFile,
   errorsFile,
+  eventsFile,
 } from "../src/logs.js";
 import { appendCall as defaultAppendCall, recentCalls as defaultRecentCalls } from "../src/logs.js";
 
@@ -65,6 +68,23 @@ test("missing log files yield empty results", () => {
   const dir = tmpDir();
   assert.deepEqual(recentCalls(5, { file: join(dir, "nope.log") }), []);
   assert.equal(lastError({ file: join(dir, "nope-err.log") }), null);
+  assert.deepEqual(recentEvents(5, { file: join(dir, "nope-events.log") }), []);
+});
+
+test("appendEvent writes JSON lines and recentEvents reads them back", () => {
+  const dir = tmpDir();
+  const file = join(dir, "events.log");
+  appendEvent({ type: "request", model: "a", hops: 1 }, { file });
+  appendEvent({ type: "upstream-error", model: "a", status: 429 }, { file });
+  appendEvent({ type: "peer-forward", peer: "x", model: "b" }, { file });
+  appendEvent({ type: "result", model: "b", status: 200, via: "peer" }, { file });
+  const events = recentEvents(2, { file });
+  assert.equal(events.length, 2);
+  assert.equal(events[0].type, "peer-forward");
+  assert.equal(events[0].peer, "x");
+  assert.equal(events[1].type, "result");
+  assert.equal(events[1].via, "peer");
+  assert.ok(!Number.isNaN(Date.parse(events[0].ts)), "ts must be parseable");
 });
 
 test("module-level default helpers use the same state dir", async () => {

@@ -117,7 +117,7 @@ test("recordError persists modelErrors to the state file", async () => {
   });
   await auto2.recordError("deepseek-v4-flash-free");
   const saved = JSON.parse(readFileSync(file, "utf8"));
-  assert.equal(saved.modelErrors["deepseek-v4-flash-free"], now);
+  assert.deepEqual(saved.modelErrors["deepseek-v4-flash-free"], { status: "error", at: now, code: null });
   assert.deepEqual(auto.errors(), {});
 });
 
@@ -131,6 +131,117 @@ test("recordError updates in-memory ranking", async () => {
   const list = await auto.candidates();
   assert.equal(list[0], "mimo-v2.5-free");
   assert.equal(list[1], "deepseek-v4-flash-free");
+});
+
+test("recordError classifies 429 and rate-limit messages as limit", async () => {
+  const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 10_000 });
+  await auto.recordError("m-free", { status: 429 });
+  assert.deepEqual(auto.errors()["m-free"], { status: "limit", at: 10_000, code: 429 });
+
+  await auto.recordError("m-free", { message: "FreeUsageLimitError: Rate limit exceeded" });
+  assert.equal(auto.errors()["m-free"].status, "limit");
+});
+
+test("recordError classifies other http codes and network errors as error", async () => {
+  const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 20_000 });
+  await auto.recordError("m-free", { status: 503 });
+  assert.deepEqual(auto.errors()["m-free"], { status: "error", at: 20_000, code: 503 });
+
+  await auto.recordError("m-free", { message: "upstream timed out after 30000ms" });
+  assert.equal(auto.errors()["m-free"].status, "error");
+});
+
+test("recordOk resets a model to normal", async () => {
+  const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 30_000 });
+  await auto.recordError("m-free", { status: 429 });
+  await auto.recordOk("m-free");
+  assert.deepEqual(auto.errors()["m-free"], { status: "normal", at: 30_000, code: 200 });
+});
+
+test("rankModels still ranks legacy numeric entries", () => {
+  const ids = ["a-free", "b-free"];
+  const ranked = rankModels(ids, { "a-free": 5000, "b-free": 1000 });
+  assert.deepEqual(ranked, ["b-free", "a-free"], "oldest error first");
+});
+
+test("cooldown works with both legacy numeric and object entries", () => {
+  const now = 100_000;
+  const ids = ["a-free", "b-free", "c-free"];
+  const errors = {
+    "a-free": now - 5_000,                    // legacy number, cooling
+    "b-free": { status: "limit", at: now - 500 }, // object, cooling
+    "c-free": { status: "error", at: now - 120_000 }, // object, elapsed
+  };
+  const ranked = rankModels(ids, errors, { now, cooldownMs: 60_000 });
+  assert.equal(ranked[ranked.length - 1], "b-free", "most recent event last");
+  assert.equal(ranked[0], "c-free", "elapsed cooldown first");
+});
+
+test("http 429 records limit status, later success resets to normal", async () => {
+  let mode = "limit";
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"],
+    errors: {},
+    cooldownMs: 0,
+  });
+  const app = await boot({
+    auto,
+    upstreamHandler: (req, res, body) => {
+      const model = JSON.parse(body).model;
+      if (mode === "limit" && model === "deepseek-v4-flash-free") {
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Rate limit exceeded" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model, ok: true }));
+    },
+  });
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 200);
+    const st = auto.errors()["deepseek-v4-flash-free"];
+    assert.equal(st.status, "limit");
+    assert.equal(st.code, 429);
+    assert.ok(st.at > 0);
+
+    mode = "ok";
+    const res2 = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res2.status, 200);
+    const st2 = auto.errors()["deepseek-v4-flash-free"];
+    assert.equal(st2.status, "normal");
+    assert.equal(st2.code, 200);
+    assert.ok(st2.at >= st.at, "success timestamp must be newer or equal");
+  } finally {
+    await app.close();
+  }
+});
+
+test("/v1/models/status requires auth and reports recorded statuses", async () => {
+  const auto = createAutoSelector({ loadCandidates: async () => [], errors: {}, now: () => 777_000 });
+  await auto.recordError("m1-free", { status: 429 });
+  await auto.recordError("m2-free", { status: 503 });
+  await auto.recordOk("m3-free");
+  const app = await boot({ auto, upstreamHandler: (req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); } });
+  try {
+    const unauth = await fetch(`http://127.0.0.1:${app.port}/v1/models/status`);
+    assert.equal(unauth.status, 401);
+
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/models/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.object, "list");
+    const byId = Object.fromEntries(json.data.map((m) => [m.id, m]));
+    assert.equal(byId["m1-free"].status, "limit");
+    assert.equal(byId["m1-free"].at, 777_000);
+    assert.equal(byId["m1-free"].code, 429);
+    assert.equal(byId["m2-free"].status, "error");
+    assert.equal(byId["m3-free"].status, "normal");
+  } finally {
+    await app.close();
+  }
 });
 
 async function stubUpstream(handler) {
@@ -221,7 +332,7 @@ test("auto: first model 400, falls back to next candidate, records error", async
     assert.ok(seen.includes("deepseek-v4-flash-free"));
     assert.ok(seen.includes("mimo-v2.5-free"));
     assert.ok(auto.errors()["deepseek-v4-flash-free"], "deepseek error must be recorded");
-    assert.equal(auto.errors()["mimo-v2.5-free"], undefined, "success must not be recorded as error");
+    assert.equal(auto.errors()["mimo-v2.5-free"]?.status, "normal", "success resets the model to normal");
   } finally {
     await app.close();
   }
