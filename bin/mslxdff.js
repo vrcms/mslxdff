@@ -711,9 +711,10 @@ function fmtEvent(e) {
 async function liveDebug() {
   const file = eventsFile();
   // ensure the event file exists so watch() doesn't fail on a fresh daemon dir
+  const dir = dirname(file);
   if (!existsSync(file)) {
     try {
-      mkdirSync(dirname(file), { recursive: true });
+      mkdirSync(dir, { recursive: true });
       closeSync(openSync(file, "a"));
     } catch {
       console.error(`cannot create event file: ${file}`);
@@ -726,48 +727,54 @@ async function liveDebug() {
     for (const e of recent) console.log(fmtEvent(e));
   }
   console.log("--- live (Ctrl+C to exit) ---");
+  console.log(`watching: ${file}`);
   if (!existsSync(file)) console.log("(no events yet — trigger a chat request to see the flow)");
 
   let pos = existsSync(file) ? statSync(file).size : 0;
   let buf = "";
   const pump = () => {
-    if (!existsSync(file)) {
-      pos = 0;
-      buf = "";
-      return;
-    }
-    const size = statSync(file).size;
-    if (size < pos) {
-      pos = 0; // file trimmed/rewritten: re-follow from the start of what remains
-      buf = "";
-    }
-    if (size === pos) return;
-    buf += readFileSync(file, "utf8").slice(pos);
-    pos = size;
-    const lines = buf.split("\n");
-    buf = lines.pop() || "";
-    for (const l of lines) {
-      if (!l.trim()) continue;
-      try {
-        console.log(fmtEvent(JSON.parse(l)));
-      } catch {
-        // partial/corrupt line while trimming — skip
+    try {
+      if (!existsSync(file)) {
+        pos = 0;
+        buf = "";
+        return;
       }
+      const size = statSync(file).size;
+      if (size < pos) {
+        pos = 0; // file trimmed/rewritten: re-follow from the start of what remains
+        buf = "";
+      }
+      if (size === pos) return;
+      buf += readFileSync(file, "utf8").slice(pos);
+      pos = size;
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        try {
+          console.log(fmtEvent(JSON.parse(l)));
+        } catch {
+          // partial/corrupt line while trimming — skip
+        }
+      }
+    } catch (err) {
+      console.error(`[debug] poll error: ${err.message}`);
     }
   };
+  // fs.watch is unreliable across platforms for freshly-created/rotated files,
+  // so polling is the source of truth (200ms); the directory watch just adds
+  // low-latency wake-ups and silently degrades when it misbehaves.
   try {
-    mkdirSync(dirname(file), { recursive: true });
-    watch(dirname(file), (_evt, filename) => {
+    mkdirSync(dir, { recursive: true });
+    watch(dir, (_evt, filename) => {
       if (!filename || basename(String(filename)) !== basename(file)) return;
       pump();
     });
   } catch {
-    console.error(`cannot watch event dir: ${dirname(file)}`);
-    process.exit(1);
+    console.error(`cannot watch event dir: ${dir} (falling back to polling only)`);
   }
-  // fs.watch is unreliable for freshly-created files on Windows — poll as a
-  // safety net so events are never missed.
-  setInterval(pump, 250);
+  // Poll is the source of truth; 200ms keeps human-perceived latency negligible.
+  setInterval(pump, 200);
   pump();
   await new Promise(() => {}); // run until Ctrl+C
 }
