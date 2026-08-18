@@ -50,6 +50,42 @@ test("addGroupMember rejects a wrong password, accepts the right one", () => {
   assert.equal(members["node-a"].token, "ta");
 });
 
+test("addGroupMember de-dupes by url: same ip:port under a new name updates, not duplicates", () => {
+  const file = tmpStateFile();
+  const svc = createGroupsService({ file });
+  const { key } = svc.create("wg");
+  svc.addMember("wg", { key, memberName: "node-a", url: "http://10.0.0.1:8989", token: "ta" });
+  svc.addMember("wg", { key, memberName: "node-a-2", url: "http://10.0.0.1:8989", token: "tb" });
+  const members = svc.listMembers("wg", { key });
+  const urls = Object.values(members);
+  assert.equal(urls.length, 1, "same ip:port must not be registered twice");
+  assert.equal(urls[0].url, "http://10.0.0.1:8989");
+  assert.equal(urls[0].token, "tb", "re-registration refreshes the token");
+});
+
+test("addGroupMember keeps distinct ip:port as separate members", () => {
+  const file = tmpStateFile();
+  const svc = createGroupsService({ file });
+  const { key } = svc.create("wg");
+  svc.addMember("wg", { key, memberName: "node-a", url: "http://10.0.0.1:8989", token: "ta" });
+  svc.addMember("wg", { key, memberName: "node-b", url: "http://10.0.0.2:8990", token: "tb" });
+  const members = svc.listMembers("wg", { key });
+  assert.equal(Object.keys(members).length, 2, "different ip:port are distinct members");
+});
+
+test("upsertMember de-dupes by url too", () => {
+  const file = tmpStateFile();
+  const svc = createGroupsService({ file });
+  const { key } = svc.create("wg");
+  svc.addMember("wg", { key, memberName: "node-a", url: "http://10.0.0.1:8989", token: "ta" });
+  svc.upsertMember("wg", { memberName: "node-renamed", url: "http://10.0.0.1:8989", token: "tc" });
+  const members = svc.listMembers("wg", { key });
+  const urls = Object.values(members);
+  assert.equal(urls.length, 1, "upsert with same url must not duplicate");
+  assert.equal(urls[0].url, "http://10.0.0.1:8989");
+  assert.equal(urls[0].token, "tc");
+});
+
 test("listGroupMembers requires the key", () => {
   const file = tmpStateFile();
   const svc = createGroupsService({ file });

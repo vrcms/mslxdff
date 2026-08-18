@@ -27,6 +27,20 @@ export function createGroup(name, { file, key = name } = {}) {
   return { name, key, created: true };
 }
 
+// Shared writer: register a member, de-duplicated by url (same ip:port
+// re-registering under a different name updates the existing entry instead of
+// creating a duplicate).
+function writeMember(group, memberName, url, token) {
+  const members = group.members || (group.members = {});
+  const byUrl = Object.entries(members).find(([, m]) => m.url === url);
+  if (byUrl) {
+    members[byUrl[0]] = { url, token: token || "" };
+    return;
+  }
+  const id = memberName || url;
+  members[id] = { url, token: token || "" };
+}
+
 // Leader side: add a member after verifying the join key.
 export function addGroupMember(name, { key, memberName, url, token, file } = {}) {
   const groups = loadGroups(file ? { file } : {});
@@ -34,8 +48,7 @@ export function addGroupMember(name, { key, memberName, url, token, file } = {})
   if (!group) throw new Error(`group "${name}" not found on this node`);
   if (!verifyGroupKey(key, group.key)) throw new Error("invalid group key");
   if (!url) throw new Error("member url is required");
-  const id = memberName || url;
-  group.members[id] = { url, token: token || "" };
+  writeMember(group, memberName, url, token);
   saveGroups(groups, file ? { file } : {});
   return group.members;
 }
@@ -47,8 +60,7 @@ export function upsertMember(name, { memberName, url, token, file } = {}) {
   const group = groups[name];
   if (!group) return null;
   if (!url) throw new Error("member url is required");
-  const id = memberName || url;
-  group.members[id] = { url, token: token || "" };
+  writeMember(group, memberName, url, token);
   saveGroups(groups, file ? { file } : {});
   return group.members;
 }
