@@ -331,6 +331,49 @@ function markJoined(entry) {
   saveGroupsJoined([...list, entry]);
 }
 
+// -leavegroup | -leave-groups: leave every joined group. Members deregister
+// from their leader; a leader disbands the group (deletes it entirely).
+const leaveAll = args.includes("-leavegroup") || args.includes("--leavegroup") || args.includes("-leave-groups");
+if (leaveAll) {
+  const groups = createGroupsService({});
+  const peers = createPeersService({});
+  const joined = loadGroupsJoined();
+  if (!joined.length) {
+    console.log("not joined to any group");
+    process.exit(0);
+  }
+  const myToken = (await loadToken()).token;
+  for (const g of joined) {
+    const peersRemoved = peers.removeByGroup(g.name);
+    if (g.leaderUrl) {
+      // member: deregister from the leader so we stop showing up in -group list
+      try {
+        const res = await fetch(`${g.leaderUrl}/v1/groups/leave`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${myToken}`,
+          },
+          body: JSON.stringify({ name: g.name }),
+        });
+        if (res.ok) console.log(`${g.name}: left (deregistered from ${g.leaderUrl})`);
+        else console.log(`${g.name}: left locally (leader said: ${await res.text().catch(() => `HTTP ${res.status}`)})`);
+      } catch (err) {
+        console.log(`${g.name}: left locally (leader unreachable: ${errMsg(err)})`);
+      }
+    } else {
+      // leader: disband the whole group
+      const disbanded = groups.delete(g.name);
+      const members = Object.values(disbanded?.members || {});
+      console.log(`${g.name}: disbanded (${members.length} member${members.length === 1 ? "" : "s"} removed)`);
+    }
+  }
+  const left = joined.map((g) => g.name);
+  saveGroupsJoined(loadGroupsJoined().filter((g) => !left.includes(g.name)));
+  console.log(`left ${left.length} group(s)`);
+  process.exit(0);
+}
+
 function errMsg(err) { return String(err?.message || err); }
 
 // Probe a member's health endpoint concurrently (v1/health preferred,
@@ -645,6 +688,7 @@ Usage:
   mslxdff -group sync              pull the freshest member list for all joined groups
   mslxdff -group leave <name>      leave a group (removes its members from this node)
   mslxdff -group list              list groups on this node
+  mslxdff -leavegroup              leave every group (members deregister, a leader disbands)
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -help                    show this help
 

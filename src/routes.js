@@ -455,6 +455,38 @@ const ROUTES = [
     },
   },
   {
+    method: "POST",
+    path: "/v1/groups/leave",
+    requiresAuth: false,
+    handler: async ({ req, res, groups }) => {
+      if (!groups) return json(res, 501, { error: "Groups service not configured" });
+      let body;
+      try {
+        body = await readBody(req);
+      } catch {
+        return json(res, 400, { error: "Invalid JSON body" });
+      }
+      if (!body?.name) return json(res, 400, { error: "group name is required" });
+      const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
+      if (!auth) return json(res, 401, { error: "bearer token required" });
+      const group = groups.list()[body.name];
+      if (!group) return json(res, 404, { error: `group "${body.name}" not found` });
+      const hit = groups.membersForToken(body.name, auth[1]);
+      if (!hit) return json(res, 403, { error: "invalid member token" });
+      try {
+        const removed = groups.removeMember(body.name, { url: hit.member.url });
+        return json(res, 200, {
+          object: "group",
+          name: body.name,
+          removed: removed?.removed ?? null,
+          members: groups.list()[body.name]?.members ?? {},
+        });
+      } catch (err) {
+        return json(res, 400, { error: errMsg(err) });
+      }
+    },
+  },
+  {
     method: "GET",
     path: "/v1/models",
     requiresAuth: true,

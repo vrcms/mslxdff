@@ -194,6 +194,66 @@ test("join without an explicit url: leader is seeded from leaderUrl, member from
   }
 });
 
+test("removeGroupMember and deleteGroup: member leaves, group disbands", () => {
+  const file = tmpStateFile();
+  const svc = createGroupsService({ file });
+  const { key } = svc.create("wg");
+  svc.addMember("wg", { key, memberName: "node-a", url: "http://10.0.0.1:8989", token: "ta" });
+  svc.addMember("wg", { key, memberName: "node-b", url: "http://10.0.0.2:8989", token: "tb" });
+
+  // member leaves -> only their entry removed
+  const left = svc.removeMember("wg", { url: "http://10.0.0.1:8989" });
+  assert.equal(left.removed.id, "node-a");
+  const afterLeave = svc.listMembers("wg", { key });
+  assert.ok(!afterLeave["node-a"]);
+  assert.ok(afterLeave["node-b"]);
+
+  // leader disbands -> whole group gone
+  const disbanded = svc.delete("wg");
+  assert.equal(Object.keys(disbanded.members).length, 1, "disband captured remaining members");
+});
+
+test("leave endpoint: member deregisters from the leader with its bearer token", async () => {
+  const leaderFile = tmpStateFile();
+  const leaderGroups = createGroupsService({ file: leaderFile });
+  leaderGroups.create("wg");
+  const member = { url: "http://10.0.0.1:8989", token: "member-secret" };
+  leaderGroups.addMember("wg", { key: "wg", memberName: "node-a", url: member.url, token: member.token });
+  const upstream = createUpstreamClient({ baseUrl: "http://127.0.0.1:1", retry: {} });
+  const srv = startServer({ router: createRouter({ token: TOKEN, upstream, groups: leaderGroups }) }, 0);
+  await srv.ready();
+  const port = srv.server.address().port;
+  try {
+    // wrong token -> 403
+    const bad = await fetch(`http://127.0.0.1:${port}/v1/groups/leave`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer nope" },
+      body: JSON.stringify({ name: "wg" }),
+    });
+    assert.equal(bad.status, 403);
+    // correct token -> removed
+    const ok = await fetch(`http://127.0.0.1:${port}/v1/groups/leave`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${member.token}` },
+      body: JSON.stringify({ name: "wg" }),
+    });
+    assert.equal(ok.status, 200);
+    const data = await ok.json();
+    assert.equal(data.removed.url, member.url);
+    assert.ok(!data.members["node-a"], "member gone from group after leave");
+    // unknown group -> 404
+    const missing = await fetch(`http://127.0.0.1:${port}/v1/groups/leave`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${member.token}` },
+      body: JSON.stringify({ name: "nope" }),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await srv.close();
+    srv.server.closeAllConnections?.();
+  }
+});
+
 test("syncPeersFromMembers skips self and leader entries for leaders", () => {
   const peers = createPeersService({ peers: [], errors: {} });
   // a member syncing: excludes its own url
