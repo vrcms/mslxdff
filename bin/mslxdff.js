@@ -210,7 +210,8 @@ if (groupCmd && groupCmd !== "create") {
         const rows = results.sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
         for (const r of rows) {
           const state = r.fail ? `fail  ${r.fail}` : `ok    ${r.ms}ms`;
-          console.log(`  ${String(r.id || "?")}  ${r.url}  ${state}`);
+          const label = r.id && r.id !== r.url ? r.id + "  " : "";
+          console.log(`  ${label}${r.url}  ${state}`);
         }
       }
     } else {
@@ -296,8 +297,8 @@ async function probeHealth({ id, url } = {}) {
     const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
     if (!res.ok) return { id, url: base, fail: `HTTP ${res.status}`, rank: 2 };
     return { id, url: base, ms: Date.now() - startedAt, rank: 0 };
-  } catch {
-    return { id, url: base, fail: "unreachable", rank: 2 };
+  } catch (err) {
+    return { id, url: base, fail: errMsg(err), rank: 2 };
   }
 }
 
