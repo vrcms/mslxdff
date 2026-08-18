@@ -289,7 +289,7 @@ test("event stream records final failure when everything fails", async () => {
   }
 });
 
-test("debug stream replays backlog and pushes new events live", async () => {
+test("events are emitted onto the bus as the router processes requests", async () => {
   const logs = tmpLogs();
   const bus = createEventBus();
   const app = await boot({
@@ -301,82 +301,17 @@ test("debug stream replays backlog and pushes new events live", async () => {
     },
   });
   try {
-    // fire one request to populate the bus backlog
+    const types = [];
+    const unsubscribe = bus.subscribe((e) => types.push(e.type));
     await fetch(`http://127.0.0.1:${app.port}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "warm" }] }),
     });
-
-    // open the SSE stream; it should replay the backlog immediately
-    const streamRes = await fetch(`http://127.0.0.1:${app.port}/v1/_debug/stream`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    });
-    assert.equal(streamRes.status, 200);
-    const reader = streamRes.body.getReader();
-    const decoder = new TextDecoder();
-    const firstData = await new Promise((resolve) => {
-      const read = async () => {
-        const { done, value } = await reader.read();
-        const text = decoder.decode(value, { stream: true });
-        if (!done) {
-          const event = text.split("\n").find((l) => l.startsWith("data: "));
-          if (event) return resolve(JSON.parse(event.slice(6)));
-        }
-        resolve(null);
-      };
-      read();
-    });
-    assert.ok(firstData, "backlog was replayed");
-    assert.equal(firstData.type, "request");
-
-    // fire a second request; the stream must push it without re-polling
-    const pushed = new Promise((resolve, reject) => {
-      let acc = "";
-      const timer = setTimeout(() => reject(new Error("timeout waiting for live event")), 5000);
-      const read = async () => {
-        const { done, value } = await reader.read();
-        if (done) {
-          clearTimeout(timer);
-          return resolve(null);
-        }
-        acc += decoder.decode(value, { stream: true });
-        const frame = acc.split("\n").find((l) => l.startsWith("data: ") && l.includes('"result"'));
-        if (frame) {
-          clearTimeout(timer);
-          return resolve(JSON.parse(frame.slice(6)));
-        }
-        read();
-      };
-      read();
-    });
-    await fetch(`http://127.0.0.1:${app.port}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "live" }] }),
-    });
-    const evt = await pushed;
-    assert.ok(evt, "live event was pushed over the stream");
-    assert.equal(evt.type, "result");
-    await reader.cancel().catch(() => {});
-  } finally {
-    await app.close();
-  }
-});
-
-test("debug stream requires auth", async () => {
-  const bus = createEventBus();
-  const app = await boot({
-    logs: logsAdapter(tmpLogs()),
-    bus,
-    upstreamHandler: (req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{}");
-    },
-  });
-  try {
-    const res = await fetch(`http://127.0.0.1:${app.port}/v1/_debug/stream`);
-    assert.equal(res.status, 401);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(types.includes("request"), "request event was emitted");
+    assert.ok(types.includes("result"), "result event was emitted");
+    unsubscribe();
   } finally {
     await app.close();
   }

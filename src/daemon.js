@@ -24,10 +24,14 @@ export function startDaemon(args = []) {
   const dir = daemonDir();
   mkdirSync(dir, { recursive: true });
   const logFd = openSync(logFile(), "a", 0o600);
+  const env = { ...process.env, MSLXDFF_DAEMON: "1" };
+  // a -debug foreground session wouldn't pass MSLXDFF_DEBUG to the
+  // background daemon it restores (that flag means "print events to stdout")
+  delete env.MSLXDFF_DEBUG;
   const child = spawn(process.execPath, [entry, ...args, "--daemon"], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    env: { ...process.env, MSLXDFF_DAEMON: "1" },
+    env,
   });
   child.unref();
   return child.pid;
