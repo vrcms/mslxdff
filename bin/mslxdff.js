@@ -331,11 +331,10 @@ function markJoined(entry) {
   saveGroupsJoined([...list, entry]);
 }
 
-// -leavegroup | -leave-groups: leave every joined group. Members deregister
-// from their leader; a leader disbands the group (deletes it entirely).
+// -leavegroup | -leave-groups: leave every joined group as a member.
+// Leaders cannot "leave" — they must disband with -delgroup <name>.
 const leaveAll = args.includes("-leavegroup") || args.includes("--leavegroup") || args.includes("-leave-groups");
 if (leaveAll) {
-  const groups = createGroupsService({});
   const peers = createPeersService({});
   const joined = loadGroupsJoined();
   if (!joined.length) {
@@ -343,10 +342,11 @@ if (leaveAll) {
     process.exit(0);
   }
   const myToken = (await loadToken()).token;
+  const leaders = [];
   for (const g of joined) {
-    const peersRemoved = peers.removeByGroup(g.name);
     if (g.leaderUrl) {
       // member: deregister from the leader so we stop showing up in -group list
+      const peersRemoved = peers.removeByGroup(g.name);
       try {
         const res = await fetch(`${g.leaderUrl}/v1/groups/leave`, {
           method: "POST",
@@ -362,15 +362,42 @@ if (leaveAll) {
         console.log(`${g.name}: left locally (leader unreachable: ${errMsg(err)})`);
       }
     } else {
-      // leader: disband the whole group
-      const disbanded = groups.delete(g.name);
-      const members = Object.values(disbanded?.members || {});
-      console.log(`${g.name}: disbanded (${members.length} member${members.length === 1 ? "" : "s"} removed)`);
+      leaders.push(g.name);
     }
   }
-  const left = joined.map((g) => g.name);
+  const left = joined.filter((g) => g.leaderUrl).map((g) => g.name);
   saveGroupsJoined(loadGroupsJoined().filter((g) => !left.includes(g.name)));
   console.log(`left ${left.length} group(s)`);
+  if (leaders.length) {
+    console.log(`\nskipped ${leaders.length} group(s) where this node is the leader:`);
+    for (const n of leaders) console.log(`  ${n}  — leaders can't leave; disband it with: mslxdff -delgroup ${n}`);
+  }
+  process.exit(0);
+}
+
+// -delgroup <name>: a leader disbands one of its groups (local groups state +
+// any member records). Fails if this node is not the leader of that group.
+const delGroupName = argValue("-delgroup", "--delgroup");
+if (delGroupName) {
+  const groups = createGroupsService({});
+  const peers = createPeersService({});
+  const local = groups.list()[delGroupName];
+  if (!local) {
+    const joined0 = loadGroupsJoined().find((g) => g.name === delGroupName);
+    if (joined0?.leaderUrl) {
+      console.log(`"${delGroupName}" is led by ${joined0.leaderUrl} — you are a member, use -leavegroup to leave it`);
+    } else if (joined0) {
+      console.log(`"${delGroupName}" exists in local state but has no group definition — nothing to delete`);
+    } else {
+      console.log(`group "${delGroupName}" not found on this node`);
+    }
+    process.exit(1);
+  }
+  const disbanded = groups.delete(delGroupName);
+  const members = Object.values(disbanded?.members || {});
+  peers.removeByGroup(delGroupName);
+  saveGroupsJoined(loadGroupsJoined().filter((g) => g.name !== delGroupName));
+  console.log(`group "${delGroupName}" disbanded (${members.length} member${members.length === 1 ? "" : "s"} removed)`);
   process.exit(0);
 }
 
@@ -688,7 +715,8 @@ Usage:
   mslxdff -group sync              pull the freshest member list for all joined groups
   mslxdff -group leave <name>      leave a group (removes its members from this node)
   mslxdff -group list              list groups on this node
-  mslxdff -leavegroup              leave every group (members deregister, a leader disbands)
+  mslxdff -leavegroup              leave every joined group as a member (leaders: use -delgroup)
+  mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -help                    show this help
 
