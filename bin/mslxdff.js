@@ -14,7 +14,7 @@ import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
 import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
-import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents } from "../src/logs.js";
+import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents, eventsFile, callsFile, errorsFile } from "../src/logs.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -82,6 +82,29 @@ if (args.includes("-uninstall") || args.includes("--uninstall")) {
 
   console.log("\npackage still installed — finish with:");
   console.log("  npm uninstall -g mslxdff");
+  process.exit(0);
+}
+
+if (args.includes("-log") || args.includes("--log") || args.includes("-logs") || args.includes("--logs")) {
+  const idx = args.findIndex((x) => x === "-log" || x === "--log" || x === "-logs" || x === "--logs");
+  const raw = args[idx + 1];
+  const n = Number(raw);
+  const count = Number.isInteger(n) && n > 0 ? n : 10;
+  const file = eventsFile();
+  const dir = logDir();
+  console.log(`log dir: ${dir}`);
+  console.log(`events:  ${file}`);
+  const evts = recentEvents(count);
+  if (!evts.length) {
+    console.log(`(no events yet — file empty or not found)`);
+  } else {
+    console.log(`--- last ${evts.length} event(s) ---`);
+    for (const e of evts) console.log(fmtEvent(e));
+  }
+  // also hint for other logs
+  if (count <= 10) {
+    console.log(`\nhint: mslxdff -log 100  |  calls: ${callsFile()}  errors: ${errorsFile()}  daemon: ${logFile()}`);
+  }
   process.exit(0);
 }
 
@@ -793,6 +816,7 @@ Usage:
   mslxdff                          start as a background daemon and exit (status + help if one is already running)
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon, models, recent calls, last error)
+  mslxdff -log [N]                 show last N events (default 10, e.g. -log 100)
   mslxdff -model list              list the free models this proxy serves (cached)
   mslxdff -model status            show per-model health status (normal/limit/error)
   mslxdff -model refresh           force-refresh the model cache from the upstream
