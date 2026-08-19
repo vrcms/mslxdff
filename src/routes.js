@@ -89,22 +89,31 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
       let first = true;
       let wroteAny = false;
       let timedOut = false;
-      // whole-stream ceiling (TTFB + generation): cancels the upstream body so
-      // the loop exits and we proactively end the stream instead of hanging.
-      let genTooLong = false;
-      const genTimer = GEN_TIMEOUT_MS
-        ? setTimeout(() => {
-            genTooLong = true;
-            if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
-          }, GEN_TIMEOUT_MS)
-        : null;
+      let stalled = false;
+      let tooLong = false;
+      let stallTimer = null;
+      const armStall = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = STALL_TIMEOUT_MS
+          ? setTimeout(() => {
+              stalled = true;
+              if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+            }, STALL_TIMEOUT_MS)
+          : null;
+      };
       const firstTimer = setTimeout(() => {
         timedOut = true;
         if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
       }, streamTimeoutMs);
+      const maxTimer = MAX_STREAM_MS
+        ? setTimeout(() => {
+            tooLong = true;
+            if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+          }, MAX_STREAM_MS)
+        : null;
       try {
         for await (const chunk of upRes.body) {
-          if (timedOut || genTooLong) break;
+          if (timedOut || stalled || tooLong) break;
           if (first) {
             first = false;
             ttf = Math.round(performance.now() - t0);
@@ -112,24 +121,26 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
           }
           wroteAny = true;
           res.write(chunk);
+          armStall(); // any fresh chunk resets the stall clock
         }
       } catch (err) {
-        // body threw — if we already started, treat as a mid-stream interrupt
-        if (!wroteAny) { timedOut = true; genTooLong = false; }
+        // body threw — if nothing was written, treat it as a first-block timeout
+        if (!wroteAny) timedOut = true;
+        else stalled = true;
       } finally {
         if (firstTimer) clearTimeout(firstTimer);
-        if (genTimer) clearTimeout(genTimer);
+        if (maxTimer) clearTimeout(maxTimer);
+        if (stallTimer) clearTimeout(stallTimer);
       }
       if (timedOut && !wroteAny) {
         // nothing written to res yet — safe to drop this model and let the
         // caller fail over to the next one. Do NOT write/end res here.
         return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true };
       }
-      if (genTooLong || (timedOut && wroteAny)) {
-        // we'd already started streaming when it exceeded the ceiling — can't
-        // cleanly fail over a half-written response, just end it so the client
-        // sees a clean EOF rather than hanging. interrupted signals the caller
-        // to remember this model as slow.
+      if ((stalled || tooLong) && wroteAny) {
+        // a response that was flowing either went silent for the stall window
+        // or blew the total ceiling — we can't cleanly fail over a half-written
+        // body, so end it and let the caller remember this model as slow.
         interrupted = true;
         try { res.end(); } catch { /* ignore */ }
         return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted };
@@ -268,13 +279,21 @@ export const STREAM_TIMEOUT_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 25_000;
 })();
 
-// Ceiling on the total wall-clock a single streamed response may run (TTFB +
-// generation + relay). Once exceeded we proactively end the stream so the
-// client gets a clean EOF instead of hanging on a very slow model; the model
-// is then flagged slow and demoted for the next request. Set to 0 to disable.
-export const GEN_TIMEOUT_MS = (() => {
-  const n = Number(process.env.MSLXDFF_GEN_TIMEOUT_MS);
-  return Number.isInteger(n) && n > 0 ? n : 20_000;
+// Ceiling on how long a streamed response may produce no new chunk before we
+// treat the model as stalled and proactively end the stream (clean EOF instead
+// of hanging on a dead upstream). A model that keeps emitting chunks is never
+// cut off — only silence triggers it. Set to 0 to disable.
+export const STALL_TIMEOUT_MS = (() => {
+  const n = Number(process.env.MSLXDFF_STALL_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 15_000;
+})();
+
+// Loose total ceiling (TTFB + generation) so an unbounded stream can never
+// run forever. Kept much larger than the stall timeout so normally-flowing
+// responses are not truncated. Set to 0 to disable.
+export const MAX_STREAM_MS = (() => {
+  const n = Number(process.env.MSLXDFF_MAX_STREAM_MS);
+  return Number.isInteger(n) && n > 0 ? n : 120_000;
 })();
 
 async function racePeerCandidates(candidates, ctx) {
@@ -437,11 +456,12 @@ const ROUTES = [
             continue;
           }
           if (out.interrupted) {
-            // the whole stream ran past GEN_TIMEOUT_MS — we ended it proactively
-            // so the client got a clean EOF instead of hanging. Remember this
-            // model as slow so the next request prefers a faster one.
-            if (auto) await auto.recordError(model, { status: 200, slow: true, note: `gen timeout ${GEN_TIMEOUT_MS}ms` });
-            evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: GEN_TIMEOUT_MS, interrupted: true });
+            // the model went silent past STALL_TIMEOUT_MS (or blew the total
+            // ceiling) — we ended it so the client got a clean EOF instead of
+            // hanging. Remember this model as slow so the next request prefers
+            // a faster one.
+            if (auto) await auto.recordError(model, { status: 200, slow: true, note: `stall ${STALL_TIMEOUT_MS}ms` });
+            evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: STALL_TIMEOUT_MS, interrupted: true });
             logCall(model, 200);
             evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true });
             return;
