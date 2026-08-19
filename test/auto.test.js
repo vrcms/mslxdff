@@ -117,7 +117,7 @@ test("recordError persists modelErrors to the state file", async () => {
   });
   await auto2.recordError("deepseek-v4-flash-free");
   const saved = JSON.parse(readFileSync(file, "utf8"));
-  assert.deepEqual(saved.modelErrors["deepseek-v4-flash-free"], { status: "error", at: now, code: null });
+  assert.deepEqual(saved.modelErrors["deepseek-v4-flash-free"], { status: "error", at: now, code: null, slow: false });
   assert.deepEqual(auto.errors(), {});
 });
 
@@ -136,7 +136,7 @@ test("recordError updates in-memory ranking", async () => {
 test("recordError classifies 429 and rate-limit messages as limit", async () => {
   const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 10_000 });
   await auto.recordError("m-free", { status: 429 });
-  assert.deepEqual(auto.errors()["m-free"], { status: "limit", at: 10_000, code: 429 });
+  assert.deepEqual(auto.errors()["m-free"], { status: "limit", at: 10_000, code: 429, slow: false });
 
   await auto.recordError("m-free", { message: "FreeUsageLimitError: Rate limit exceeded" });
   assert.equal(auto.errors()["m-free"].status, "limit");
@@ -145,7 +145,7 @@ test("recordError classifies 429 and rate-limit messages as limit", async () => 
 test("recordError classifies other http codes and network errors as error", async () => {
   const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 20_000 });
   await auto.recordError("m-free", { status: 503 });
-  assert.deepEqual(auto.errors()["m-free"], { status: "error", at: 20_000, code: 503 });
+  assert.deepEqual(auto.errors()["m-free"], { status: "error", at: 20_000, code: 503, slow: false });
 
   await auto.recordError("m-free", { message: "upstream timed out after 30000ms" });
   assert.equal(auto.errors()["m-free"].status, "error");
@@ -155,7 +155,7 @@ test("recordOk resets a model to normal", async () => {
   const auto = createAutoSelector({ loadCandidates: async () => ["m-free"], errors: {}, now: () => 30_000 });
   await auto.recordError("m-free", { status: 429 });
   await auto.recordOk("m-free");
-  assert.deepEqual(auto.errors()["m-free"], { status: "normal", at: 30_000, code: 200 });
+  assert.deepEqual(auto.errors()["m-free"], { status: "normal", at: 30_000, code: 200, slow: false });
 });
 
 test("rankModels still ranks legacy numeric entries", () => {
@@ -175,6 +175,37 @@ test("cooldown works with both legacy numeric and object entries", () => {
   const ranked = rankModels(ids, errors, { now, cooldownMs: 60_000 });
   assert.equal(ranked[ranked.length - 1], "b-free", "most recent event last");
   assert.equal(ranked[0], "c-free", "elapsed cooldown first");
+});
+
+test("slow models use the longer slow cooldown and rank last", () => {
+  const now = 200_000;
+  const ids = ["a-free", "b-free", "c-free"];
+  // a-free is slow (flagged) recently — should stay parked out of rotation
+  const errors = {
+    "a-free": { status: "error", at: now - 10_000, code: 200, slow: true },
+    "b-free": { status: "error", at: now - 120_000, code: 200, slow: false },
+    "c-free": { status: "normal", at: now - 120_000, code: 200, slow: false },
+  };
+  const ranked = rankModels(ids, errors, { now, cooldownMs: 60_000, slowCooldownMs: 5 * 60_000 });
+  assert.equal(ranked[0], "b-free", "normal cooldown elapsed, healthy first");
+  assert.equal(ranked[ranked.length - 1], "a-free", "slow model parked last");
+});
+
+test("recordError with slow flag persists slow and uses long cooldown", async () => {
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["m-free", "fast-free"],
+    errors: { "fast-free": { status: "normal", at: 1000, code: 200 } },
+    now: () => 50_000,
+  });
+  await auto.recordError("m-free", { status: 200, slow: true });
+  assert.equal(auto.errors()["m-free"].status, "error");
+  assert.equal(auto.errors()["m-free"].slow, true);
+  assert.equal(auto.errors()["m-free"].code, 200);
+
+  // slow model is parked behind the fast one during the slow window
+  const ranked = await auto.candidates();
+  assert.equal(ranked[0], "fast-free");
+  assert.equal(ranked[1], "m-free");
 });
 
 test("http 429 records limit status, later success resets to normal", async () => {

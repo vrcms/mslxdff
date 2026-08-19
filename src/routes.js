@@ -244,7 +244,7 @@ export const PEER_RACE_LIMIT = Number(process.env.MSLXDFF_PEER_RACE_LIMIT) > 0
 // Set MSLXDFF_SLOW_TOTAL_MS=0 to disable.
 export const SLOW_TOTAL_MS = (() => {
   const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
-  return Number.isInteger(n) && n > 0 ? n : 15_000;
+  return Number.isInteger(n) && n > 0 ? n : 20_000;
 })();
 
 // How long to wait for the first chunk of a streamed response before giving up
