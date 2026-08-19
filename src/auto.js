@@ -1,4 +1,4 @@
-import { loadModelErrors, saveModelErrors } from "./state.js";
+import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies } from "./state.js";
 
 export const DEFAULT_AUTO_MODELS = [
   "deepseek-v4-flash-free",
@@ -50,6 +50,7 @@ export function classifyErrorEvent(evt = {}) {
 
 export const DEFAULT_COOLDOWN_MS = 60_000;
 export const DEFAULT_SLOW_COOLDOWN_MS = 5 * 60_000;
+export const DEFAULT_LATENCY_ALPHA = 0.3;
 
 function effectiveCooldown(entry, slowCooldownMs, cooldownMs) {
   if (entry && entry.slow) return slowCooldownMs || 0;
@@ -63,7 +64,14 @@ function inCooldown(id, errors, now, cooldownMs, slowCooldownMs) {
   return cd > 0 && now - e.at < cd;
 }
 
-export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0, slowCooldownMs = 0 } = {}) {
+// Latency EMA helpers
+function normLatency(e) {
+  if (!e || typeof e !== "object") return null;
+  const ema = Number(e.emaMs);
+  return Number.isFinite(ema) && ema > 0 ? ema : null;
+}
+
+export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0, slowCooldownMs = 0, latencies = {} } = {}) {
   return [...new Set(ids)]
     .filter(Boolean)
     .map((id) => ({
@@ -72,10 +80,12 @@ export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0,
       err: normEntry(errors[id])?.at ?? 0,
       isDeepseek: /deepseek/i.test(id),
       cooling: inCooldown(id, errors, now, cooldownMs, slowCooldownMs),
+      latency: normLatency(latencies[id]) ?? Number.MAX_SAFE_INTEGER,
     }))
     .sort(
       (a, b) =>
         (a.cooling ? 1 : 0) - (b.cooling ? 1 : 0) ||
+        a.latency - b.latency ||
         a.err - b.err ||
         (b.isDeepseek ? 1 : 0) - (a.isDeepseek ? 1 : 0)
     )
@@ -88,10 +98,14 @@ export function createAutoSelector({
   now = () => Date.now(),
   cooldownMs = DEFAULT_COOLDOWN_MS,
   slowCooldownMs = DEFAULT_SLOW_COOLDOWN_MS,
+  latencyAlpha = DEFAULT_LATENCY_ALPHA,
   errors: seedErrors,
+  latencies: seedLatencies,
   persist = (errors, f = file) => saveModelErrors(errors, f ? { file: f } : {}),
+  persistLatencies = (latencies, f = file) => saveModelLatencies(latencies, f ? { file: f } : {}),
 } = {}) {
   const lastErrorAt = { ...(seedErrors ?? loadModelErrors(file ? { file } : {})) };
+  const latencies = { ...(seedLatencies ?? loadModelLatencies(file ? { file } : {})) };
 
   async function loadList() {
     let list;
@@ -105,7 +119,7 @@ export function createAutoSelector({
   }
 
   async function candidates() {
-    return rankModels(await loadList(), lastErrorAt, { now: now(), cooldownMs, slowCooldownMs });
+    return rankModels(await loadList(), lastErrorAt, { now: now(), cooldownMs, slowCooldownMs, latencies });
   }
 
   async function candidatesFor(requested) {
@@ -116,6 +130,7 @@ export function createAutoSelector({
       now: now(),
       cooldownMs,
       slowCooldownMs,
+      latencies,
     });
     if (inCooldown(requested, lastErrorAt, now(), cooldownMs, slowCooldownMs)) {
       return [...others, requested];
@@ -138,14 +153,33 @@ export function createAutoSelector({
     await persist({ ...lastErrorAt });
   }
 
-  async function recordOk(id) {
+  async function recordOk(id, evt = {}) {
     if (!id) return;
     lastErrorAt[id] = { status: MODEL_STATUS.NORMAL, at: now(), code: 200, slow: false };
     await persist({ ...lastErrorAt });
+    const ms = Number(evt.latencyMs ?? evt.totalMs ?? evt.elapsedMs);
+    if (Number.isFinite(ms) && ms > 0) {
+      const prev = latencies[id]?.emaMs;
+      const ema = prev ? Math.round(prev * (1 - latencyAlpha) + ms * latencyAlpha) : Math.round(ms);
+      latencies[id] = { emaMs: ema, lastMs: Math.round(ms), at: now(), count: (latencies[id]?.count ?? 0) + 1 };
+      await persistLatencies({ ...latencies });
+    }
+  }
+
+  async function recordLatency(id, ms) {
+    if (!id || !Number.isFinite(ms) || ms <= 0) return;
+    const prev = latencies[id]?.emaMs;
+    const ema = prev ? Math.round(prev * (1 - latencyAlpha) + ms * latencyAlpha) : Math.round(ms);
+    latencies[id] = { emaMs: ema, lastMs: Math.round(ms), at: now(), count: (latencies[id]?.count ?? 0) + 1 };
+    await persistLatencies({ ...latencies });
   }
 
   function statuses() {
     return { ...lastErrorAt };
+  }
+
+  function latencyStatuses() {
+    return { ...latencies };
   }
 
   return {
@@ -153,8 +187,11 @@ export function createAutoSelector({
     candidatesFor,
     recordError,
     recordOk,
+    recordLatency,
     statuses,
+    latencyStatuses,
     isCooling,
     errors: () => ({ ...lastErrorAt }),
+    latencies: () => ({ ...latencies }),
   };
 }

@@ -183,17 +183,27 @@ test("event stream records request and result for a local success", async () => 
       body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hello world" }] }),
     });
     assert.equal(res.status, 200);
-    const events = recentEvents(10, { file: logs.events });
+    const events = recentEvents(20, { file: logs.events });
     const types = events.map((e) => e.type);
-    assert.deepEqual(types, ["request", "result"]);
-    assert.equal(events[0].model, "deepseek-v4-flash-free");
-    assert.equal(events[0].hops, 2);
-    assert.equal(events[0].auto, false);
-    assert.equal(events[0].prompt, "hello world");
-    assert.ok(events[0].ip);
-    assert.equal(events[1].status, 200);
-    assert.equal(events[1].via, "local");
-    assert.ok(events[1].durationMs >= 0);
+    assert.ok(types.includes("request"));
+    assert.ok(types.includes("result"));
+    assert.ok(types.includes("ordered"));
+    assert.equal(types[0], "request");
+    // ordered + relay lifecycle are now also logged for deep tracing
+    assert.ok(types.includes("ordered"));
+    assert.ok(types.includes("relay-start") || types.includes("relay-done") || types.includes("result"));
+    const reqEvt = events.find((e) => e.type === "request");
+    const resEvt = events.find((e) => e.type === "result");
+    assert.equal(reqEvt.model, "deepseek-v4-flash-free");
+    assert.equal(reqEvt.hops, 2);
+    assert.equal(reqEvt.auto, false);
+    assert.equal(reqEvt.prompt, "hello world");
+    assert.ok(reqEvt.ip);
+    assert.ok(reqEvt.reqId);
+    assert.equal(resEvt.status, 200);
+    assert.equal(resEvt.via, "local");
+    assert.ok(resEvt.durationMs >= 0);
+    assert.equal(reqEvt.reqId, resEvt.reqId);
   } finally {
     await app.close();
   }
@@ -237,7 +247,7 @@ test("event stream shows upstream error then peer forward chain", async () => {
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.from, "peer");
-    const events = recentEvents(10, { file: logs.events });
+    const events = recentEvents(30, { file: logs.events });
     const types = events.map((e) => e.type);
     assert.ok(types.includes("request"));
     assert.ok(types.includes("upstream-error"));

@@ -423,7 +423,7 @@ test("explicit model falls back on error and records it", async () => {
 
 test("explicit model that errors falls back to the next candidate", async () => {
   const seen = [];
-  const auto = createAutoSelector({ loadCandidates: async () => ["big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {}, cooldownMs: 60_000 });
+  const auto = createAutoSelector({ loadCandidates: async () => ["big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {}, latencies: {}, cooldownMs: 60_000, file: tmpStateFile() });
   const app = await boot({
     auto,
     upstreamHandler: (req, res, body) => {
@@ -442,6 +442,7 @@ test("explicit model that errors falls back to the next candidate", async () => 
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
     const json = await res.json();
+    // with no latency history, fallback respects original order
     assert.equal(json.model, "big-pickle");
     assert.deepEqual(seen, ["deepseek-v4-flash-free", "big-pickle"]);
   } finally {

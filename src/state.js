@@ -47,6 +47,17 @@ export function saveModelErrors(errors, { file = defaultStateFile() } = {}) {
   return errors;
 }
 
+export function loadModelLatencies({ file = defaultStateFile() } = {}) {
+  const lat = readState(file).modelLatencies;
+  return lat && typeof lat === "object" && !Array.isArray(lat) ? lat : {};
+}
+
+export function saveModelLatencies(latencies, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, modelLatencies: latencies });
+  return latencies;
+}
+
 export function loadPeers({ file = defaultStateFile() } = {}) {
   const peers = readState(file).peers;
   return Array.isArray(peers) ? peers : [];
