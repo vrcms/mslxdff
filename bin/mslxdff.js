@@ -664,6 +664,49 @@ const groupSyncTimer = setInterval(() => {
 }, groupSyncIntervalMs());
 groupSyncTimer.unref();
 
+// Auto-update: periodically check npm for a newer mslxdff and restart.
+// Enable with MSLXDFF_AUTO_UPDATE=1 (hourly) or MSLXDFF_AUTO_UPDATE_MS=<ms>.
+// Uses the same npm view/install path as `mslxdff -update`, but runs inside
+// the daemon so no manual intervention is needed.
+const autoUpdateMs = autoUpdateIntervalMs();
+if (autoUpdateMs) {
+  console.log(`auto-update enabled: checking every ${Math.round(autoUpdateMs / 60000)}m`);
+  const autoUpdateTimer = setInterval(() => {
+    checkAndAutoUpdate().catch((err) => console.log(`auto-update check failed: ${errMsg(err)}`));
+  }, autoUpdateMs);
+  autoUpdateTimer.unref();
+}
+
+async function checkAndAutoUpdate() {
+  const info = await run(npmCmd(), ["view", "mslxdff", "version", "dist-tags.latest"]);
+  if (info.err) throw new Error(info.err.message);
+  const parts = (info.stdout || "").trim().split(/\s+/).filter(Boolean);
+  const latest = parts[parts.length - 1];
+  if (!latest || latest === VERSION) return;
+  // simple semver compare: skip if latest is not newer
+  if (compareSemver(latest, VERSION) <= 0) return;
+  console.log(`auto-update: v${VERSION} -> v${latest}, installing...`);
+  const up = await run(npmCmd(), ["install", "-g", `mslxdff@${latest}`]);
+  if (up.err) throw new Error(up.err.message);
+  console.log(`auto-update: installed v${latest}, restarting daemon...`);
+  try { stopDaemon(); } catch {}
+  // startDaemon re-reads VERSION from the newly installed package on next boot;
+  // for the current process we just respawn with the new code.
+  const newPid = startDaemon([]);
+  await waitForHealth(resolvePort(), 8000);
+  console.log(`auto-update: restarted as v${latest} (pid ${newPid})`);
+}
+
+function compareSemver(a, b) {
+  const pa = a.split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = b.split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const av = pa[i] || 0, bv = pb[i] || 0;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+
 function argValue(...names) {
   for (let i = 0; i < args.length; i++) {
     if (names.includes(args[i])) return args[i + 1];
@@ -710,6 +753,14 @@ function maxHopsValue() {
 function groupSyncIntervalMs() {
   const n = Number(process.env.MSLXDFF_GROUP_SYNC_MS);
   return Number.isInteger(n) && n > 0 ? n : 60_000;
+}
+
+function autoUpdateIntervalMs() {
+  const raw = process.env.MSLXDFF_AUTO_UPDATE_MS ?? process.env.MSLXDFF_AUTO_UPDATE;
+  if (raw === undefined || raw === null || raw === "") return 0;
+  if (raw === "1" || String(raw).toLowerCase() === "true") return 60 * 60 * 1000;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 0;
 }
 
 function banWindowMs() {
@@ -778,6 +829,8 @@ Environment:
   MSLXDFF_MAX_HOPS           max peer-forwarding depth (default 3)
   MSLXDFF_BAN_THRESHOLD   failed joins before an ip is banned (default 5)
   MSLXDFF_BAN_WINDOW_MS   ban duration after too many failures (default 48h)
+  MSLXDFF_AUTO_UPDATE   auto-update: 1/true=hourly, or ms interval (0=off)
+  MSLXDFF_AUTO_UPDATE_MS  same as above, explicit ms (overrides AUTO_UPDATE)
 `);
 }
 
