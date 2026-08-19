@@ -65,26 +65,44 @@ function readBody(req) {
   });
 }
 
-// Relay an upstream response to the client. Returns { status, ttfMs, aborted }
-// where:
-//   - status  200 = fully relayed; STREAM_TIMEOUT = first chunk never arrived
-//     within streamTimeoutMs and nothing was written to res yet (safe to
-//     failover); 500 = the response body errored mid-stream.
-//   - ttfMs   time to first chunk when one arrived.
-//   - aborted true when we closed the downstream connection ourselves (only
-//     for the STREAM_TIMEOUT case, before anything was written).
-async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_TIMEOUT_MS } = {}) {
+// Relay an upstream response to the client. Returns { status, ttfMs, aborted, interrupted, detail }
+// detail carries byte/chunk/sawDone diagnostics so a truncated deep-think
+// stream can be told apart from a clean EOF vs our stall/max vs client abort.
+async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS } = {}) {
   const t0 = performance.now();
   const contentType = upRes.headers.get("content-type") || "";
   const isStream = Boolean(body?.stream) || contentType.includes("text/event-stream");
   res.statusCode = upRes.status;
 
+  let ttf = null;
+  let interrupted = false;
+  let finishedNormally = false;
+  const detail = {
+    receivedChunks: 0,
+    receivedBytes: 0,
+    wroteChunks: 0,
+    wroteBytes: 0,
+    sawDone: false,
+    sawFinishReason: null,
+    lastChunkAtMs: null,
+    lastChunkGapMs: null,
+    maxGapMs: 0,
+    stallHits: 0, // chunks where gap > SCORE_STALL_MS (quality signal, never cuts)
+    exitReason: null, // normal | first-timeout | stall | max | upstream-error | downstream-close | empty-body
+    upstreamError: null,
+    downstreamClosed: false,
+  };
+  let prevChunkAt = t0;
+  const onClose = () => {
+    detail.downstreamClosed = true;
+    if (!finishedNormally && onDownstreamAbort) onDownstreamAbort();
+  };
+  res.on("close", onClose);
+
   if (isStream) {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    let ttf = null;
-    let interrupted = false;
     if (upRes.body) {
       let first = true;
       let wroteAny = false;
@@ -97,34 +115,59 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
         stallTimer = STALL_TIMEOUT_MS
           ? setTimeout(() => {
               stalled = true;
+              detail.exitReason = "stall";
               if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
             }, STALL_TIMEOUT_MS)
           : null;
       };
-      const firstTimer = setTimeout(() => {
+      let firstTimer = setTimeout(() => {
         timedOut = true;
+        detail.exitReason = "first-timeout";
         if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
       }, streamTimeoutMs);
       const maxTimer = MAX_STREAM_MS
         ? setTimeout(() => {
             tooLong = true;
+            detail.exitReason = "max";
             if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
           }, MAX_STREAM_MS)
         : null;
       try {
         for await (const chunk of upRes.body) {
+          const now = performance.now();
+          detail.receivedChunks += 1;
+          const len = chunk?.length ?? chunk?.byteLength ?? 0;
+          detail.receivedBytes += len;
+          const gap = Math.round(now - prevChunkAt);
+          detail.lastChunkAtMs = Math.round(now - t0);
+          detail.lastChunkGapMs = gap;
+          if (gap > detail.maxGapMs) detail.maxGapMs = gap;
+          if (gap > SCORE_STALL_MS) detail.stallHits += 1;
+          prevChunkAt = now;
+          // cheap inspection for diagnostics (no full parse)
+          try {
+            const txt = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : typeof chunk === "string" ? chunk : "";
+            if (txt.includes("[DONE]")) detail.sawDone = true;
+            const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
+            if (m) detail.sawFinishReason = m[1];
+          } catch { /* ignore */ }
           if (timedOut || stalled || tooLong) break;
           if (first) {
             first = false;
-            ttf = Math.round(performance.now() - t0);
+            ttf = Math.round(now - t0);
             onFirstChunk?.(ttf);
+            if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
           wroteAny = true;
+          detail.wroteChunks += 1;
+          detail.wroteBytes += len;
           res.write(chunk);
-          armStall(); // any fresh chunk resets the stall clock
+          armStall(); // no-op when STALL_TIMEOUT_MS=0; scoring uses SCORE_STALL_MS gap above
         }
+        if (!detail.exitReason) detail.exitReason = "normal";
       } catch (err) {
-        // body threw — if nothing was written, treat it as a first-block timeout
+        detail.upstreamError = String(err?.message || err).slice(0, 300);
+        detail.exitReason = "upstream-error";
         if (!wroteAny) timedOut = true;
         else stalled = true;
       } finally {
@@ -133,25 +176,32 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
         if (stallTimer) clearTimeout(stallTimer);
       }
       if (timedOut && !wroteAny) {
-        // nothing written to res yet — safe to drop this model and let the
-        // caller fail over to the next one. Do NOT write/end res here.
-        return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true };
+        res.removeListener("close", onClose);
+        return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
       }
       if ((stalled || tooLong) && wroteAny) {
-        // a response that was flowing either went silent for the stall window
-        // or blew the total ceiling — we can't cleanly fail over a half-written
-        // body, so end it and let the caller remember this model as slow.
         interrupted = true;
+        detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
+        res.removeListener("close", onClose);
         try { res.end(); } catch { /* ignore */ }
-        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted };
+        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, detail };
       }
+    } else {
+      detail.exitReason = "empty-body";
     }
     const totalMs = Math.round(performance.now() - t0);
+    if (!detail.exitReason) detail.exitReason = "normal";
+    finishedNormally = true;
+    res.removeListener("close", onClose);
     try { res.end(); } catch { /* ignore */ }
-    return { status: 200, ttfMs: ttf, totalMs, aborted: false };
+    return { status: 200, ttfMs: ttf, totalMs, aborted: false, interrupted: false, detail };
   }
 
+  finishedNormally = true;
+  res.removeListener("close", onClose);
   const text = await upRes.text();
+  detail.receivedBytes = Buffer.byteLength(text);
+  detail.exitReason = "normal-non-stream";
   try {
     json(res, upRes.status, JSON.parse(text));
   } catch {
@@ -159,7 +209,7 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
     res.setHeader("Content-Type", contentType || "text/plain");
     res.end(text);
   }
-  return { status: upRes.status, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false };
+  return { status: upRes.status, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted: false, detail };
 }
 
 const PEER_TIMEOUT_MS = 30_000;
@@ -279,21 +329,25 @@ export const STREAM_TIMEOUT_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 25_000;
 })();
 
-// Ceiling on how long a streamed response may produce no new chunk before we
-// treat the model as stalled and proactively end the stream (clean EOF instead
-// of hanging on a dead upstream). A model that keeps emitting chunks is never
-// cut off — only silence triggers it. Set to 0 to disable.
+// Stall / max ceilings — disabled by default for relays (we never cut a
+// stream that has already started; different models have different verbosity,
+// that's normal). Stall is kept only as a *quality* signal for ranking.
+// Set MSLXDFF_STALL_TIMEOUT_MS=15000 to re-enable cutting (not recommended),
+// or tune MSLXDFF_SCORE_STALL_MS for scoring.
 export const STALL_TIMEOUT_MS = (() => {
   const n = Number(process.env.MSLXDFF_STALL_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+})();
+
+export const SCORE_STALL_MS = (() => {
+  const raw = process.env.MSLXDFF_SCORE_STALL_MS ?? process.env.MSLXDFF_STALL_TIMEOUT_MS;
+  const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : 15_000;
 })();
 
-// Loose total ceiling (TTFB + generation) so an unbounded stream can never
-// run forever. Kept much larger than the stall timeout so normally-flowing
-// responses are not truncated. Set to 0 to disable.
 export const MAX_STREAM_MS = (() => {
   const n = Number(process.env.MSLXDFF_MAX_STREAM_MS);
-  return Number.isInteger(n) && n > 0 ? n : 120_000;
+  return Number.isInteger(n) && n > 0 ? n : 0;
 })();
 
 async function racePeerCandidates(candidates, ctx) {
@@ -374,12 +428,14 @@ const ROUTES = [
       }
 
       const startedAt = Date.now();
+      const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const perf0 = performance.now();
       const stages = [];
       const mark = (name) => stages.push([name, Math.round(performance.now() - perf0)]);
       const hops = parseHops(req.headers["x-mslxdff-hops"]);
       const lockModel = req.headers["x-mslxdff-model-lock"] || "";
-      const requested = normalizeModel(lockModel || body.model || "");
+      const rawModel = body.model || "";
+      const requested = normalizeModel(lockModel || rawModel || "");
       const useAuto = isAutoModel(requested);
       mark("parsed");
 
@@ -397,15 +453,16 @@ const ROUTES = [
       mark("ordered");
 
       const logCall = (model, status) =>
-        logs?.appendCall({ model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(body.stream), stages });
+        logs?.appendCall({ reqId, model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(body.stream), stages });
       const logError = (model, status, message) =>
-        logs?.appendError({ model, auto: useAuto, status, message, stages });
+        logs?.appendError({ reqId, model, auto: useAuto, status, message, stages });
       const evt = (type, data) => {
-        const entry = { ts: Date.now(), type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
+        const entry = { ts: Date.now(), reqId, type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
         if (bus) bus.emit(entry);
         logs?.appendEvent?.(entry);
       };
-      evt("request", { hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body) });
+      evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body), rawModel, requested, lockModel: lockModel || null });
+      evt("ordered", { reqId, order, canFallback, canForwardPeers, useAuto, statuses: auto?.statuses?.() ?? null });
 
       // Shared context for the peer race helpers below (each model iteration
       // reuses it; `model` is bound per iteration call).
@@ -420,60 +477,87 @@ const ROUTES = [
       };
 
       let lastErr = null;
-      for (const model of order) {
+      for (let idx = 0; idx < order.length; idx++) {
+        const model = order[idx];
         handlerCtx.model = model;
+        evt("model-try", { reqId, model, idx, remaining: order.length - idx });
         let upRes = null;
         const forwarded = { ...injectReasoningContent(model, body), model };
         const tUp = performance.now();
+        evt("upstream-try", { reqId, model, attempt: idx + 1 });
         try {
           upRes = await upstream.chat(forwarded);
+          evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });
         } catch (err) {
           if (auto) await auto.recordError(model, { message: errMsg(err) });
           lastErr = { model, upstream: null, status: 502, message: errMsg(err) };
           logError(model, 502, errMsg(err));
-          evt("upstream-error", { model, status: 502, message: errMsg(err), timing: err._t ?? { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - tUp) } });
+          evt("upstream-error", { reqId, model, status: 502, message: errMsg(err), timing: err._t ?? { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - tUp) } });
         }
         mark(`up-${model}`);
         if (upRes && upRes.status >= 400) {
           if (auto) await auto.recordError(model, { status: upRes.status });
           lastErr = { model, upstream: upRes, status: upRes.status, message: null };
           logError(model, upRes.status, `upstream ${upRes.status}`);
-          evt("upstream-error", { model, status: upRes.status, message: null, timing: upRes._t ?? null });
+          evt("upstream-error", { reqId, model, status: upRes.status, message: null, timing: upRes._t ?? null });
           upRes = null;
         }
         if (upRes) {
-          if (auto) await auto.recordOk(model);
           logCall(model, upRes.status);
-          const out = await relay(res, upRes, body, { onFirstChunk: (delta) => mark(`ttf-${model}`) });
+          evt("relay-start", { reqId, model, via: "local", isStream: Boolean(body.stream) });
+          const out = await relay(res, upRes, body, {
+            onFirstChunk: (delta) => {
+              mark(`ttf-${model}`);
+              evt("relay-first-chunk", { reqId, model, ttfMs: delta });
+            },
+            onDownstreamAbort: () => {
+              evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] });
+            },
+          });
+          evt("relay-done", { reqId, model, via: "local", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
           if (out.status === STREAM_TIMEOUT_MS) {
-            // nothing was written — treat this model as failed and keep walking
-            // the failover chain instead of waiting out the slow stream.
             if (auto) await auto.recordError(model, { status: 502, slow: true, note: `stream timeout ${STREAM_TIMEOUT_MS}ms` });
             lastErr = { model, upstream: null, status: 502, message: `stream timed out after ${STREAM_TIMEOUT_MS}ms` };
             logError(model, 502, `stream timeout ${STREAM_TIMEOUT_MS}ms`);
-            evt("upstream-error", { model, status: 502, message: "stream timeout", timing: null });
+            evt("upstream-error", { reqId, model, status: 502, message: "stream timeout", timing: null });
+            evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: "stream timeout" });
             upRes = null;
             continue;
           }
           if (out.interrupted) {
-            // the model went silent past STALL_TIMEOUT_MS (or blew the total
-            // ceiling) — we ended it so the client got a clean EOF instead of
-            // hanging. Remember this model as slow so the next request prefers
-            // a faster one.
-            if (auto) await auto.recordError(model, { status: 200, slow: true, note: `stall ${STALL_TIMEOUT_MS}ms` });
-            evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: STALL_TIMEOUT_MS, interrupted: true });
+            if (auto) {
+              await auto.recordError(model, { status: 200, slow: true, note: `stall ${STALL_TIMEOUT_MS}ms` });
+              await auto.recordLatency(model, out.totalMs ?? (Date.now() - startedAt));
+            }
+            evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null });
             logCall(model, 200);
-            evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true });
+            evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null });
             return;
           }
-          // A model that took a long wall-clock time (TTFB + generation + relay)
-          // gets remembered as slow so the next request prefers a faster one.
           const elapsed = Date.now() - startedAt;
+          const latencyMs = out.totalMs ?? elapsed;
+          let scoredSlow = false;
           if (SLOW_TOTAL_MS && auto && elapsed > SLOW_TOTAL_MS && out.status === 200) {
             void auto.recordError(model, { status: 200, slow: true, note: `slow ${elapsed}ms` });
-            evt("slow-model", { model, elapsedMs: elapsed, threshold: SLOW_TOTAL_MS });
+            void auto.recordLatency(model, latencyMs);
+            evt("slow-model", { model, elapsedMs: elapsed, threshold: SLOW_TOTAL_MS, reason: "total", detail: out.detail ?? null });
+            scoredSlow = true;
           }
-          evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs });
+          if (out.detail?.stallHits > 0 && auto && out.status === 200) {
+            void auto.recordError(model, { status: 200, slow: true, note: `stall ${out.detail.stallHits}x gap>${SCORE_STALL_MS}ms maxGap ${out.detail.maxGapMs}ms` });
+            void auto.recordLatency(model, latencyMs);
+            evt("slow-model", { model, elapsedMs: elapsed, threshold: SCORE_STALL_MS, reason: "stall", stallHits: out.detail.stallHits, maxGapMs: out.detail.maxGapMs, detail: out.detail ?? null });
+            scoredSlow = true;
+          }
+          if (!scoredSlow && auto && out.status === 200) {
+            await auto.recordOk(model, { latencyMs });
+          } else if (!scoredSlow && auto) {
+            // still update latency for non-200? keep for completeness
+            await auto.recordLatency(model, latencyMs);
+          } else if (scoredSlow && out.detail) {
+            // already recorded slow+latency above, still ensure latency EMA is updated for slow case (done)
+          }
+          evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
           return;
         }
 
@@ -483,36 +567,68 @@ const ROUTES = [
         // once ordered by recovery time (earliest failure first), which
         // favours the peer that has had the longest to come back.
         if (canForwardPeers) {
+          evt("peer-race-start", { reqId, model, peers: peers.ordered().length });
           const win =
             (await racePeerCandidates(peers.ordered(), handlerCtx)) ||
             (await racePeerCandidates(peers.orderedByLastError(), handlerCtx));
           if (win) {
+            evt("peer-race-win", { reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs });
             await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
             logCall(win.target, win.res.status);
-            const out = await relay(res, win.res, body, { onFirstChunk: (d) => mark(`ttf-peer-${win.target}`) });
-            evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs });
+            evt("relay-start", { reqId, model: win.target, via: "peer", isStream: Boolean(body.stream) });
+            const out = await relay(res, win.res, body, {
+              onFirstChunk: (d) => mark(`ttf-peer-${win.target}`),
+              onDownstreamAbort: () => evt("client-abort", { reqId, model: win.target, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
+            });
+            evt("relay-done", { reqId, model: win.target, via: "peer", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
+            if (auto && out.status === 200) {
+              const latencyMs = out.totalMs ?? win.latencyMs;
+              if (out.detail?.stallHits > 0 || (latencyMs && latencyMs > SLOW_TOTAL_MS)) {
+                void auto.recordError(win.target, { status: 200, slow: true, note: `peer slow ${latencyMs}ms` });
+                void auto.recordLatency(win.target, latencyMs);
+              } else {
+                await auto.recordOk(win.target, { latencyMs });
+              }
+            }
+            evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
             return;
           }
+          evt("peer-race-lose", { reqId, model });
         }
 
-        if (canFallback) continue;
+        if (canFallback) {
+          evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` });
+          continue;
+        }
+        evt("exhausted-local", { reqId, lastModel: lastErr?.model ?? model, lastStatus: lastErr?.status ?? 502, order });
         logCall(lastErr?.model ?? model, lastErr?.status ?? 502);
         if (lastErr?.upstream) {
-          const out = await relay(res, lastErr.upstream, body, { onFirstChunk: (d) => mark(`ttf-${lastErr.model}`) });
-          evt("result", { model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs });
+          evt("relay-start", { reqId, model: lastErr.model, via: "local-exhausted", isStream: Boolean(body.stream) });
+          const out = await relay(res, lastErr.upstream, body, {
+            onFirstChunk: (d) => mark(`ttf-${lastErr.model}`),
+            onDownstreamAbort: () => evt("client-abort", { reqId, model: lastErr.model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
+          });
+          evt("relay-done", { reqId, model: lastErr.model, via: "local-exhausted", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
+          evt("result", { reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
           return;
         }
-        evt("result", { model, status: lastErr?.status ?? 502, via: "none", timing: null });
+        evt("result", { reqId, model, status: lastErr?.status ?? 502, via: "none", timing: null });
         return json(res, 502, { error: lastErr?.message || "all auto models failed" });
       }
 
+      evt("exhausted-all", { reqId, lastModel: lastErr?.model ?? requested, lastStatus: lastErr?.status ?? 502, order });
       logCall(lastErr?.model ?? requested, lastErr?.status ?? 502);
       if (lastErr?.upstream) {
-        const out = await relay(res, lastErr.upstream, body, { onFirstChunk: (d) => mark(`ttf-${lastErr.model}`) });
-        evt("result", { model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs });
+        evt("relay-start", { reqId, model: lastErr.model, via: "local-final", isStream: Boolean(body.stream) });
+        const out = await relay(res, lastErr.upstream, body, {
+          onFirstChunk: (d) => mark(`ttf-${lastErr.model}`),
+          onDownstreamAbort: () => evt("client-abort", { reqId, model: lastErr.model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
+        });
+        evt("relay-done", { reqId, model: lastErr.model, via: "local-final", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
+        evt("result", { reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
         return;
       }
-      evt("result", { model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none", timing: null });
+      evt("result", { reqId, model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none", timing: null });
       return json(res, 502, { error: lastErr?.message || "all auto models failed" });
     },
   },
