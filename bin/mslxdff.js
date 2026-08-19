@@ -587,6 +587,7 @@ const models = createModelsService({
 });
 const auto = createAutoSelector({
   cooldownMs: modelCooldownMs(),
+  slowCooldownMs: slowCooldownMs(),
   loadCandidates: async () => {
     try {
       return (await models.get()).data.map((m) => m.id);
@@ -684,6 +685,11 @@ function refreshIntervalMs() {
 function modelCooldownMs() {
   const n = Number(process.env.MSLXDFF_MODEL_COOLDOWN_MS);
   return Number.isInteger(n) && n > 0 ? n : 60_000;
+}
+
+function slowCooldownMs() {
+  const n = Number(process.env.MSLXDFF_SLOW_COOLDOWN_MS);
+  return Number.isInteger(n) && n > 0 ? n : 5 * 60_000;
 }
 
 function peerCooldownMs() {
