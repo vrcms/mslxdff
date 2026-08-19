@@ -65,7 +65,16 @@ function readBody(req) {
   });
 }
 
-async function relay(res, upRes, body) {
+// Relay an upstream response to the client. Returns { status, ttfMs, aborted }
+// where:
+//   - status  200 = fully relayed; STREAM_TIMEOUT = first chunk never arrived
+//     within streamTimeoutMs and nothing was written to res yet (safe to
+//     failover); 500 = the response body errored mid-stream.
+//   - ttfMs   time to first chunk when one arrived.
+//   - aborted true when we closed the downstream connection ourselves (only
+//     for the STREAM_TIMEOUT case, before anything was written).
+async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_TIMEOUT_MS } = {}) {
+  const t0 = performance.now();
   const contentType = upRes.headers.get("content-type") || "";
   const isStream = Boolean(body?.stream) || contentType.includes("text/event-stream");
   res.statusCode = upRes.status;
@@ -74,13 +83,48 @@ async function relay(res, upRes, body) {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    let ttf = null;
     if (upRes.body) {
-      for await (const chunk of upRes.body) {
-        res.write(chunk);
+      let first = true;
+      let wroteAny = false;
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        // nothing written yet — cancel the upstream body so the loop can exit
+        // and we can fail over to the next model cleanly.
+        if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+      }, streamTimeoutMs);
+      try {
+        for await (const chunk of upRes.body) {
+          if (timedOut) break;
+          if (first) {
+            first = false;
+            ttf = Math.round(performance.now() - t0);
+            onFirstChunk?.(ttf);
+          }
+          wroteAny = true;
+          res.write(chunk);
+        }
+      } catch (err) {
+        timedOut = true;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (timedOut && !wroteAny) {
+        // nothing written to res yet — safe to drop this model and let the
+        // caller fail over to the next one. Do NOT write/end res here.
+        return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true };
+      }
+      if (timedOut && wroteAny) {
+        // we'd already started streaming when it died — can't fail over, just
+        // end the response so the client sees a clean EOF.
+        try { res.end(); } catch { /* ignore */ }
+        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false };
       }
     }
-    res.end();
-    return;
+    const totalMs = Math.round(performance.now() - t0);
+    try { res.end(); } catch { /* ignore */ }
+    return { status: 200, ttfMs: ttf, totalMs, aborted: false };
   }
 
   const text = await upRes.text();
@@ -91,6 +135,7 @@ async function relay(res, upRes, body) {
     res.setHeader("Content-Type", contentType || "text/plain");
     res.end(text);
   }
+  return { status: upRes.status, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false };
 }
 
 const PEER_TIMEOUT_MS = 30_000;
@@ -194,6 +239,22 @@ export const PEER_RACE_LIMIT = Number(process.env.MSLXDFF_PEER_RACE_LIMIT) > 0
   ? Number(process.env.MSLXDFF_PEER_RACE_LIMIT)
   : 3;
 
+// A model whose whole request takes longer than this wall-clock duration is
+// remembered as slow and demoted, so a fast model is preferred next request.
+// Set MSLXDFF_SLOW_TOTAL_MS=0 to disable.
+export const SLOW_TOTAL_MS = (() => {
+  const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
+  return Number.isInteger(n) && n > 0 ? n : 15_000;
+})();
+
+// How long to wait for the first chunk of a streamed response before giving up
+// on that model (nothing has been written yet, so we can fail over cleanly).
+// Set MSLXDFF_STREAM_TIMEOUT_MS=0 to disable the circuit breaker.
+export const STREAM_TIMEOUT_MS = (() => {
+  const n = Number(process.env.MSLXDFF_STREAM_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 25_000;
+})();
+
 async function racePeerCandidates(candidates, ctx) {
   for (let i = 0; i < candidates.length; i += PEER_RACE_LIMIT) {
     const batch = candidates.slice(i, i + PEER_RACE_LIMIT);
@@ -272,10 +333,14 @@ const ROUTES = [
       }
 
       const startedAt = Date.now();
+      const perf0 = performance.now();
+      const stages = [];
+      const mark = (name) => stages.push([name, Math.round(performance.now() - perf0)]);
       const hops = parseHops(req.headers["x-mslxdff-hops"]);
       const lockModel = req.headers["x-mslxdff-model-lock"] || "";
       const requested = normalizeModel(lockModel || body.model || "");
       const useAuto = isAutoModel(requested);
+      mark("parsed");
 
       let order;
       if (lockModel) {
@@ -288,13 +353,14 @@ const ROUTES = [
       if (!order.length) order = [""];
       const canFallback = order.length > 1;
       const canForwardPeers = Boolean(peers) && hops < maxHops;
+      mark("ordered");
 
       const logCall = (model, status) =>
-        logs?.appendCall({ model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(body.stream) });
+        logs?.appendCall({ model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(body.stream), stages });
       const logError = (model, status, message) =>
-        logs?.appendError({ model, auto: useAuto, status, message });
+        logs?.appendError({ model, auto: useAuto, status, message, stages });
       const evt = (type, data) => {
-        const entry = { ts: Date.now(), type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt };
+        const entry = { ts: Date.now(), type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
         if (bus) bus.emit(entry);
         logs?.appendEvent?.(entry);
       };
@@ -317,26 +383,46 @@ const ROUTES = [
         handlerCtx.model = model;
         let upRes = null;
         const forwarded = { ...injectReasoningContent(model, body), model };
+        const tUp = performance.now();
         try {
           upRes = await upstream.chat(forwarded);
         } catch (err) {
           if (auto) await auto.recordError(model, { message: errMsg(err) });
           lastErr = { model, upstream: null, status: 502, message: errMsg(err) };
           logError(model, 502, errMsg(err));
-          evt("upstream-error", { model, status: 502, message: errMsg(err) });
+          evt("upstream-error", { model, status: 502, message: errMsg(err), timing: err._t ?? { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - tUp) } });
         }
+        mark(`up-${model}`);
         if (upRes && upRes.status >= 400) {
           if (auto) await auto.recordError(model, { status: upRes.status });
           lastErr = { model, upstream: upRes, status: upRes.status, message: null };
           logError(model, upRes.status, `upstream ${upRes.status}`);
-          evt("upstream-error", { model, status: upRes.status, message: null });
+          evt("upstream-error", { model, status: upRes.status, message: null, timing: upRes._t ?? null });
           upRes = null;
         }
         if (upRes) {
           if (auto) await auto.recordOk(model);
           logCall(model, upRes.status);
-          evt("result", { model, status: upRes.status, via: "local" });
-          return relay(res, upRes, body);
+          const out = await relay(res, upRes, body, { onFirstChunk: (delta) => mark(`ttf-${model}`) });
+          if (out.status === STREAM_TIMEOUT_MS) {
+            // nothing was written — treat this model as failed and keep walking
+            // the failover chain instead of waiting out the slow stream.
+            if (auto) await auto.recordError(model, { status: 502, slow: true, note: `stream timeout ${STREAM_TIMEOUT_MS}ms` });
+            lastErr = { model, upstream: null, status: 502, message: `stream timed out after ${STREAM_TIMEOUT_MS}ms` };
+            logError(model, 502, `stream timeout ${STREAM_TIMEOUT_MS}ms`);
+            evt("upstream-error", { model, status: 502, message: "stream timeout", timing: null });
+            upRes = null;
+            continue;
+          }
+          // A model that took a long wall-clock time (TTFB + generation + relay)
+          // gets remembered as slow so the next request prefers a faster one.
+          const elapsed = Date.now() - startedAt;
+          if (SLOW_TOTAL_MS && auto && elapsed > SLOW_TOTAL_MS && out.status === 200) {
+            void auto.recordError(model, { status: 200, slow: true, note: `slow ${elapsed}ms` });
+            evt("slow-model", { model, elapsedMs: elapsed, threshold: SLOW_TOTAL_MS });
+          }
+          evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs });
+          return;
         }
 
         // local failed for this model: race the peers — send the request to
@@ -351,27 +437,30 @@ const ROUTES = [
           if (win) {
             await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
             logCall(win.target, win.res.status);
-            evt("result", { model: win.target, status: win.res.status, via: "peer" });
-            return relay(res, win.res, body);
+            const out = await relay(res, win.res, body, { onFirstChunk: (d) => mark(`ttf-peer-${win.target}`) });
+            evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs });
+            return;
           }
         }
 
         if (canFallback) continue;
         logCall(lastErr?.model ?? model, lastErr?.status ?? 502);
         if (lastErr?.upstream) {
-          evt("result", { model: lastErr.model, status: lastErr.status, via: "local" });
-          return relay(res, lastErr.upstream, body);
+          const out = await relay(res, lastErr.upstream, body, { onFirstChunk: (d) => mark(`ttf-${lastErr.model}`) });
+          evt("result", { model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs });
+          return;
         }
-        evt("result", { model, status: lastErr?.status ?? 502, via: "none" });
+        evt("result", { model, status: lastErr?.status ?? 502, via: "none", timing: null });
         return json(res, 502, { error: lastErr?.message || "all auto models failed" });
       }
 
       logCall(lastErr?.model ?? requested, lastErr?.status ?? 502);
       if (lastErr?.upstream) {
-        evt("result", { model: lastErr.model, status: lastErr.status, via: "local" });
-        return relay(res, lastErr.upstream, body);
+        const out = await relay(res, lastErr.upstream, body, { onFirstChunk: (d) => mark(`ttf-${lastErr.model}`) });
+        evt("result", { model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs });
+        return;
       }
-      evt("result", { model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none" });
+      evt("result", { model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none", timing: null });
       return json(res, 502, { error: lastErr?.message || "all auto models failed" });
     },
   },
