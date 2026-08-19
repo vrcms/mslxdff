@@ -4,10 +4,10 @@ export function createUpstreamClient({
   connectTimeoutMs = Number(process.env.UPSTREAM_CONNECT_TIMEOUT_MS) || 30_000,
   retry = {
     network: { attempts: 2, delayMs: 1000 },
-    429: { attempts: 2, delayMs: 2000 },
-    502: { attempts: 2, delayMs: 2000 },
-    503: { attempts: 2, delayMs: 2000 },
-    504: { attempts: 2, delayMs: 3000 },
+    429: { attempts: 1, delayMs: 500 },
+    502: { attempts: 1, delayMs: 500 },
+    503: { attempts: 1, delayMs: 500 },
+    504: { attempts: 1, delayMs: 500 },
   },
   fetchImpl = fetch,
 } = {}) {
@@ -20,21 +20,42 @@ export function createUpstreamClient({
 
   async function chat(body) {
     const url = `${baseUrl}/zen/v1/chat/completions`;
+    const t0 = performance.now();
+    const attempts = [];
+    let waitMs = 0;
     for (let attempt = 0; ; attempt++) {
+      const t = performance.now();
       const result = await attemptOnce(url, body);
+      attempts.push({
+        attempt,
+        type: result instanceof Error ? "network" : `http${result.status}`,
+        ms: Math.round(performance.now() - t),
+      });
       if (result instanceof Error) {
         const entry = retry?.network;
         if (entry && attempt < entry.attempts) {
           await sleep(entry.delayMs);
+          waitMs += entry.delayMs;
           continue;
         }
+        result._t = {
+          attempts,
+          waitMs,
+          totalMs: Math.round(performance.now() - t0),
+        };
         throw result;
       }
       const entry = retry?.[result.status];
       if (entry && attempt < entry.attempts) {
         await sleep(entry.delayMs);
+        waitMs += entry.delayMs;
         continue;
       }
+      result._t = {
+        attempts,
+        waitMs,
+        totalMs: Math.round(performance.now() - t0),
+      };
       return result;
     }
   }
