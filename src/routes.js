@@ -84,19 +84,27 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     let ttf = null;
+    let interrupted = false;
     if (upRes.body) {
       let first = true;
       let wroteAny = false;
       let timedOut = false;
-      const timer = setTimeout(() => {
+      // whole-stream ceiling (TTFB + generation): cancels the upstream body so
+      // the loop exits and we proactively end the stream instead of hanging.
+      let genTooLong = false;
+      const genTimer = GEN_TIMEOUT_MS
+        ? setTimeout(() => {
+            genTooLong = true;
+            if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+          }, GEN_TIMEOUT_MS)
+        : null;
+      const firstTimer = setTimeout(() => {
         timedOut = true;
-        // nothing written yet — cancel the upstream body so the loop can exit
-        // and we can fail over to the next model cleanly.
         if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
       }, streamTimeoutMs);
       try {
         for await (const chunk of upRes.body) {
-          if (timedOut) break;
+          if (timedOut || genTooLong) break;
           if (first) {
             first = false;
             ttf = Math.round(performance.now() - t0);
@@ -106,20 +114,25 @@ async function relay(res, upRes, body, { onFirstChunk, streamTimeoutMs = STREAM_
           res.write(chunk);
         }
       } catch (err) {
-        timedOut = true;
+        // body threw — if we already started, treat as a mid-stream interrupt
+        if (!wroteAny) { timedOut = true; genTooLong = false; }
       } finally {
-        clearTimeout(timer);
+        if (firstTimer) clearTimeout(firstTimer);
+        if (genTimer) clearTimeout(genTimer);
       }
       if (timedOut && !wroteAny) {
         // nothing written to res yet — safe to drop this model and let the
         // caller fail over to the next one. Do NOT write/end res here.
         return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true };
       }
-      if (timedOut && wroteAny) {
-        // we'd already started streaming when it died — can't fail over, just
-        // end the response so the client sees a clean EOF.
+      if (genTooLong || (timedOut && wroteAny)) {
+        // we'd already started streaming when it exceeded the ceiling — can't
+        // cleanly fail over a half-written response, just end it so the client
+        // sees a clean EOF rather than hanging. interrupted signals the caller
+        // to remember this model as slow.
+        interrupted = true;
         try { res.end(); } catch { /* ignore */ }
-        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false };
+        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted };
       }
     }
     const totalMs = Math.round(performance.now() - t0);
@@ -253,6 +266,15 @@ export const SLOW_TOTAL_MS = (() => {
 export const STREAM_TIMEOUT_MS = (() => {
   const n = Number(process.env.MSLXDFF_STREAM_TIMEOUT_MS);
   return Number.isInteger(n) && n > 0 ? n : 25_000;
+})();
+
+// Ceiling on the total wall-clock a single streamed response may run (TTFB +
+// generation + relay). Once exceeded we proactively end the stream so the
+// client gets a clean EOF instead of hanging on a very slow model; the model
+// is then flagged slow and demoted for the next request. Set to 0 to disable.
+export const GEN_TIMEOUT_MS = (() => {
+  const n = Number(process.env.MSLXDFF_GEN_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 20_000;
 })();
 
 async function racePeerCandidates(candidates, ctx) {
@@ -413,6 +435,16 @@ const ROUTES = [
             evt("upstream-error", { model, status: 502, message: "stream timeout", timing: null });
             upRes = null;
             continue;
+          }
+          if (out.interrupted) {
+            // the whole stream ran past GEN_TIMEOUT_MS — we ended it proactively
+            // so the client got a clean EOF instead of hanging. Remember this
+            // model as slow so the next request prefers a faster one.
+            if (auto) await auto.recordError(model, { status: 200, slow: true, note: `gen timeout ${GEN_TIMEOUT_MS}ms` });
+            evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: GEN_TIMEOUT_MS, interrupted: true });
+            logCall(model, 200);
+            evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true });
+            return;
           }
           // A model that took a long wall-clock time (TTFB + generation + relay)
           // gets remembered as slow so the next request prefers a faster one.
