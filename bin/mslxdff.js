@@ -1179,7 +1179,7 @@ function fmtEvent(e) {
   const t = e?.ts ? new Date(e.ts).toISOString().slice(11, 19) : "--:--:--";
   const head = `[${t}]`;
   const m = (x) => x || "-";
-  const fallbackTag = e.fallback ? ` fallback=${e.fallback.requested_model || e.requested}->${e.fallback.actual_model || e.actual}(${e.fallback.reason || e.reason})` : "";
+  const fallbackTag = e.fallback?.fallback ? ` fallback=${e.fallback.requested_model || e.requested}->${e.fallback.actual_model || e.actual}(${e.fallback.reason || e.reason})` : "";
   switch (e?.type) {
     case "request":
       return `${head} request       client-> ${m(e.requested || e.model)}${e.auto ? " (auto)" : ""} raw=${m(e.rawModel)} lock=${m(e.lockModel)} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""} reqId=${e.reqId || ""}`;
@@ -1228,7 +1228,7 @@ function fmtEvent(e) {
     case "result":
       return `${head} result        返回客户端 status=${e.status} model=${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}${fallbackTag}`;
     case "client-response":
-      return `${head} client res    返回客户端 客户端请求 ${m(e.requested)} 实际返回 ${m(e.actual)} via=${m(e.via)}${e.fallback ? ` fallback=${e.fallback.requested_model}->${e.fallback.actual_model}(${e.fallback.reason})` : " 无fallback"} status=${e.status}`;
+      return `${head} client res    返回客户端 客户端请求 ${m(e.requested)} 实际返回 ${m(e.actual)} via=${m(e.via)}${e.fallback?.fallback ? ` fallback=${e.fallback.requested_model}->${e.fallback.actual_model}(${e.fallback.reason})` : " 无fallback"} status=${e.status}`;
     case "auto-update-enabled":
       return `${head} auto-update   enabled every ${Math.round((e.intervalMs||0)/60000)}m current=${e.current}`;
     case "auto-update-disabled":
