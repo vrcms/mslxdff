@@ -643,11 +643,12 @@ async function racePeerCandidates(candidates, ctx) {
       const order = [];
       const total = prepared.length;
       for (const { peer, target } of prepared) {
+        ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1 });
         const t0 = performance.now();
         forwardToPeer(peer, ctx.body, target, ctx.hops).then((res) => {
           const latencyMs = Math.round(performance.now() - t0);
           const failed = res instanceof Error || res.status >= 400;
-          ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1 });
+          ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1, latencyMs, ok: !failed });
           if (failed) {
             const status = res instanceof Error ? 502 : res.status;
             ctx.logError(ctx.model,

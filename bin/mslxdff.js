@@ -1199,8 +1199,10 @@ function fmtEvent(e) {
       return `${head} peer race     开始并发给组员 model=${m(e.model)} peers=${e.peers}`;
     case "peer-health":
       return `${head} peer check    ${e.peer} -> ${e.count ? e.healthy.join(", ") : "no healthy models"}${e.strict ? " (strict)" : ""}`;
+    case "peer-request":
+      return `${head} peer req      并发发出 peer=${e.peer} model=${m(e.model)} hops=${e.hops}`;
     case "peer-forward":
-      return `${head} peer req      给组员请求 peer=${e.peer} model=${m(e.model)} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
+      return `${head} peer resp     收到响应 peer=${e.peer} model=${m(e.model)} ${e.ok ? "ok" : "fail"} ${e.latencyMs ? `${e.latencyMs}ms` : ""} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
     case "peer-error":
       return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)} model=${m(e.model)}`;
     case "peer-race-win":
