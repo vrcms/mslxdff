@@ -3,8 +3,151 @@ import { performance } from "node:perf_hooks";
 import { injectReasoningContent, normalizeModel } from "./reasoning.js";
 import { isAutoModel } from "./auto.js";
 import { DEFAULT_MAX_HOPS } from "./peers.js";
+import { loadGroupsJoined } from "./state.js";
 
 export const errMsg = (err) => String(err?.message || err);
+
+// In-memory relay queues for broadband members (polling-based, no WS dependency)
+// pendingByTarget: Map<`${group}::${targetUrl}`, Array<{reqId, body, hops, resolve, reject, timer}>>
+const relayPending = new Map();
+const relayPendingByReqId = new Map();
+
+function enqueueRelay({ group, target, reqId, body, hops }) {
+  const key = `${group}::${target}`;
+  const list = relayPending.get(key) || [];
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = list.findIndex((e) => e.reqId === reqId);
+      if (idx >= 0) list.splice(idx, 1);
+      relayPendingByReqId.delete(reqId);
+      reject(new Error("relay timeout"));
+    }, 30_000);
+    timer.unref?.();
+    const entry = { reqId, body, hops, resolve, reject, timer };
+    list.push(entry);
+    relayPending.set(key, list);
+    relayPendingByReqId.set(reqId, entry);
+  });
+}
+
+function dequeueRelayForPoll({ group, target, limit = 10 }) {
+  const key = `${group}::${target}`;
+  const list = relayPending.get(key) || [];
+  const batch = list.splice(0, limit);
+  for (const e of batch) {
+    // keep timer, but remove from pending list; result will resolve via relayResult
+    // we keep entry in relayPendingByReqId until result arrives
+  }
+  if (list.length) relayPending.set(key, list);
+  else relayPending.delete(key);
+  return batch.map((e) => ({ reqId: e.reqId, body: e.body, hops: e.hops }));
+}
+
+function resolveRelay(reqId, result) {
+  const entry = relayPendingByReqId.get(reqId);
+  if (!entry) return false;
+  clearTimeout(entry.timer);
+  relayPendingByReqId.delete(reqId);
+  entry.resolve(result);
+  return true;
+}
+
+async function tryBroadbandRelay({ groups, token: myToken, model, body, hops, bus, logs, reqId, evt, res, mark, perf0, stages }) {
+  try {
+    const joined = loadGroupsJoined();
+    const broadbandGroups = joined.filter((g) => g.kind === "broadband" || g.myUrl?.startsWith("relay://"));
+    // Also consider leader-owned broadband members directly
+    const allCandidates = [];
+    // 1) If this node is leader, check its own groups for broadband members
+    if (groups) {
+      const localGroups = groups.list();
+      for (const [gName, g] of Object.entries(localGroups)) {
+        for (const [id, m] of Object.entries(g.members || {})) {
+          if (id === "leader") continue;
+          const isBb = m?.kind === "broadband" || String(m?.url || "").startsWith("relay://");
+          if (!isBb) continue;
+          const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
+          if (typeof m.lastSeen === "number" && Date.now() - m.lastSeen > staleMs) continue;
+          // local leader: enqueue directly
+          allCandidates.push({ group: gName, target: m.url, member: m, via: "local-leader", leaderUrl: null });
+        }
+      }
+    }
+    // 2) For member nodes, check leader's broadband members (need leaderUrl)
+    for (const g of joined) {
+      if (!g.leaderUrl) continue; // already handled as leader
+      try {
+        // fetch fresh members from leader (re-use refreshGroupMembers logic but direct fetch)
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const r = await fetch(`${g.leaderUrl}/v1/groups/join`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${myToken}` },
+          body: JSON.stringify({ name: g.name, memberName: g.memberName, url: g.myUrl, token: myToken }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!r.ok) continue;
+        const data = await r.json().catch(() => ({}));
+        const members = data.members || {};
+        for (const [id, m] of Object.entries(members)) {
+          if (id === "leader") continue;
+          const isBb = m?.kind === "broadband" || String(m?.url || "").startsWith("relay://");
+          if (!isBb) continue;
+          if (m.url === g.myUrl) continue; // skip self
+          const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
+          if (typeof m.lastSeen === "number" && Date.now() - m.lastSeen > staleMs) continue;
+          allCandidates.push({ group: g.name, target: m.url, member: m, via: "via-leader", leaderUrl: g.leaderUrl });
+        }
+      } catch {}
+    }
+    if (!allCandidates.length) return null;
+    // Try each candidate via relay forward (sequential, first success wins)
+    for (const cand of allCandidates) {
+      try {
+        evt?.("relay-try", { reqId, model, via: cand.via, target: cand.target, group: cand.group });
+        if (!cand.leaderUrl) {
+          // local leader: enqueue and wait for broadband poll (same as forward handler's local path)
+          const fwdBody = { model, ...body, model };
+          const reqIdLocal = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          const promise = enqueueRelay({ group: cand.group, target: cand.target, reqId: reqIdLocal, body: fwdBody, hops });
+          // also trigger a dummy poll wait: we can't directly wait for poll without D, so timeout quickly
+          // For local leader, the D will poll; we wait for result with timeout 30s
+          const result = await promise;
+          if (result && result.status) {
+            return { via: "broadband-local", result, target: cand.target, group: cand.group };
+          }
+        } else {
+          // forward via leader's relay/forward endpoint
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 35_000);
+          const r = await fetch(`${cand.leaderUrl}/v1/groups/relay/forward`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${myToken}`, "x-mslxdff-hops": String(hops + 1) },
+            body: JSON.stringify({ group: cand.group, target: cand.target, body: { ...body, model }, hops: hops + 1, reqId }),
+            signal: ctrl.signal,
+          });
+          clearTimeout(t);
+          if (!r.ok) {
+            const txt = await r.text().catch(() => "");
+            evt?.("relay-fail", { reqId, model, via: cand.via, target: cand.target, status: r.status, message: txt.slice(0,200) });
+            continue;
+          }
+          // leader's forward returns the upstream response (maybe SSE)
+          // For simplicity, we treat it as direct response to relay back to client
+          // We can stream it back: but for now, we just return the Response
+          return { via: "broadband-via-leader", result: r, target: cand.target, group: cand.group };
+        }
+      } catch (err) {
+        evt?.("relay-fail", { reqId, model, via: cand.via, target: cand.target, message: String(err?.message || err).slice(0,200) });
+        continue;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus }) {
   return async function router(req, res) {
@@ -419,7 +562,7 @@ const ROUTES = [
     method: "POST",
     path: "/v1/chat/completions",
     requiresAuth: true,
-    handler: async ({ req, res, upstream, auto, logs, peers, maxHops, bus }) => {
+    handler: async ({ req, res, upstream, auto, logs, peers, maxHops, groups, bus }) => {
       let body;
       try {
         body = await readBody(req);
@@ -596,6 +739,59 @@ const ROUTES = [
           evt("peer-race-lose", { reqId, model });
         }
 
+        // Broadband relay: try to forward via leader to a broadband member's quota
+        if (groups) {
+          const bb = await tryBroadbandRelay({ groups, token, model, body, hops, bus, logs, reqId, evt, res, mark, perf0, stages });
+          if (bb) {
+            const isResponse = bb.result && typeof bb.result.status === "number" && typeof bb.result.headers?.get === "function";
+            if (isResponse) {
+              // streaming response from leader's forward (which waited for broadband)
+              evt("relay-start", { reqId, model, via: "broadband", target: bb.target, group: bb.group });
+              const out = await relay(res, bb.result, body, {
+                onFirstChunk: (d) => mark(`ttf-bb-${model}`),
+                onDownstreamAbort: () => evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
+              });
+              evt("relay-done", { reqId, model, via: "broadband", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
+              if (auto && out.status === 200) {
+                const latencyMs = out.totalMs ?? 0;
+                if (out.detail?.stallHits > 0 || (latencyMs && latencyMs > SLOW_TOTAL_MS)) {
+                  void auto.recordError(model, { status: 200, slow: true, note: `broadband slow ${latencyMs}ms` });
+                  void auto.recordLatency(model, latencyMs);
+                } else {
+                  await auto.recordOk(model, { latencyMs });
+                }
+              }
+              evt("result", { model, status: out.status, via: "broadband", timing: bb.result._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+              return;
+            } else if (bb.result && typeof bb.result.status === "number") {
+              // buffered result from local leader enqueue
+              const fakeRes = {
+                status: bb.result.status,
+                headers: { get: (k) => bb.result.headers?.[k] || bb.result.headers?.[k.toLowerCase()] || null },
+                text: async () => typeof bb.result.body === "string" ? bb.result.body : JSON.stringify(bb.result.body),
+                body: (() => {
+                  const b = bb.result.body || "";
+                  const str = typeof b === "string" ? b : JSON.stringify(b);
+                  const isSSE = bb.result.headers?.["Content-Type"]?.includes("text/event-stream");
+                  if (isSSE) {
+                    return (async function* () { yield Buffer.from(str); })();
+                  }
+                  return null;
+                })(),
+              };
+              evt("relay-start", { reqId, model, via: "broadband-local", target: bb.target, group: bb.group });
+              const out = await relay(res, fakeRes, body, {
+                onFirstChunk: (d) => mark(`ttf-bb-${model}`),
+                onDownstreamAbort: () => evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
+              });
+              evt("relay-done", { reqId, model, via: "broadband-local", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
+              evt("result", { model, status: out.status, via: "broadband", timing: null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+              return;
+            }
+          }
+          evt("relay-miss", { reqId, model });
+        }
+
         if (canFallback) {
           evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` });
           continue;
@@ -670,11 +866,31 @@ const ROUTES = [
         const hit = auth && groups.membersForToken(body.name, auth[1]);
         if (!hit) return fail("invalid member token");
         try {
+          const isBroadbandRe = String(body.url || hit.member?.url || "").startsWith("relay://") || body.kind === "broadband" || hit.member?.kind === "broadband";
+          const extra = {};
+          if (isBroadbandRe) {
+            extra.kind = "broadband";
+            extra.publicIp = ip;
+            extra.lastSeen = Date.now();
+            if (body.url) extra.url = String(body.url);
+          }
           const refreshed = groups.upsertMember(body.name, {
             memberName: body.memberName,
-            url: body.url,
-            token: body.token,
+            url: body.url || hit.member.url,
+            token: body.token || hit.member.token,
+            kind: extra.kind,
+            publicIp: extra.publicIp,
+            lastSeen: extra.lastSeen,
           });
+          // also ensure broadband's publicIp/lastSeen updated even if url same
+          if (isBroadbandRe && refreshed) {
+            const targetId = Object.keys(refreshed).find((k) => refreshed[k].url === (body.url || hit.member.url));
+            if (targetId) {
+              refreshed[targetId].publicIp = ip;
+              refreshed[targetId].lastSeen = Date.now();
+              refreshed[targetId].kind = "broadband";
+            }
+          }
           return json(res, 200, { object: "group", name: body.name, members: refreshed });
         } catch (err) {
           return json(res, 400, { error: errMsg(err) });
@@ -684,13 +900,21 @@ const ROUTES = [
       try {
         const youPort = Number(body.myPort);
         const youUrl = Number.isInteger(youPort) && youPort > 0 ? `http://${ip}:${youPort}` : "";
-        const memberUrl = String(body.url || youUrl);
+        let memberUrl = String(body.url || youUrl);
         if (!memberUrl) throw new Error("member url is required");
+        const isBroadband = String(memberUrl).startsWith("relay://") || body.kind === "broadband";
+        if (isBroadband) {
+          // broadband: keep relay:// url, record publicIp from source ip
+          memberUrl = String(body.url || memberUrl);
+        }
         const members = groups.addMember(body.name, {
           key: body.key,
           memberName: body.memberName,
           url: memberUrl,
           token: body.token,
+          kind: isBroadband ? "broadband" : "static",
+          publicIp: isBroadband ? ip : undefined,
+          lastSeen: isBroadband ? Date.now() : undefined,
         });
         // 5 wrong passwords bans the source IP (48h) — see createBansService.
         if (bans) bans.clear(ip);
@@ -740,6 +964,156 @@ const ROUTES = [
         });
       } catch (err) {
         return json(res, 400, { error: errMsg(err) });
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/v1/groups/relay/heartbeat",
+    requiresAuth: false,
+    handler: async ({ req, res, groups, bus, logs }) => {
+      const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
+      if (!auth) return json(res, 401, { error: "bearer token required" });
+      let body;
+      try { body = await readBody(req); } catch { return json(res, 400, { error: "Invalid JSON body" }); }
+      const groupName = body?.name || body?.group;
+      if (!groupName) return json(res, 400, { error: "group name is required" });
+      const hit = groups?.membersForToken(groupName, auth[1]);
+      if (!hit) return json(res, 403, { error: "invalid member token" });
+      const ip = clientIp(req);
+      try {
+        const memberUrl = hit.member?.url;
+        const members = groups.list()[groupName]?.members || {};
+        const targetId = Object.keys(members).find((k) => members[k].url === memberUrl) || hit.member?.url;
+        // update lastSeen/publicIp for broadband
+        if (hit.member?.kind === "broadband" || String(memberUrl).startsWith("relay://")) {
+          const m = members[targetId] || hit.member;
+          if (m) {
+            m.publicIp = ip;
+            m.lastSeen = Date.now();
+            // persist via groups service (upsert)
+            try { groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen }); } catch {}
+          }
+          const evtData = { ts: Date.now(), type: "relay-heartbeat", member: targetId, ip, lastSeen: m?.lastSeen, group: groupName };
+          if (bus) bus.emit(evtData);
+          logs?.appendEvent?.(evtData);
+        }
+        return json(res, 200, { object: "heartbeat", ok: true, ip, lastSeen: Date.now() });
+      } catch (err) {
+        return json(res, 400, { error: errMsg(err) });
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/v1/groups/relay/poll",
+    requiresAuth: false,
+    handler: async ({ req, res, groups }) => {
+      const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
+      if (!auth) return json(res, 401, { error: "bearer token required" });
+      let body;
+      try { body = await readBody(req); } catch { return json(res, 400, { error: "Invalid JSON body" }); }
+      const groupName = body?.name || body?.group;
+      if (!groupName) return json(res, 400, { error: "group name is required" });
+      const hit = groups?.membersForToken(groupName, auth[1]);
+      if (!hit) return json(res, 403, { error: "invalid member token" });
+      const targetUrl = hit.member?.url;
+      if (!targetUrl) return json(res, 400, { error: "member url not found" });
+      const batch = dequeueRelayForPoll({ group: groupName, target: targetUrl, limit: 10 });
+      return json(res, 200, { object: "poll", data: batch });
+    },
+  },
+  {
+    method: "POST",
+    path: "/v1/groups/relay/result",
+    requiresAuth: false,
+    handler: async ({ req, res, groups }) => {
+      const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
+      if (!auth) return json(res, 401, { error: "bearer token required" });
+      let body;
+      try { body = await readBody(req); } catch { return json(res, 400, { error: "Invalid JSON body" }); }
+      const groupName = body?.name || body?.group;
+      const reqId = body?.reqId;
+      if (!groupName || !reqId) return json(res, 400, { error: "group and reqId required" });
+      const hit = groups?.membersForToken(groupName, auth[1]);
+      if (!hit) return json(res, 403, { error: "invalid member token" });
+      const ok = resolveRelay(reqId, body.result || body);
+      if (!ok) return json(res, 404, { error: "pending request not found or timed out" });
+      return json(res, 200, { object: "result", ok: true });
+    },
+  },
+  {
+    method: "POST",
+    path: "/v1/groups/relay/forward",
+    requiresAuth: true,
+    handler: async ({ req, res, groups, bus, logs }) => {
+      let body;
+      try { body = await readBody(req); } catch { return json(res, 400, { error: "Invalid JSON body" }); }
+      const groupName = body?.group || body?.name;
+      const target = body?.target || body?.url;
+      const hops = parseHops(req.headers["x-mslxdff-hops"] || body?.hops);
+      if (!groupName || !target) return json(res, 400, { error: "group and target required" });
+      if (hops >= DEFAULT_MAX_HOPS) return json(res, 429, { error: "max hops exceeded" });
+      const members = groups?.list()[groupName]?.members || {};
+      const targetMember = Object.values(members).find((m) => m.url === target) || Object.entries(members).find(([id]) => id === target)?.[1];
+      if (!targetMember) return json(res, 404, { error: `target ${target} not found in group ${groupName}` });
+      const isBb = targetMember.kind === "broadband" || String(targetMember.url).startsWith("relay://");
+      if (!isBb) {
+        // static: direct fetch (should have been handled by peer race, but support via relay as well)
+        try {
+          const fwdBody = body.body || body;
+          const r = await fetch(`${targetMember.url}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${targetMember.token || ""}`, "x-mslxdff-hops": String(hops + 1), "x-mslxdff-model-lock": fwdBody.model || "", "Accept": "text/event-stream" },
+            body: JSON.stringify(fwdBody),
+          });
+          const evtData = { ts: Date.now(), type: "relay-forward", target, via: "direct", group: groupName, hops };
+          if (bus) bus.emit(evtData);
+          logs?.appendEvent?.(evtData);
+          res.statusCode = r.status;
+          if (r.headers.get("content-type")?.includes("text/event-stream")) {
+            res.setHeader("Content-Type", "text/event-stream");
+            if (r.body) for await (const c of r.body) res.write(c);
+            res.end();
+          } else {
+            const txt = await r.text();
+            res.setHeader("Content-Type", r.headers.get("content-type") || "application/json");
+            res.end(txt);
+          }
+          return;
+        } catch (err) {
+          return json(res, 502, { error: errMsg(err) });
+        }
+      }
+      // broadband: enqueue and wait for poll/result
+      const reqId = body.reqId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const fwdBody = body.body || { model: body.model, messages: body.messages, stream: body.stream };
+      const evtData = { ts: Date.now(), type: "relay-forward", target, via: "leader", group: groupName, hops, reqId, model: fwdBody.model };
+      if (bus) bus.emit(evtData);
+      logs?.appendEvent?.(evtData);
+      // check stale
+      const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
+      if (typeof targetMember.lastSeen === "number" && Date.now() - targetMember.lastSeen > staleMs) {
+        return json(res, 502, { error: "broadband member stale (no heartbeat)" });
+      }
+      try {
+        const resultPromise = enqueueRelay({ group: groupName, target: targetMember.url, reqId, body: fwdBody, hops });
+        // race with timeout already in enqueueRelay (30s)
+        const result = await resultPromise;
+        // result is expected to be { status, headers, body } from broadband
+        if (result && typeof result.status === "number") {
+          res.statusCode = result.status;
+          if (result.headers) for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
+          if (result.body) {
+            if (typeof result.body === "string") res.end(result.body);
+            else res.end(JSON.stringify(result.body));
+          } else res.end();
+          return;
+        }
+        // if result is raw upstream response body
+        return json(res, 200, result);
+      } catch (err) {
+        return json(res, 504, { error: errMsg(err) || "relay timeout" });
       }
     },
   },

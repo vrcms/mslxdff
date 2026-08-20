@@ -60,6 +60,11 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 - 行情式命令结果要紧凑，不贴大段 diff；重要结果先验证（端口监听+日志落盘）再让用户测。
 - 用户偏好"显式语义清晰"的命令设计：`-leavegroup` 只用于组员离开，组长只能走 `-delgroup <name>` 解散组。
 - 8989 是硬性默认端口；仅认 `-port N` 持久化或 `MSLXDFF_PORT` env，SSH/包装脚本注入的裸 `PORT` 被忽略。
+- 深度思考被截断时不要自发压测，补细粒度日志（reqId/detail）后等用户复现。
+- 慢模型不掐当前流：首块 25s 内到来即视为可用，后续无限等；stall 15s 仅作质量分（stallHits 累计数进 5 分钟降权），总耗时>20s 也降权。
+- 指定模型 429 不可用时按延迟 EMA 择优切最快模型（nemotron-3.5 快、hy3/laguna 慢）。
+- 需要内置日志查询 `mslxdff -log [N]`（默认 10 条），日志在 `~/.config/mslxdff/` 或 `MSLXDFF_DAEMON_DIR`。
+- A 转发给 B 时上游应以 B 的出口 IP 访问 opencode.ai（分散免费池 IP 级限流）。
 
 ## Learned Workspace Facts
 

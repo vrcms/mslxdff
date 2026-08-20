@@ -280,14 +280,31 @@ if (groupCmd && groupCmd !== "create") {
       console.log(`${g.name}  (${entries.length} member${entries.length === 1 ? "" : "s"})`);
       // probe every member endpoint concurrently for reachability + latency;
       // display order = state order so the sequence numbers stay stable for -group remove
+      // broadband members (relay://) are not probed — they are reachable via leader
       const probes = await Promise.all(
-        entries.map(([id, m]) => probeHealth({ id, url: m?.url || id }))
+        entries.map(([id, m]) => probeHealth({ id, url: m?.url || id, kind: m?.kind, lastSeen: m?.lastSeen, publicIp: m?.publicIp }))
       );
       const leaderEntry = members.leader ? Object.entries(members).find(([id]) => id === "leader") : null;
       const leaderProbe = leaderEntry ? await probeHealth({ id: "leader", url: leaderEntry[1].url }) : null;
       const display = leaderProbe ? [...probes, leaderProbe] : probes;
       let seq = 0;
       for (const r of display) {
+        const m = entries.find(([eid]) => eid === r.id)?.[1] || (r.id === "leader" ? leaderEntry?.[1] : null);
+        const isBb = r.kind === "broadband" || String(r.url || "").startsWith("relay://") || m?.kind === "broadband";
+        if (isBb) {
+          const ago = r.lastSeen ? `${Math.round((Date.now() - r.lastSeen) / 1000)}s ago` : "no heartbeat yet";
+          const ip = r.publicIp || m?.publicIp || "?";
+          const via = r.stale ? "stale" : `via leader ${ago}`;
+          const stateBb = `${via} ip=${ip}`;
+          if (r.id === "leader") {
+            console.log(`  leader  ${r.url}  ${stateBb}`);
+            continue;
+          }
+          seq += 1;
+          const label = r.id && r.id !== r.url ? `  [${r.id}]` : "";
+          console.log(`  ${seq}. ${r.url}${label}  [broadband] ${stateBb}`);
+          continue;
+        }
         const state = r.fail ? `fail  ${r.fail}` : `ok    ${r.ms}ms`;
         if (r.id === "leader") {
           console.log(`  leader  ${r.url}  ${state}`);
@@ -334,12 +351,15 @@ if (groupCmd && groupCmd !== "create") {
   process.exit(0);
 }
 
-// -addtogroup <leader-host> <name>
+// -addtogroup <leader-host> <name> [--broadband]
 const addToGroupIdx = args.findIndex((x) => x === "-addtogroup" || x === "--addtogroup");
 if (addToGroupIdx >= 0) {
-  const [leaderHost, name] = args.slice(addToGroupIdx + 1);
-  if (!leaderHost || !name) {
-    console.error("usage: mslxdff -addtogroup <leader-host> <name>");
+  const rawArgs = args.slice(addToGroupIdx + 1);
+  const isBroadband = rawArgs.includes("--broadband");
+  const filtered = rawArgs.filter((a) => a !== "--broadband");
+  const [leaderHost, name] = filtered;
+  if (!leaderHost || !name || filtered.length > 2) {
+    console.error("usage: mslxdff -addtogroup <leader-host> <name> [--broadband]");
     process.exit(1);
   }
   const groups = createGroupsService({});
@@ -348,25 +368,34 @@ if (addToGroupIdx >= 0) {
   const leaderUrl = leaderHost.includes("://")
     ? leaderHost.replace(/\/+$/, "")
     : `http://${leaderHost}${leaderHost.includes(":") ? "" : ":8989"}`;
-  const myPort = effectivePort();
+  const kind = isBroadband ? "broadband" : "static";
+  let joinBody;
+  if (isBroadband) {
+    const relayId = `relay://${myToken.slice(0, 8)}`;
+    joinBody = { name, key: name, leaderUrl, url: relayId, token: myToken, kind: "broadband" };
+  } else {
+    const myPort = effectivePort();
+    joinBody = { name, key: name, leaderUrl, myPort, token: myToken, kind: "static" };
+  }
   try {
     const res = await fetch(`${leaderUrl}/v1/groups/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, key: name, leaderUrl, myPort, token: myToken }),
+      body: JSON.stringify(joinBody),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`join failed (HTTP ${res.status}): ${text}`);
     }
     const data = await res.json();
-    const myUrl = data.you?.url || "";
-    markJoined({ name, leaderUrl, myUrl, memberName: myUrl });
+    const myUrl = data.you?.url || joinBody.url || "";
+    const memberName = isBroadband ? myUrl : myUrl;
+    markJoined({ name, leaderUrl, myUrl, memberName, kind });
     const synced = await syncAllJoinedGroups({ peers, groups });
     const s = synced.find((x) => x.name === name);
-    console.log(`joined group "${name}" at ${leaderUrl}`);
+    console.log(`joined group "${name}" at ${leaderUrl}${isBroadband ? " [broadband]" : ""}`);
     if (s?.error) console.log(`  local failover setup failed: ${s.error}`);
-    else console.log(`  ${s?.added ?? 0} failover target(s) configured`);
+    else console.log(`  ${s?.added ?? 0} failover target(s) configured${isBroadband ? " (broadband via leader, local 127.0.0.1)" : ""}`);
   } catch (err) {
     console.error(`join failed: ${err.message}`);
     process.exit(1);
@@ -386,6 +415,7 @@ if (resetBanArg !== null || args.includes("-resetban") || args.includes("--reset
 
 function markJoined(entry) {
   const { name } = entry;
+  if (!entry.kind) entry.kind = "static";
   const list = loadGroupsJoined().filter((g) => g.name !== name);
   saveGroupsJoined([...list, entry]);
 }
@@ -464,8 +494,15 @@ function errMsg(err) { return String(err?.message || err); }
 
 // Probe a member's health endpoint concurrently (v1/health preferred,
 // falling back to /health). Returns { id, url, ms, rank } or { id, url, fail }.
-async function probeHealth({ id, url } = {}) {
+// broadband relay:// members are not probed — they are reachable via leader relay.
+async function probeHealth({ id, url, kind, lastSeen, publicIp } = {}) {
   if (!url) return { id, url, fail: "no url", rank: 3 };
+  const isBb = kind === "broadband" || String(url).startsWith("relay://");
+  if (isBb) {
+    const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
+    const stale = typeof lastSeen === "number" ? Date.now() - lastSeen > staleMs : true;
+    return { id, url, kind: "broadband", lastSeen, publicIp, stale, rank: stale ? 2 : 0 };
+  }
   const base = String(url).replace(/\/+$/, "");
   const startedAt = Date.now();
   try {
@@ -500,6 +537,7 @@ async function syncAllJoinedGroups({ peers, groups }) {
           memberName: g.memberName,
           url: g.myUrl,
           token: myToken,
+          kind: g.kind,
         });
         results.push({
           name: g.name,
@@ -626,7 +664,8 @@ const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshol
 const isDebug = process.env.MSLXDFF_DEBUG === "1";
 const bus = createEventBus();
 const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus });
-const srv = startServer({ router, signals: !isDebug });
+const listenHost = effectiveHost();
+const srv = startServer({ router, signals: !isDebug, host: listenHost });
 
 // -debug: push every event straight to this terminal.
 if (isDebug) {
@@ -687,6 +726,83 @@ const groupSyncTimer = setInterval(() => {
 }, groupSyncIntervalMs());
 groupSyncTimer.unref();
 
+// Broadband heartbeat + relay poll (only for broadband members)
+const broadbandGroups = () => loadGroupsJoined().filter((g) => g.kind === "broadband" && g.leaderUrl);
+if (broadbandGroups().length) {
+  const doHeartbeat = async () => {
+    for (const g of broadbandGroups()) {
+      try {
+        const res = await fetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          body: JSON.stringify({ name: g.name, group: g.name }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          console.log(`broadband heartbeat ${g.name}: ${res.status} ${txt.slice(0, 100)}`);
+        }
+      } catch (err) {
+        console.log(`broadband heartbeat ${g.name}: failed — ${errMsg(err)}`);
+      }
+    }
+  };
+  const doPoll = async () => {
+    for (const g of broadbandGroups()) {
+      try {
+        const pollRes = await fetch(`${g.leaderUrl}/v1/groups/relay/poll`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          body: JSON.stringify({ name: g.name, group: g.name }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!pollRes.ok) continue;
+        const data = await pollRes.json().catch(() => ({}));
+        const items = data.data || [];
+        for (const item of items) {
+          const { reqId, body } = item;
+          let result;
+          try {
+            const upRes = await upstream.chat(body);
+            const ct = upRes.headers.get("content-type") || "";
+            const isStream = Boolean(body?.stream) || ct.includes("text/event-stream");
+            if (isStream && upRes.body) {
+              // collect stream chunks for relay (simplified: buffer then forward as SSE)
+              let collected = "";
+              for await (const chunk of upRes.body) {
+                collected += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+              }
+              result = { status: upRes.status, headers: { "Content-Type": "text/event-stream" }, body: collected };
+            } else {
+              const txt = await upRes.text();
+              let parsed;
+              try { parsed = JSON.parse(txt); } catch { parsed = txt; }
+              result = { status: upRes.status, headers: { "Content-Type": upRes.headers.get("content-type") || "application/json" }, body: typeof parsed === "string" ? parsed : JSON.stringify(parsed) };
+            }
+          } catch (err) {
+            result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: errMsg(err) }) };
+          }
+          try {
+            await fetch(`${g.leaderUrl}/v1/groups/relay/result`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+              body: JSON.stringify({ name: g.name, group: g.name, reqId, result }),
+              signal: AbortSignal.timeout(5000),
+            });
+          } catch {}
+        }
+      } catch {}
+    }
+  };
+  // initial heartbeat
+  doHeartbeat().catch(() => {});
+  const hbTimer = setInterval(doHeartbeat, 30_000);
+  hbTimer.unref();
+  const pollTimer = setInterval(doPoll, 1000);
+  pollTimer.unref();
+  console.log(`broadband relay: heartbeat 30s + poll 1s for ${broadbandGroups().length} group(s)`);
+}
+
 // Auto-update: periodically check npm for a newer mslxdff and restart.
 // Enable with MSLXDFF_AUTO_UPDATE=1 (hourly) or MSLXDFF_AUTO_UPDATE_MS=<ms>.
 // Uses the same npm view/install path as `mslxdff -update`, but runs inside
@@ -741,6 +857,16 @@ function effectivePort() {
   const arg = argValue("-port", "--port");
   if (arg) return Number(arg);
   return resolvePort();
+}
+
+function effectiveHost() {
+  const envHost = process.env.MSLXDFF_HOST || process.env.MSLXDFF_BIND_HOST;
+  if (typeof envHost === "string" && envHost.trim()) return envHost.trim();
+  try {
+    const joined = loadGroupsJoined();
+    if (joined.some((g) => g.kind === "broadband")) return "127.0.0.1";
+  } catch {}
+  return "0.0.0.0";
 }
 
 function refreshIntervalMs() {
@@ -828,7 +954,7 @@ Usage:
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
-  mslxdff -addtogroup <leader-host> <name>  join a group via its leader host (default port 8989)
+  mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups
   mslxdff -group leave <name>      leave a group (removes its members from this node)
   mslxdff -group list              list groups on this node (numbered members)
@@ -905,6 +1031,12 @@ async function printStatus() {
             const tags = [];
             if (id === "leader" && isLeader) tags.push("leader");
             if (m?.url && m.url === g.myUrl) tags.push("this node");
+            if (m?.kind === "broadband") tags.push("broadband");
+            if (m?.kind === "broadband" && m?.publicIp) tags.push(`ip=${m.publicIp}`);
+            if (m?.kind === "broadband" && m?.lastSeen) {
+              const ago = Math.round((Date.now() - m.lastSeen) / 1000);
+              tags.push(ago < 90 ? `via leader ${ago}s ago` : "stale");
+            }
             const tag = tags.length ? `  [${tags.join(", ")}]` : "";
             console.log(`      ${m?.url || id}${tag}`);
           }
@@ -1006,6 +1138,14 @@ function fmtEvent(e) {
       return `${head} forward ->    ${e.peer} model=${m(e.model)} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
     case "peer-error":
       return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "relay-ip-change":
+      return `${head} relay ip      ${e.member || e.id || "?"} ${e.oldIp || "?"} -> ${e.newIp || e.publicIp || "?"} via leader`;
+    case "relay-forward":
+      return `${head} relay fwd     ${e.target || e.peer || "?"} via leader model=${m(e.model)} hops=${e.hops || 0}`;
+    case "relay-heartbeat":
+      return `${head} relay hb      ${e.member || "?"} ip=${e.ip || "?"} lastSeen=${e.lastSeen ? new Date(e.lastSeen).toISOString().slice(11,19) : "?"}`;
+    case "client-abort":
+      return `${head} client abort  ${m(e.model)} total=${fmtDur(e.totalMs)}`;
     case "result":
       return `${head} result        ${e.status} ${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}`;
     default:
