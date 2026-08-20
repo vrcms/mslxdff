@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { startServer, resolvePort } from "../src/server.js";
@@ -192,14 +192,24 @@ if (args.includes("-model") || args.includes("-models")) {
 // event bus — no filesystem polling. Ctrl+C / SIGTERM restarts the daemon in
 // the background, then exits. See the daemon body below for the stream wiring.
 if (args.includes("-debug") || args.includes("--debug")) {
-  const recent = recentEvents(100);
-  if (recent.length) {
-    console.log(`--- last ${recent.length} event(s) ---`);
-    for (const e of recent) console.log(fmtEvent(e));
-  }
-  console.log("--- live (Ctrl+C: stop debugging and restore background daemon) ---");
+  // 先停旧 daemon，再清日志，保持 debug 输出干净（仅本次会话）
   const { stopped, pid } = stopDaemon();
   if (stopped) console.log(`[debug] stopped background daemon (pid ${pid})`);
+  try {
+    const dir = logDir();
+    const toClear = [eventsFile(), callsFile(), errorsFile(), logFile()];
+    let cleared = 0;
+    for (const f of toClear) {
+      try {
+        if (existsSync(f)) {
+          writeFileSync(f, "");
+          cleared++;
+        }
+      } catch {}
+    }
+    console.log(`[debug] 已清理旧日志 ${cleared} 个文件 (${dir})，本次会话干净输出`);
+  } catch {}
+  console.log("--- live (Ctrl+C: stop debugging and restore background daemon) ---");
   process.env.MSLXDFF_DEBUG = "1";
   process.env.MSLXDFF_DAEMON = "1";
   // fall through to the daemon body below — no process.exit() here
@@ -692,6 +702,19 @@ if (isDebug) {
 }
 
 await srv.ready();
+
+// 上游 Keep-Alive 预热：首条 TCP+TLS 暖好，100ms 后异步触发，不阻塞 ready
+setTimeout(() => {
+  upstream.preheat().then((r) => {
+    const entry = { ts: Date.now(), type: "upstream-preheat", ...r, baseUrl };
+    try { bus.emit(entry); } catch {}
+    try { logs.appendEvent(entry); } catch {}
+    if (r.skipped) console.log(`[preheat] skipped (MSLXDFF_PREHEAT disabled)`);
+    else if (r.ok) console.log(`[preheat] opencode models ok ${r.status} ${r.ms}ms`);
+    else console.log(`[preheat] opencode models failed ${r.error || r.status || ""} ${r.ms || 0}ms`);
+  }).catch(() => {});
+}, 100).unref?.();
+
 models.startAutoRefresh();
 if (process.env.MSLXDFF_DAEMON) {
   writePid(process.pid, VERSION);
@@ -1195,6 +1218,9 @@ function fmtEvent(e) {
       return `${head} upstream ok   ${m(e.model)} HTTP ${e.status}${e.timing ? ` total=${e.timing.totalMs}ms` : ""}`;
     case "upstream-error":
       return `${head} upstream err  ${m(e.model)} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "upstream-preheat":
+      if (e.skipped) return `${head} preheat       跳过 (MSLXDFF_PREHEAT disabled)`;
+      return `${head} preheat       预热 opencode models ${e.ok ? "ok" : "fail"} ${e.status ? `HTTP ${e.status}` : e.error || ""} ${e.ms ? `${e.ms}ms` : ""}`;
     case "peer-race-start":
       return `${head} peer race     开始并发给组员 model=${m(e.model)} peers=${e.peers}`;
     case "peer-health":
