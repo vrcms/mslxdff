@@ -1179,17 +1179,42 @@ function fmtEvent(e) {
   const t = e?.ts ? new Date(e.ts).toISOString().slice(11, 19) : "--:--:--";
   const head = `[${t}]`;
   const m = (x) => x || "-";
+  const fallbackTag = e.fallback ? ` fallback=${e.fallback.requested_model || e.requested}->${e.fallback.actual_model || e.actual}(${e.fallback.reason || e.reason})` : "";
   switch (e?.type) {
     case "request":
-      return `${head} request       ${m(e.model)}${e.auto ? " (auto)" : ""} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""}`;
+      return `${head} request       client-> ${m(e.requested || e.model)}${e.auto ? " (auto)" : ""} raw=${m(e.rawModel)} lock=${m(e.lockModel)} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""} reqId=${e.reqId || ""}`;
+    case "client-request":
+      return `${head} client req    客户端请求 model=${m(e.requested)} raw=${m(e.rawModel)} lock=${m(e.lockModel)} ip=${e.ip || "?"}${e.stream ? " stream" : ""}`;
+    case "ordered":
+      return `${head} ordered       尝试顺序 [${(e.order||[]).join(" -> ")}] canFallback=${e.canFallback} useAuto=${e.useAuto}`;
+    case "model-try":
+      return `${head} model-try     尝试本地 model=${m(e.model)} idx=${e.idx} reqId=${e.reqId || ""}`;
+    case "upstream-try":
+      return `${head} upstream try  上游请求 model=${m(e.model)} attempt=${e.attempt || 1}`;
+    case "upstream-done":
+      return `${head} upstream ok   ${m(e.model)} HTTP ${e.status}${e.timing ? ` total=${e.timing.totalMs}ms` : ""}`;
     case "upstream-error":
       return `${head} upstream err  ${m(e.model)} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "peer-race-start":
+      return `${head} peer race     开始并发给组员 model=${m(e.model)} peers=${e.peers}`;
     case "peer-health":
-      return `${head} peer check    ${e.peer} -> ${e.count ? e.healthy.join(", ") : "no healthy models"}`;
+      return `${head} peer check    ${e.peer} -> ${e.count ? e.healthy.join(", ") : "no healthy models"}${e.strict ? " (strict)" : ""}`;
     case "peer-forward":
-      return `${head} forward ->    ${e.peer} model=${m(e.model)} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
+      return `${head} peer req      给组员请求 peer=${e.peer} model=${m(e.model)} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
     case "peer-error":
-      return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+      return `${head} peer err      ${e.peer} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)} model=${m(e.model)}`;
+    case "peer-race-win":
+      return `${head} peer win      选中 peer=${e.winPeer} model=${m(e.winTarget)} latency=${e.latencyMs}ms`;
+    case "peer-race-lose":
+      return `${head} peer lose     组员全部失败 model=${m(e.model)}`;
+    case "fallback":
+      return `${head} fallback      ${m(e.from)} -> ${m(e.to)} reason=${m(e.reason)}`;
+    case "fallback-notice":
+      return `${head} fallback!     客户端请求 ${m(e.requested)} 实际返回 ${m(e.actual)} 原因=${m(e.reason)} via=${m(e.via)} notice=${m(e.notice)}`;
+    case "relay-try":
+      return `${head} relay try     给宽带中继请求 target=${e.target} model=${m(e.model)} via=${e.via}`;
+    case "relay-fail":
+      return `${head} relay fail    ${e.target} ${e.status ? `HTTP ${e.status}` : ""} ${m(e.message)}`;
     case "relay-ip-change":
       return `${head} relay ip      ${e.member || e.id || "?"} ${e.oldIp || "?"} -> ${e.newIp || e.publicIp || "?"} via leader`;
     case "relay-forward":
@@ -1199,7 +1224,9 @@ function fmtEvent(e) {
     case "client-abort":
       return `${head} client abort  ${m(e.model)} total=${fmtDur(e.totalMs)}`;
     case "result":
-      return `${head} result        ${e.status} ${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}`;
+      return `${head} result        返回客户端 status=${e.status} model=${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}${fallbackTag}`;
+    case "client-response":
+      return `${head} client res    返回客户端 客户端请求 ${m(e.requested)} 实际返回 ${m(e.actual)} via=${m(e.via)}${e.fallback ? ` fallback=${e.fallback.requested_model}->${e.fallback.actual_model}(${e.fallback.reason})` : " 无fallback"} status=${e.status}`;
     case "auto-update-enabled":
       return `${head} auto-update   enabled every ${Math.round((e.intervalMs||0)/60000)}m current=${e.current}`;
     case "auto-update-disabled":
