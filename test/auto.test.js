@@ -93,7 +93,8 @@ test("candidatesFor pushes a cooldown model to the back", async () => {
     now: () => 1000,
   });
   const list = await auto.candidatesFor("deepseek-v4-flash-free");
-  assert.equal(list[list.length - 1], "deepseek-v4-flash-free");
+  // 显式指定模型严格优先：即使冷却也保持第一（原设计：A deepseek 失败 → B/D deepseek 并发 → 都失败才 fallback）
+  assert.equal(list[0], "deepseek-v4-flash-free");
   assert.ok(list.includes("mimo-v2.5-free"));
 });
 
@@ -470,7 +471,8 @@ test("explicit model within cooldown is skipped first (backup used directly)", a
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
-    assert.deepEqual(seen, ["mimo-v2.5-free"], "cooldown model skipped first");
+    // 显式模型严格语义：冷却不跳过，仍先试 deepseek（原设计）
+    assert.deepEqual(seen, ["deepseek-v4-flash-free"], "explicit model always tried first even when cooling");
   } finally {
     await app.close();
   }

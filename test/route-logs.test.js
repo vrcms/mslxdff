@@ -258,7 +258,7 @@ test("event stream shows upstream error then peer forward chain", async () => {
     assert.equal(ue.status, 429);
     assert.equal(ue.model, "deepseek-v4-flash-free");
     const pf = events.find((e) => e.type === "peer-forward");
-    assert.equal(pf.model, "peer-model-free");
+    assert.equal(pf.model, "deepseek-v4-flash-free");
     assert.equal(pf.peer, `http://127.0.0.1:${peerSrv.address().port}`);
     const r = events.find((e) => e.type === "result");
     assert.equal(r.via, "peer");

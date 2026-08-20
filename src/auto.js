@@ -132,9 +132,8 @@ export function createAutoSelector({
       slowCooldownMs,
       latencies,
     });
-    if (inCooldown(requested, lastErrorAt, now(), cooldownMs, slowCooldownMs)) {
-      return [...others, requested];
-    }
+    // 显式指定模型：严格优先，永不因冷却被挤到最后（原设计：A deepseek 失败 → B/D deepseek 并发 → 都失败才 fallback）
+    // 冷却仅影响 auto 的择优，不影响指定模型的“很难被更改”语义
     return [requested, ...others];
   }
 

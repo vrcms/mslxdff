@@ -436,8 +436,9 @@ test("peer only exposes healthy models: forwards the healthy one with lock", asy
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
     assert.equal(seenPeers.length, 1);
-    assert.equal(seenPeers[0].model, "m1-free", "unhealthy peer models must not be requested");
-    assert.equal(seenPeers[0].lock, "m1-free");
+    // 显式模型严格语义：peer 必须以请求模型 deepseek 去试，不偷换成 m1
+    assert.equal(seenPeers[0].model, "deepseek-v4-flash-free", "explicit model must be forwarded as-is, not replaced by healthy");
+    assert.equal(seenPeers[0].lock, "deepseek-v4-flash-free");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
@@ -446,11 +447,13 @@ test("peer only exposes healthy models: forwards the healthy one with lock", asy
 
 test("peer with no healthy models is skipped; local fallback serves", async () => {
   let peerChatHits = 0;
+  let peerSeenModel = null;
   const peerSrv = await stubChatServer(
-    (req, res) => {
+    (req, res, body) => {
       peerChatHits++;
+      peerSeenModel = JSON.parse(body).model;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{}");
+      res.end(JSON.stringify({ from: "peer", model: peerSeenModel }));
     },
     () => [
       { id: "m1-free", status: "limit", at: 123, code: 429 },
@@ -477,10 +480,11 @@ test("peer with no healthy models is skipped; local fallback serves", async () =
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
-    assert.equal(peerChatHits, 0, "chat must not be forwarded to a peer without healthy models");
+    // 显式模型严格语义：即使 peer 报告无 healthy，也必须以 deepseek 去试 peer，不直接跳过
+    assert.equal(peerChatHits, 1, "explicit model must still be forwarded to peer even when peer reports no healthy");
+    assert.equal(peerSeenModel, "deepseek-v4-flash-free");
     const json = await res.json();
-    assert.equal(json.model, "mimo-v2.5-free", "local fallback serves instead");
-    assert.ok(peers.errors()[`http://127.0.0.1:${peerSrv.address().port}`], "unhealthy peer recorded for cooldown");
+    assert.equal(json.model, "deepseek-v4-flash-free", "peer serves the exact requested model");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
@@ -594,7 +598,8 @@ test("peer without the requested model falls back to its first healthy model", a
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
-    assert.deepEqual(seenModels, ["hy3-free"], "falls back to the peer's first healthy model");
+    // 显式模型严格语义：peer 必须以 deepseek 去试，不偷换成 hy3
+    assert.deepEqual(seenModels, ["deepseek-v4-flash-free"], "explicit model must be forwarded as-is even when peer healthy list lacks it");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));

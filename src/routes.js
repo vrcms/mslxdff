@@ -193,6 +193,102 @@ function notFound(res) {
   return json(res, 404, { error: "Not Found" });
 }
 
+// --- fallback 显式提示（巧妙不破兼容）---
+// 机器可读：x-mslxdff-* headers；人类可读：mslxdff 字段 + SSE comment
+function fallbackReason(lastErr) {
+  if (!lastErr) return "cooldown";
+  const s = Number(lastErr.status);
+  if (s === 429) return "rate_limited";
+  if (lastErr.message && /timeout/i.test(String(lastErr.message))) return "timeout";
+  if (s === 502 || s === 503 || s === 504) return "upstream_error";
+  if (s >= 400) return "upstream_error";
+  return "fallback";
+}
+
+function buildFallbackInfo({ requested, actual, lastErr, via, useAuto, lockModel }) {
+  if (!requested || !actual) return null;
+  const alwaysHeaders = {
+    requested_model: requested,
+    actual_model: actual,
+    via: via || "local",
+  };
+  // auto / lock 仍告知 actual，但不算 fallback
+  if (useAuto || lockModel) {
+    return { ...alwaysHeaders, fallback: false, reason: null, notice: null };
+  }
+  const isFallback = requested !== actual;
+  if (!isFallback) {
+    return { ...alwaysHeaders, fallback: false, reason: null, notice: null };
+  }
+  const reason = fallbackReason(lastErr);
+  const reasonZh = reason === "rate_limited" ? "限流" : reason === "timeout" ? "超时" : reason === "cooldown" ? "冷却中" : "不可用";
+  const notice = `${requested} ${reasonZh}，已由 ${actual} 代答`;
+  return { ...alwaysHeaders, fallback: true, reason, notice };
+}
+
+function applyFallbackHeaders(res, info) {
+  if (!info) return;
+  // 始终告知实际与请求，客户端对比即知
+  if (info.requested_model) res.setHeader("x-mslxdff-requested-model", info.requested_model);
+  if (info.actual_model) res.setHeader("x-mslxdff-actual-model", info.actual_model);
+  if (info.via) res.setHeader("x-mslxdff-via", info.via);
+  if (info.fallback) {
+    res.setHeader("x-mslxdff-fallback", "1");
+    if (info.reason) res.setHeader("x-mslxdff-fallback-reason", info.reason);
+    // 人类 curl 可见
+    if (info.notice) res.setHeader("x-mslxdff-notice", encodeURIComponent(info.notice));
+  }
+}
+
+function enrichNonStreamJson(obj, info) {
+  if (!info || typeof obj !== "object" || obj === null) return obj;
+  // 仅当 fallback 时才注入顶层 mslxdff，避免噪音；但始终可通过 header 拿到 actual
+  if (!info.fallback) return obj;
+  if (obj.mslxdff) return obj;
+  return {
+    ...obj,
+    mslxdff: {
+      fallback: true,
+      requested_model: info.requested_model,
+      actual_model: info.actual_model,
+      reason: info.reason,
+      via: info.via,
+      notice: info.notice,
+    },
+  };
+}
+
+function enrichSseChunkText(text, info) {
+  if (!info?.fallback) return text;
+  // 行级注入：对每行 data: {json} 尝试注入 mslxdff
+  const lines = text.split("\n");
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^data:\s*(\{.*\})\s*$/.exec(line);
+    if (!m) continue;
+    try {
+      const obj = JSON.parse(m[1]);
+      if (obj && typeof obj === "object" && !obj.mslxdff) {
+        obj.mslxdff = {
+          fallback: true,
+          requested_model: info.requested_model,
+          actual_model: info.actual_model,
+          reason: info.reason,
+          via: info.via,
+          notice: info.notice,
+        };
+        lines[i] = `data: ${JSON.stringify(obj)}`;
+        changed = true;
+        break; // 仅注入首个 JSON 行
+      }
+    } catch {
+      continue;
+    }
+  }
+  return changed ? lines.join("\n") : text;
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -211,11 +307,12 @@ function readBody(req) {
 // Relay an upstream response to the client. Returns { status, ttfMs, aborted, interrupted, detail }
 // detail carries byte/chunk/sawDone diagnostics so a truncated deep-think
 // stream can be told apart from a clean EOF vs our stall/max vs client abort.
-async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS } = {}) {
+async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, fallback } = {}) {
   const t0 = performance.now();
   const contentType = upRes.headers.get("content-type") || "";
   const isStream = Boolean(body?.stream) || contentType.includes("text/event-stream");
   res.statusCode = upRes.status;
+  if (fallback) applyFallbackHeaders(res, fallback);
 
   let ttf = null;
   let interrupted = false;
@@ -246,6 +343,13 @@ async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, stream
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    // SSE 注释：curl -N 可见，EventSource/SDK 自动忽略，不污染 content
+    if (fallback?.fallback) {
+      try {
+        res.write(`: mslxdff fallback ${fallback.requested_model} -> ${fallback.actual_model} (${fallback.reason})\n`);
+        res.write(`: notice ${fallback.notice}\n\n`);
+      } catch {}
+    }
     if (upRes.body) {
       let first = true;
       let wroteAny = false;
@@ -301,10 +405,24 @@ async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, stream
             onFirstChunk?.(ttf);
             if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
+          // 首块注入 mslxdff 字段（仅 fallback 时），SDK 解析 JSON 可直接发现
+          let outChunk = chunk;
+          if (first === false && fallback?.fallback && wroteAny === false) {
+            try {
+              let txt = "";
+              if (Buffer.isBuffer(chunk)) txt = chunk.toString("utf8");
+              else if (chunk instanceof Uint8Array) txt = Buffer.from(chunk).toString("utf8");
+              else if (typeof chunk === "string") txt = chunk;
+              if (txt.includes("data:")) {
+                const enriched = enrichSseChunkText(txt, fallback);
+                if (enriched !== txt) outChunk = Buffer.from(enriched, "utf8");
+              }
+            } catch {}
+          }
           wroteAny = true;
           detail.wroteChunks += 1;
-          detail.wroteBytes += len;
-          res.write(chunk);
+          detail.wroteBytes += Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
+          res.write(outChunk);
           armStall(); // no-op when STALL_TIMEOUT_MS=0; scoring uses SCORE_STALL_MS gap above
         }
         if (!detail.exitReason) detail.exitReason = "normal";
@@ -346,7 +464,9 @@ async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, stream
   detail.receivedBytes = Buffer.byteLength(text);
   detail.exitReason = "normal-non-stream";
   try {
-    json(res, upRes.status, JSON.parse(text));
+    const parsed = JSON.parse(text);
+    const enriched = enrichNonStreamJson(parsed, fallback);
+    json(res, upRes.status, enriched);
   } catch {
     res.statusCode = upRes.status;
     res.setHeader("Content-Type", contentType || "text/plain");
@@ -428,17 +548,35 @@ async function forwardToPeer(peer, body, model, hops) {
   }
 }
 
-// Resolve the model a peer should serve for this request: reuse its hot-cache
-// model only when it matches the requested one; otherwise probe /v1/models/status
-// and prefer the requested model, falling back to the peer's first healthy one.
+// Resolve the model a peer should serve for this request.
+// 原设计严格语义：显式指定模型时，永远用该模型去试 peer，不因 peer 的本地 healthy 状态而偷换成 hy3。
+// 只有 auto 模式才走 healthy 探测与择优。
 // Returns { peer, target } or null when the peer is unusable.
 async function resolvePeerTarget(ctx, peer) {
   const prevModel = ctx.peers.stat(peer.url)?.model;
   const hot = ctx.peers.isHot(peer.url) && prevModel === ctx.model;
   if (hot) return { peer, target: prevModel };
+  // 显式模型：严格用请求模型，不做 healthy 偷换（B/D 必须以 deepseek 去试，失败才算该模型在该 peer 不可用）
+  const isExplicit = !!ctx.model && !isAutoModel(ctx.model);
+  if (isExplicit) {
+    // 仅做可达性探测：轻量 ping /v1/models/status 判断 peer 是否活着，不因模型状态过滤
+    const healthy = await peerHealthyModels(peer);
+    if (!healthy.length) {
+      // 无法探活也仍尝试：让 forward 去试，失败会由 race 逻辑记错；但为保持原有“全不健康则跳过”行为，仍标记
+      // 这里改为：即使 healthy 为空，也返回 target=ctx.model，让上游去判 429，而不是直接丢弃 peer
+      // 只有当 fetch 本身异常（healthy=[] 来自网络错）才视为 peer 不可用，需区分
+      // peerHealthyModels 在网络错时返回 []，此时应视为 peer 不可用
+      // 我们通过再次轻量探测区分：若 peer 完全不可达，healthy=[] 且 peer 曾无成功记录，则跳过
+      // 简化：若 healthy 为空，直接尝试目标模型，失败再记错（更符合“严格”）
+      ctx.evt("peer-health", { peer: peer.url, healthy: [], count: 0, strict: true });
+      return { peer, target: ctx.model };
+    }
+    ctx.evt("peer-health", { peer: peer.url, healthy, count: healthy.length, strict: true });
+    return { peer, target: ctx.model };
+  }
+  // auto 模式：走原有择优逻辑
   const healthy = await peerHealthyModels(peer);
   if (!healthy.length) {
-    // peer unreachable or every model unhealthy — mark it and move on
     await ctx.peers.recordError(peer.url);
     ctx.logError(ctx.model, 0, `peer ${peer.url} has no healthy models`);
     ctx.evt("peer-health", { peer: peer.url, healthy: [], count: 0 });
@@ -647,8 +785,11 @@ const ROUTES = [
         }
         if (upRes) {
           logCall(model, upRes.status);
-          evt("relay-start", { reqId, model, via: "local", isStream: Boolean(body.stream) });
+          const fallback = buildFallbackInfo({ requested, actual: model, lastErr, via: "local", useAuto, lockModel });
+          if (fallback?.fallback) evt("fallback-notice", { reqId, requested, actual: model, reason: fallback.reason, notice: fallback.notice, via: "local" });
+          evt("relay-start", { reqId, model, via: "local", isStream: Boolean(body.stream), fallback });
           const out = await relay(res, upRes, body, {
+            fallback,
             onFirstChunk: (delta) => {
               mark(`ttf-${model}`);
               evt("relay-first-chunk", { reqId, model, ttfMs: delta });
@@ -718,8 +859,11 @@ const ROUTES = [
             evt("peer-race-win", { reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs });
             await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
             logCall(win.target, win.res.status);
-            evt("relay-start", { reqId, model: win.target, via: "peer", isStream: Boolean(body.stream) });
+            const peerFallback = buildFallbackInfo({ requested, actual: win.target, lastErr, via: "peer", useAuto, lockModel });
+            if (peerFallback?.fallback) evt("fallback-notice", { reqId, requested, actual: win.target, reason: peerFallback.reason, notice: peerFallback.notice, via: "peer" });
+            evt("relay-start", { reqId, model: win.target, via: "peer", isStream: Boolean(body.stream), fallback: peerFallback });
             const out = await relay(res, win.res, body, {
+              fallback: peerFallback,
               onFirstChunk: (d) => mark(`ttf-peer-${win.target}`),
               onDownstreamAbort: () => evt("client-abort", { reqId, model: win.target, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
             });
@@ -746,8 +890,11 @@ const ROUTES = [
             const isResponse = bb.result && typeof bb.result.status === "number" && typeof bb.result.headers?.get === "function";
             if (isResponse) {
               // streaming response from leader's forward (which waited for broadband)
-              evt("relay-start", { reqId, model, via: "broadband", target: bb.target, group: bb.group });
+              const bbFallback = buildFallbackInfo({ requested, actual: model, lastErr, via: "broadband", useAuto, lockModel });
+              if (bbFallback?.fallback) evt("fallback-notice", { reqId, requested, actual: model, reason: bbFallback.reason, notice: bbFallback.notice, via: "broadband" });
+              evt("relay-start", { reqId, model, via: "broadband", target: bb.target, group: bb.group, fallback: bbFallback });
               const out = await relay(res, bb.result, body, {
+                fallback: bbFallback,
                 onFirstChunk: (d) => mark(`ttf-bb-${model}`),
                 onDownstreamAbort: () => evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
               });
@@ -779,8 +926,11 @@ const ROUTES = [
                   return null;
                 })(),
               };
-              evt("relay-start", { reqId, model, via: "broadband-local", target: bb.target, group: bb.group });
+              const bbLocalFallback = buildFallbackInfo({ requested, actual: model, lastErr, via: "broadband", useAuto, lockModel });
+              if (bbLocalFallback?.fallback) evt("fallback-notice", { reqId, requested, actual: model, reason: bbLocalFallback.reason, notice: bbLocalFallback.notice, via: "broadband" });
+              evt("relay-start", { reqId, model, via: "broadband-local", target: bb.target, group: bb.group, fallback: bbLocalFallback });
               const out = await relay(res, fakeRes, body, {
+                fallback: bbLocalFallback,
                 onFirstChunk: (d) => mark(`ttf-bb-${model}`),
                 onDownstreamAbort: () => evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
               });
