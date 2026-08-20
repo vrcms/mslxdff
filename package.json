@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -23,5 +23,8 @@
     "demo",
     "placeholder"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "undici": "^8.10.0"
+  }
 }
