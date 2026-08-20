@@ -815,7 +815,8 @@ const ROUTES = [
             }
             evt("slow-model", { model, elapsedMs: out.totalMs ?? (Date.now() - startedAt), threshold: STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null });
             logCall(model, 200);
-            evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null });
+            evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null, fallback, requested, actual: model });
+            evt("client-response", { requested, actual: model, via: "local", fallback, status: out.status, interrupted: true, reqId });
             return;
           }
           const elapsed = Date.now() - startedAt;
@@ -841,7 +842,8 @@ const ROUTES = [
           } else if (scoredSlow && out.detail) {
             // already recorded slow+latency above, still ensure latency EMA is updated for slow case (done)
           }
-          evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+          evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback, requested, actual: model });
+          evt("client-response", { requested, actual: model, via: "local", fallback, status: out.status, reqId });
           return;
         }
 
@@ -877,7 +879,8 @@ const ROUTES = [
                 await auto.recordOk(win.target, { latencyMs });
               }
             }
-            evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+            evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: peerFallback, requested, actual: win.target });
+            evt("client-response", { requested, actual: win.target, via: "peer", fallback: peerFallback, status: out.status, reqId });
             return;
           }
           evt("peer-race-lose", { reqId, model });
@@ -908,7 +911,8 @@ const ROUTES = [
                   await auto.recordOk(model, { latencyMs });
                 }
               }
-              evt("result", { model, status: out.status, via: "broadband", timing: bb.result._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+              evt("result", { model, status: out.status, via: "broadband", timing: bb.result._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: bbFallback, requested, actual: model });
+              evt("client-response", { requested, actual: model, via: "broadband", fallback: bbFallback, status: out.status, reqId });
               return;
             } else if (bb.result && typeof bb.result.status === "number") {
               // buffered result from local leader enqueue
@@ -935,7 +939,8 @@ const ROUTES = [
                 onDownstreamAbort: () => evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
               });
               evt("relay-done", { reqId, model, via: "broadband-local", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
-              evt("result", { model, status: out.status, via: "broadband", timing: null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+              evt("result", { model, status: out.status, via: "broadband", timing: null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: bbLocalFallback, requested, actual: model });
+              evt("client-response", { requested, actual: model, via: "broadband", fallback: bbLocalFallback, status: out.status, reqId });
               return;
             }
           }
