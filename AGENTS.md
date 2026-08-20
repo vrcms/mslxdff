@@ -66,6 +66,13 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 - 需要内置日志查询 `mslxdff -log [N]`（默认 10 条），日志在 `~/.config/mslxdff/` 或 `MSLXDFF_DAEMON_DIR`。
 - A 转发给 B 时上游应以 B 的出口 IP 访问 opencode.ai（分散免费池 IP 级限流）。
 
+## 代码文件大小约束（强制）
+
+- 大多数 `src/**/*.js` 源码文件请保持 **≤10KB**（约 300 行内）
+- 单文件 **>20KB 必须着手拆分**：按职责拆成多个 js 模块，通过 entry-point 聚合（例：`src/routes/` 拆 `chat.js`/`groups.js`/`relay.js`，`src/upstream/` 拆 `client.js`/`headers.js`）
+- 检查方式：`ls -lh src/**/*.js` 或 `wc -c src/**/*.js`；CI 可加 `find src -name "*.js" -size +20k` 告警
+- 现状：`src/routes.js` 约 63KB 已超标，下一版本需优先拆分
+
 ## Learned Workspace Facts
 
 - 端口优先级（`src/server.js resolvePort()`）：state.json 持久化 `port` > `MSLXDFF_PORT` env > 默认 8989；不再读裸 `PORT`。`-port N` 写 state 并触发 daemon 重启。

@@ -244,7 +244,13 @@ mslxdfree/
 4. 响应透传（非流式 JSON；流式逐块 SSE，服务端先转 `finish` 即可）；
 5. `/models` 返回过滤后的 7 个免费模型（可选，供工具端配置）。
 
-## 6. 已知陷阱 / 注意
+## 6. 代码文件大小约束（强制）
+
+- 大多数 `src/**/*.js` 保持 **≤10KB**（约 300 行）；>20KB 必须拆分到多个 js 模块，通过入口聚合
+- 检查：`ls -lh src/**/*.js` / `find src -name "*.js" -size +20k`
+- 现状 `src/routes.js` 63KB，已超标需拆分
+
+## 7. 已知陷阱 / 注意
 - OpenCode Free 是**公共免费额度**，可能限流/不稳定 → 预留可配超时与失败重试（429 退避）。
 - 不要实现账户体系/DB/云同步/工单 DB —— 那不是本功能职责。唯一凭据是自建的 Bearer token（见 `docs/adr/0004.md`，首建 + `-refresh-token` 轮换）。
 - `Accept: text/event-stream` 对非流式也带上无影响（上游忽略）。
