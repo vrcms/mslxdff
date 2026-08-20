@@ -1,3 +1,9 @@
+import crypto from "node:crypto";
+
+function genId(prefix) {
+  return `${prefix}${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
 export function createUpstreamClient({
   baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
   authToken = process.env.UPSTREAM_AUTH_TOKEN || "public",
@@ -11,12 +17,23 @@ export function createUpstreamClient({
   },
   fetchImpl = fetch,
 } = {}) {
-  const headers = {
+  const baseHeaders = {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${authToken}`,
     "x-opencode-client": "desktop",
-    "Accept": "text/event-stream",
   };
+
+  function buildHeaders(body) {
+    const isStream = body?.stream !== false;
+    return {
+      ...baseHeaders,
+      "Accept": isStream ? "text/event-stream" : "*/*",
+      "User-Agent": "opencode",
+      "x-opencode-session": genId("ses_"),
+      "x-opencode-request": genId("msg_"),
+      "x-opencode-project": "global",
+    };
+  }
 
   async function chat(body) {
     const url = `${baseUrl}/zen/v1/chat/completions`;
@@ -67,6 +84,7 @@ export function createUpstreamClient({
       connectTimeoutMs
     );
     try {
+      const headers = buildHeaders(body);
       const res = await fetchImpl(url, {
         method: "POST",
         headers,
@@ -81,7 +99,9 @@ export function createUpstreamClient({
     }
   }
 
-  return { chat, headers };
+  // 兼容旧调用：headers 为动态生成，暴露 getter 快照（用于测试/展示）
+  const headers = buildHeaders({});
+  return { chat, headers, buildHeaders };
 }
 
 function sleep(ms) {
