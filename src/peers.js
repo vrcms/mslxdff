@@ -3,8 +3,22 @@ import { loadPeers, savePeers, loadPeerErrors, savePeerErrors, loadPeerStats, sa
 export const DEFAULT_PEER_COOLDOWN_MS = 30_000;
 export const DEFAULT_PEER_HEAT_MS = 5 * 60_000;
 export const DEFAULT_MAX_HOPS = 3;
+export const DEFAULT_BROADBAND_STALE_MS = 90_000;
 
 const EMA_ALPHA = 0.3;
+
+export function broadbandStaleMs() {
+  const n = Number(process.env.MSLXDFF_BROADBAND_STALE_MS);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_BROADBAND_STALE_MS;
+}
+
+export function isBroadbandStale(peer, nowMs = Date.now(), staleMs = broadbandStaleMs()) {
+  const kind = peer?.kind || (String(peer?.url || "").startsWith("relay://") ? "broadband" : "static");
+  if (kind !== "broadband") return false;
+  const lastSeen = peer?.lastSeen;
+  if (typeof lastSeen !== "number") return true; // no heartbeat yet => stale
+  return nowMs - lastSeen > staleMs;
+}
 
 export function normalizePeerUrl(url) {
   return String(url || "").trim().replace(/\/+$/, "");
@@ -64,7 +78,16 @@ export function createPeersService({
   function isCooling(url) {
     if (!cooldownMs) return false;
     const err = lastErrorAt[url];
-    return typeof err === "number" && now() - err < cooldownMs;
+    if (typeof err === "number" && now() - err < cooldownMs) return true;
+    const peer = list.find((p) => p.url === url);
+    if (peer && isBroadbandStale(peer, now(), broadbandStaleMs())) return true;
+    return false;
+  }
+
+  function isBroadbandCooling(url) {
+    const peer = list.find((p) => p.url === url);
+    if (!peer) return false;
+    return isBroadbandStale(peer, now(), broadbandStaleMs());
   }
 
   function available() {
@@ -168,7 +191,10 @@ export function createPeersService({
   }
 
   return {
-    all, add, remove, removeByGroup, isCooling, isHot, stat, ordered, orderedByLastError, available, next,
+    all, add, remove, removeByGroup, isCooling, isBroadbandCooling, isBroadbandStale: (url) => {
+      const peer = list.find((p) => p.url === url);
+      return peer ? isBroadbandStale(peer, now(), broadbandStaleMs()) : false;
+    }, isHot, stat, ordered, orderedByLastError, available, next,
     recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
   };
 }

@@ -1,7 +1,8 @@
 import { createServer as httpCreateServer } from "node:http";
 import { DEFAULT_PORT, getPort } from "./state.js";
 
-export function startServer({ router, signals = true }, port = resolvePort()) {
+export function startServer({ router, signals = true, host }, port = resolvePort()) {
+  const listenHost = host ?? resolveHost();
   const server = httpCreateServer((req, res) => {
     router(req, res).catch((err) => {
       res.statusCode = 500;
@@ -13,7 +14,8 @@ export function startServer({ router, signals = true }, port = resolvePort()) {
   const ready = () =>
     new Promise((resolve, reject) => {
       server.on("error", reject);
-      server.listen(port, resolve);
+      if (listenHost) server.listen(port, listenHost, resolve);
+      else server.listen(port, resolve);
     });
 
   const close = () =>
@@ -30,6 +32,12 @@ export function startServer({ router, signals = true }, port = resolvePort()) {
   }
 
   return { server, ready, close };
+}
+
+export function resolveHost() {
+  const envHost = process.env.MSLXDFF_HOST || process.env.MSLXDFF_BIND_HOST;
+  if (typeof envHost === "string" && envHost.trim()) return envHost.trim();
+  return "0.0.0.0";
 }
 
 export function resolvePort() {

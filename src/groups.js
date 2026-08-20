@@ -30,37 +30,60 @@ export function createGroup(name, { file, key = name } = {}) {
 // Shared writer: register a member, de-duplicated by url (same ip:port
 // re-registering under a different name updates the existing entry instead of
 // creating a duplicate).
-function writeMember(group, memberName, url, token) {
+function writeMember(group, memberName, url, token, extra = {}) {
   const members = group.members || (group.members = {});
   const byUrl = Object.entries(members).find(([, m]) => m.url === url);
+  const entry = { url, token: token || "", ...extra };
+  // normalize kind default
+  if (!entry.kind) entry.kind = "static";
   if (byUrl) {
-    members[byUrl[0]] = { url, token: token || "" };
+    const prev = members[byUrl[0]] || {};
+    // merge: keep url/token from new, but preserve fields if not supplied
+    const merged = { ...prev, ...entry };
+    // ensure url/token from latest call win
+    merged.url = url;
+    merged.token = token || prev.token || "";
+    members[byUrl[0]] = merged;
     return;
   }
   const id = memberName || url;
-  members[id] = { url, token: token || "" };
+  // if id already exists with different url, update that entry too (fallback)
+  if (members[id] && members[id].url !== url) {
+    // treat as new url, keep old entry but also update
+  }
+  members[id] = { ...entry, url, token: token || "" };
 }
 
 // Leader side: add a member after verifying the join key.
-export function addGroupMember(name, { key, memberName, url, token, file } = {}) {
+export function addGroupMember(name, { key, memberName, url, token, kind, publicIp, lastSeen, status, file } = {}) {
   const groups = loadGroups(file ? { file } : {});
   const group = groups[name];
   if (!group) throw new Error(`group "${name}" not found on this node`);
   if (!verifyGroupKey(key, group.key)) throw new Error("invalid group key");
   if (!url) throw new Error("member url is required");
-  writeMember(group, memberName, url, token);
+  const extra = {};
+  if (kind) extra.kind = kind;
+  if (publicIp) extra.publicIp = publicIp;
+  if (lastSeen) extra.lastSeen = lastSeen;
+  if (status) extra.status = status;
+  writeMember(group, memberName, url, token, extra);
   saveGroups(groups, file ? { file } : {});
   return group.members;
 }
 
 // Leader side: upsert a member without key verification (used by the sync
 // path after the member's bearer token has already been validated).
-export function upsertMember(name, { memberName, url, token, file } = {}) {
+export function upsertMember(name, { memberName, url, token, kind, publicIp, lastSeen, status, file } = {}) {
   const groups = loadGroups(file ? { file } : {});
   const group = groups[name];
   if (!group) return null;
   if (!url) throw new Error("member url is required");
-  writeMember(group, memberName, url, token);
+  const extra = {};
+  if (kind) extra.kind = kind;
+  if (publicIp) extra.publicIp = publicIp;
+  if (lastSeen) extra.lastSeen = lastSeen;
+  if (status) extra.status = status;
+  writeMember(group, memberName, url, token, extra);
   saveGroups(groups, file ? { file } : {});
   return group.members;
 }
@@ -136,17 +159,19 @@ export function createGroupsService({ file } = {}) {
 
 // Re-register with the leader (join is idempotent) and return the fresh member list.
 // No key is needed once registered: the leader verifies our bearer token.
-export async function refreshGroupMembers(name, { leaderUrl, memberName, url, token, fetchImpl = fetch } = {}) {
+export async function refreshGroupMembers(name, { leaderUrl, memberName, url, token, kind, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
   try {
+    const body = { name, memberName, url, token };
+    if (kind) body.kind = kind;
     const res = await fetchImpl(`${leaderUrl}/v1/groups/join`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`,
       },
-      body: JSON.stringify({ name, memberName, url, token }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -163,6 +188,8 @@ export async function refreshGroupMembers(name, { leaderUrl, memberName, url, to
 // Merge a member map into the local peer list, replacing the previous snapshot
 // of this group and skipping ourselves. Used by both leaders (local groups) and
 // members (leader-pulled members).
+// broadband members (relay://) are NOT added as direct peers — they are
+// reached via the leader relay, so we skip them here.
 export function syncPeersFromMembers({ peers, members, myUrl, group, skipIds = [] }) {
   const self = normalizePeerUrl(myUrl);
   const skip = new Set(skipIds);
@@ -170,6 +197,8 @@ export function syncPeersFromMembers({ peers, members, myUrl, group, skipIds = [
   let added = 0;
   for (const [id, m] of Object.entries(members || {})) {
     if (skip.has(id)) continue;
+    const kind = m?.kind || "static";
+    if (kind === "broadband" || String(m?.url || "").startsWith("relay://")) continue;
     const url = normalizePeerUrl(m?.url);
     if (!url || url === self) continue;
     if (peers.add({ name: id, url, token: m?.token || "", group })) added++;
