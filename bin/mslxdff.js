@@ -804,36 +804,85 @@ if (broadbandGroups().length) {
 }
 
 // Auto-update: periodically check npm for a newer mslxdff and restart.
-// Enable with MSLXDFF_AUTO_UPDATE=1 (hourly) or MSLXDFF_AUTO_UPDATE_MS=<ms>.
-// Uses the same npm view/install path as `mslxdff -update`, but runs inside
-// the daemon so no manual intervention is needed.
+// Default: hourly (no env needed). Disable with MSLXDFF_AUTO_UPDATE=0/off/false.
+// Tuning: MSLXDFF_AUTO_UPDATE=1/true → hourly, or MSLXDFF_AUTO_UPDATE_MS=<ms>.
 const autoUpdateMs = autoUpdateIntervalMs();
+function emitAutoUpdate(type, data = {}) {
+  const entry = { ts: Date.now(), type, ...data };
+  try { bus?.emit(entry); } catch {}
+  try { logs?.appendEvent?.(entry); } catch {}
+  // also to daemon.log for tail
+  const line = `[auto-update] ${type} ${JSON.stringify(data)}`;
+  console.log(line);
+}
 if (autoUpdateMs) {
   console.log(`auto-update enabled: checking every ${Math.round(autoUpdateMs / 60000)}m`);
+  emitAutoUpdate("auto-update-enabled", { intervalMs: autoUpdateMs, current: VERSION });
+  // run once shortly after start (30s) so a newly deployed fix is picked up quickly,
+  // then on the regular interval
+  setTimeout(() => {
+    emitAutoUpdate("auto-update-check", { current: VERSION });
+    checkAndAutoUpdate().catch((err) => {
+      console.log(`auto-update check failed: ${errMsg(err)}`);
+      emitAutoUpdate("auto-update-failed", { error: errMsg(err) });
+    });
+  }, 30_000).unref?.();
   const autoUpdateTimer = setInterval(() => {
-    checkAndAutoUpdate().catch((err) => console.log(`auto-update check failed: ${errMsg(err)}`));
+    emitAutoUpdate("auto-update-check", { current: VERSION });
+    checkAndAutoUpdate().catch((err) => {
+      console.log(`auto-update check failed: ${errMsg(err)}`);
+      emitAutoUpdate("auto-update-failed", { error: errMsg(err) });
+    });
   }, autoUpdateMs);
   autoUpdateTimer.unref();
+} else {
+  console.log(`auto-update disabled (set MSLXDFF_AUTO_UPDATE=1 to enable hourly)`);
+  emitAutoUpdate("auto-update-disabled", { current: VERSION });
 }
 
 async function checkAndAutoUpdate() {
-  const info = await run(npmCmd(), ["view", "mslxdff", "version", "dist-tags.latest"]);
-  if (info.err) throw new Error(info.err.message);
-  const parts = (info.stdout || "").trim().split(/\s+/).filter(Boolean);
-  const latest = parts[parts.length - 1];
-  if (!latest || latest === VERSION) return;
-  // simple semver compare: skip if latest is not newer
-  if (compareSemver(latest, VERSION) <= 0) return;
+  emitAutoUpdate("auto-update-query", { current: VERSION });
+  const info = await run(npmCmd(), ["view", "mslxdff", "dist-tags.latest", "--json"]);
+  if (info.err) {
+    emitAutoUpdate("auto-update-query-failed", { error: info.err.message || String(info.stderr || "").slice(0, 500) });
+    throw new Error(info.err.message || String(info.stderr || "").slice(0, 500));
+  }
+  let latest = "";
+  try {
+    latest = JSON.parse(String(info.stdout || "").trim());
+    if (Array.isArray(latest)) latest = latest[latest.length - 1];
+    latest = String(latest || "").replace(/^v/, "").trim();
+  } catch {
+    const raw = String(info.stdout || "").trim();
+    const m = raw.match(/(\d+\.\d+\.\d+[^\s'"]*)/);
+    latest = m ? m[1] : raw.split(/\s+/).pop()?.replace(/['"]/g, "") || "";
+  }
+  latest = latest.replace(/['"]/g, "").trim();
+  emitAutoUpdate("auto-update-queried", { current: VERSION, latest, stdout: String(info.stdout || "").trim().slice(0, 200) });
+  if (!latest || latest === VERSION) {
+    emitAutoUpdate("auto-update-noop", { current: VERSION, latest });
+    return;
+  }
+  if (compareSemver(latest, VERSION) <= 0) {
+    emitAutoUpdate("auto-update-noop", { current: VERSION, latest, reason: "not newer" });
+    return;
+  }
+  emitAutoUpdate("auto-update-found", { current: VERSION, latest });
   console.log(`auto-update: v${VERSION} -> v${latest}, installing...`);
+  emitAutoUpdate("auto-update-installing", { current: VERSION, latest });
   const up = await run(npmCmd(), ["install", "-g", `mslxdff@${latest}`]);
-  if (up.err) throw new Error(up.err.message);
+  if (up.err) {
+    emitAutoUpdate("auto-update-install-failed", { current: VERSION, latest, error: up.err.message || String(up.stderr || "").slice(0, 500) });
+    throw new Error(up.err.message || String(up.stderr || "").slice(0, 500));
+  }
+  emitAutoUpdate("auto-update-installed", { current: VERSION, latest, stdout: String(up.stdout || "").slice(0, 500) });
   console.log(`auto-update: installed v${latest}, restarting daemon...`);
-  try { stopDaemon(); } catch {}
-  // startDaemon re-reads VERSION from the newly installed package on next boot;
-  // for the current process we just respawn with the new code.
+  emitAutoUpdate("auto-update-restarting", { current: VERSION, latest });
+  try { stopDaemon(); } catch (e) { emitAutoUpdate("auto-update-stop-failed", { error: errMsg(e) }); }
   const newPid = startDaemon([]);
   await waitForHealth(resolvePort(), 8000);
   console.log(`auto-update: restarted as v${latest} (pid ${newPid})`);
+  emitAutoUpdate("auto-update-restarted", { current: VERSION, latest, newPid });
 }
 
 function compareSemver(a, b) {
@@ -906,10 +955,13 @@ function groupSyncIntervalMs() {
 
 function autoUpdateIntervalMs() {
   const raw = process.env.MSLXDFF_AUTO_UPDATE_MS ?? process.env.MSLXDFF_AUTO_UPDATE;
-  if (raw === undefined || raw === null || raw === "") return 0;
-  if (raw === "1" || String(raw).toLowerCase() === "true") return 60 * 60 * 1000;
+  // default: hourly when env not set; explicit 0/off/false disables
+  if (raw === undefined || raw === null || raw === "") return 60 * 60 * 1000;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "0" || s === "off" || s === "false" || s === "no" || s === "disable" || s === "disabled") return 0;
+  if (s === "1" || s === "true" || s === "on" || s === "yes" || s === "enable" || s === "enabled") return 60 * 60 * 1000;
   const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : 0;
+  return Number.isInteger(n) && n > 0 ? n : 60 * 60 * 1000;
 }
 
 function banWindowMs() {
@@ -979,7 +1031,7 @@ Environment:
   MSLXDFF_MAX_HOPS           max peer-forwarding depth (default 3)
   MSLXDFF_BAN_THRESHOLD   failed joins before an ip is banned (default 5)
   MSLXDFF_BAN_WINDOW_MS   ban duration after too many failures (default 48h)
-  MSLXDFF_AUTO_UPDATE   auto-update: 1/true=hourly, or ms interval (0=off)
+  MSLXDFF_AUTO_UPDATE   auto-update: hourly by default, 0/off/false to disable, 1/true or ms
   MSLXDFF_AUTO_UPDATE_MS  same as above, explicit ms (overrides AUTO_UPDATE)
 `);
 }
@@ -1148,6 +1200,32 @@ function fmtEvent(e) {
       return `${head} client abort  ${m(e.model)} total=${fmtDur(e.totalMs)}`;
     case "result":
       return `${head} result        ${e.status} ${m(e.model)} via=${e.via} 响应耗时 ${fmtDur(e.durationMs)}`;
+    case "auto-update-enabled":
+      return `${head} auto-update   enabled every ${Math.round((e.intervalMs||0)/60000)}m current=${e.current}`;
+    case "auto-update-disabled":
+      return `${head} auto-update   disabled current=${e.current}`;
+    case "auto-update-check":
+      return `${head} auto-update   checking current=${e.current}`;
+    case "auto-update-query":
+      return `${head} auto-update   querying npm current=${e.current}`;
+    case "auto-update-queried":
+      return `${head} auto-update   queried current=${e.current} latest=${e.latest} raw=${(e.stdout||"").slice(0,80)}`;
+    case "auto-update-noop":
+      return `${head} auto-update   noop current=${e.current} latest=${e.latest}${e.reason?` reason=${e.reason}`:""}`;
+    case "auto-update-found":
+      return `${head} auto-update   NEW v${e.current} -> v${e.latest} 发现新版本`;
+    case "auto-update-installing":
+      return `${head} auto-update   installing v${e.latest}...`;
+    case "auto-update-installed":
+      return `${head} auto-update   installed v${e.latest}`;
+    case "auto-update-restarting":
+      return `${head} auto-update   restarting daemon to v${e.latest}...`;
+    case "auto-update-restarted":
+      return `${head} auto-update   restarted pid=${e.newPid} v${e.current} -> v${e.latest} 升级完成`;
+    case "auto-update-failed":
+    case "auto-update-query-failed":
+    case "auto-update-install-failed":
+      return `${head} auto-update   failed ${e.type} error=${e.error||""}`;
     default:
       return `${head} ${e?.type || "?"} ${JSON.stringify(e || {})}`;
   }
@@ -1167,22 +1245,35 @@ function npmCmd() {
 }
 
 function run(cmd, args, opts = {}) {
+  const isWin = process.platform === "win32";
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: 120_000, ...opts }, (err, stdout, stderr) => resolve({ err, stdout, stderr }));
+    // npm.cmd is a batch file on Windows — execFile needs shell:true to find it via PATHEXT
+    const execOpts = isWin ? { shell: true, windowsHide: true } : {};
+    execFile(cmd, args, { timeout: 120_000, ...execOpts, ...opts }, (err, stdout, stderr) => resolve({ err, stdout, stderr }));
   });
 }
 
 async function updateSelf() {
   console.log(`mslxdff v${VERSION} — checking for updates…`);
-  const info = await run(npmCmd(), ["view", "mslxdff", "version", "dist-tags.latest"]);
+  const info = await run(npmCmd(), ["view", "mslxdff", "dist-tags.latest", "--json"]);
   if (info.err) {
-    console.error(`could not query npm: ${info.err.message}`);
+    console.error(`could not query npm: ${info.err.message || String(info.stderr || "").slice(0, 500)}`);
     process.exit(1);
   }
-  const [version, latest] = (info.stdout || "").trim().split(/\s+/);
+  let latest = "";
+  try {
+    latest = JSON.parse(String(info.stdout || "").trim());
+    if (Array.isArray(latest)) latest = latest[latest.length - 1];
+    latest = String(latest || "").trim();
+  } catch {
+    const m = String(info.stdout || "").trim().match(/(\d+\.\d+\.\d+[^\s'"]*)/);
+    latest = m ? m[1] : "";
+  }
+  latest = String(latest || "").replace(/['"]/g, "").trim();
+  const version = VERSION;
   console.log(`  installed: ${version}`);
-  console.log(`  latest:    ${latest}`);
-  if (version === latest) {
+  console.log(`  latest:    ${latest || "unknown"}`);
+  if (!latest || version === latest || compareSemver(latest, version) <= 0) {
     console.log("already up to date");
     process.exit(0);
   }
