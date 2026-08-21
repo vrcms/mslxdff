@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlugins, runHook, pluginsDir } from "../src/plugins.js";
+import { loadPlugins, runHook, pluginsDir, resolvePluginDirs } from "../src/plugins.js";
 
 function tmpPluginsDir() {
   return mkdtempSync(join(tmpdir(), "mslxdff-plugins-"));
@@ -57,6 +57,39 @@ describe("plugin loader", () => {
     writeFileSync(join(dir, "anon.mjs"), `export default { hooks: {} };`);
     const { plugins } = await loadPlugins({ dir });
     assert.equal(plugins[0].name, "anon");
+  });
+
+  test("resolvePluginDirs: env takes over completely; otherwise bundled + user dirs", () => {
+    const prev = process.env.MSLXDFF_PLUGINS_DIR;
+    process.env.MSLXDFF_PLUGINS_DIR = "D:/only/this";
+    assert.deepEqual(resolvePluginDirs({ pkgRoot: "D:/pkg" }), ["D:/only/this"]);
+    if (prev === undefined) delete process.env.MSLXDFF_PLUGINS_DIR;
+    else process.env.MSLXDFF_PLUGINS_DIR = prev;
+    const dirs = resolvePluginDirs({ pkgRoot: "D:/pkg" });
+    assert.equal(dirs.length, 2);
+    assert.match(dirs[0], /plugins$/);
+    assert.match(dirs[1], /[\\/]mslxdff[\\/]plugins$/);
+  });
+
+  test("multi-dir load: user dir overrides bundled on same basename, both load otherwise", async () => {
+    const bundled = tmpPluginsDir();
+    const user = tmpPluginsDir();
+    try {
+      // 同名文件：user 覆盖 bundled
+      writeFileSync(join(bundled, "same.mjs"), `export default { name: "bundled-same" };`);
+      writeFileSync(join(user, "same.mjs"), `export default { name: "user-same" };`);
+      // 不同名：都加载，bundled 在前
+      writeFileSync(join(bundled, "official.mjs"), `export default { name: "official-extra" };`);
+      writeFileSync(join(user, "mine.mjs"), `export default { name: "user-own" };`);
+      const { plugins } = await loadPlugins({ dirs: [bundled, user] });
+      const names = plugins.map((p) => p.name);
+      assert.ok(names.includes("user-same"), "user version wins");
+      assert.ok(!names.includes("bundled-same"), "bundled same-name skipped");
+      assert.deepEqual(names, ["official-extra", "user-own", "user-same"], "bundled first, stable order");
+    } finally {
+      rmSync(bundled, { recursive: true, force: true });
+      rmSync(user, { recursive: true, force: true });
+    }
   });
 });
 

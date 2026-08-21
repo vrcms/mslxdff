@@ -8,14 +8,15 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel } from "../src/state.js";
+import { getPreferredModel } from "../src/auto.js";
 import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid, readPidVersion, isPidAlive } from "../src/daemon.js";
 import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
 import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
 import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents, eventsFile, callsFile, errorsFile } from "../src/logs.js";
-import { loadPlugins, runHook, pluginsDir } from "../src/plugins.js";
+import { loadPlugins, runHook, pluginsDir, resolvePluginDirs } from "../src/plugins.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -109,17 +110,22 @@ if (args.includes("-log") || args.includes("--log") || args.includes("-logs") ||
   process.exit(0);
 }
 
-// -plugins: list plugins in the plugins dir (and their hooks) without starting the daemon
+// -plugins: list plugins in the plugins dirs (and their hooks) without starting the daemon
 if (args.includes("-plugins") || args.includes("--plugins")) {
-  const dir = pluginsDir();
-  console.log(`plugins dir: ${dir}`);
-  const { plugins, errors } = await loadPlugins({ dir });
+  const pkgRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const dirs = resolvePluginDirs({ pkgRoot });
+  const labels = ["official (bundled)", "user"];
+  if (dirs.length === 1) labels[0] = "dir";
+  console.log(`plugin dirs:`);
+  dirs.forEach((d, i) => console.log(`  [${labels[i] || `dir${i + 1}`}] ${d}${existsSync(d) ? "" : "  (not created yet)"}`));
+  const { plugins, errors } = await loadPlugins({ dirs });
   if (!plugins.length && !errors.length) {
-    console.log("(no plugins — drop *.mjs files into the dir above, see docs/plugins.md)");
+    console.log("(no plugins — drop *.mjs files into a dir above, see docs/plugins.md)");
   }
   for (const p of plugins) {
     const hooks = Object.keys(p.hooks || {});
-    console.log(`  ${p.name}${p.version ? `@${p.version}` : ""}  [${hooks.join(", ") || "no hooks"}]`);
+    const src = p.file.startsWith(pkgRoot) ? "official" : "user";
+    console.log(`  ${p.name}${p.version ? `@${p.version}` : ""}  [${hooks.join(", ") || "no hooks"}]  (${src})`);
     if (p.description) console.log(`    ${p.description}`);
   }
   for (const e of errors) console.log(`  load error: ${e.file} — ${e.error}`);
@@ -174,18 +180,24 @@ if (args.includes("-model") || args.includes("-models")) {
     }
     process.exit(0);
   }
+  if (sub === "set" && args[idx + 2]) {
+    const id = args[idx + 2];
+    savePreferredModel(id);
+    console.log(`default model set to: ${id} (daemon hot-reloads on next request)`);
+    process.exit(0);
+  }
   if (sub !== undefined && sub !== "list") {
-    console.error("usage: mslxdff -model list | mslxdff -model status | mslxdff -model refresh");
+    console.error("usage: mslxdff -models (interactive picker) | mslxdff -model list | mslxdff -model set <id> | mslxdff -model status | mslxdff -model refresh");
     process.exit(1);
   }
   const cacheFile = join(logDir(), "models.json");
   try {
+    let ids = [];
+    let cachedAt = null;
     const cached = readModelsCache(cacheFile);
     if (cached) {
-      const ids = (cached.data || []).map((m) => m.id).filter(Boolean);
-      const at = cached.cachedAt ? ` (cached ${new Date(cached.cachedAt).toISOString().slice(0, 16).replace("T", " ")})` : "";
-      console.log(`${ids.length} free model(s)${at}:`);
-      for (const id of ids) console.log(`  ${id}`);
+      ids = (cached.data || []).map((m) => m.id).filter(Boolean);
+      cachedAt = cached.cachedAt || null;
     } else {
       const models = createModelsService({
         baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
@@ -194,15 +206,82 @@ if (args.includes("-model") || args.includes("-models")) {
         cacheFile,
       });
       const list = await models.get();
-      const ids = (list.data || []).map((m) => m.id).filter(Boolean);
-      console.log(`${ids.length} free model(s):`);
-      for (const id of ids) console.log(`  ${id}`);
+      ids = (list.data || []).map((m) => m.id).filter(Boolean);
     }
+    if (!ids.length) {
+      console.log("no models available — try: mslxdff -model refresh");
+      process.exit(0);
+    }
+    // TTY：交互式箭头选择默认模型；非 TTY（管道/脚本）：保持纯列表
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const statuses = loadModelErrors();
+      const current = getPreferredModel();
+      const items = ids.map((id) => {
+        const e = statuses[id];
+        return {
+          id,
+          status: typeof e === "number" ? "error" : e?.status || "normal",
+          current: id === current,
+        };
+      });
+      const picked = await pickInteractive(items, Math.max(0, items.findIndex((x) => x.current)));
+      if (!picked) {
+        console.log("cancelled — default model unchanged");
+        process.exit(0);
+      }
+      savePreferredModel(picked);
+      console.log(`default model set to: ${picked} (daemon hot-reloads on next request)`);
+      process.exit(0);
+    }
+    const at = cachedAt ? ` (cached ${new Date(cachedAt).toISOString().slice(0, 16).replace("T", " ")})` : "";
+    console.log(`${ids.length} free model(s)${at}:`);
+    for (const id of ids) console.log(`  ${id}`);
+    console.log(`\ninteractive pick needs a TTY; set directly with: mslxdff -model set <id>`);
   } catch (err) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
     process.exit(1);
   }
   process.exit(0);
+}
+
+// 交互式选择器：↑/↓ 移动，Enter 确认，q/Esc 取消；ANSI 原地重绘
+async function pickInteractive(items, startCursor = 0) {
+  const { renderChooser, renderChooserHelp, parseKey } = await import("../src/chooser.js");
+  let cursor = Math.min(Math.max(startCursor, 0), items.length - 1);
+  const draw = () => {
+    const lines = [...renderChooser(items, cursor), ...renderChooserHelp()];
+    process.stdout.write("\x1b[G\x1b[J" + lines.join("\n"));
+  };
+  draw();
+  return new Promise((resolve) => {
+    const wasRaw = process.stdin.isRaw;
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    const cleanup = () => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\n");
+    };
+    const onData = (chunk) => {
+      const key = parseKey(String(chunk));
+      if (key === "up") {
+        cursor = (cursor - 1 + items.length) % items.length;
+        draw();
+      } else if (key === "down") {
+        cursor = (cursor + 1) % items.length;
+        draw();
+      } else if (key === "enter") {
+        cleanup();
+        resolve(items[cursor].id);
+      } else if (key === "cancel") {
+        cleanup();
+        resolve(null);
+      }
+    };
+    process.stdin.on("data", onData);
+  });
 }
 
 // -debug: stop the background daemon and run the server in THIS terminal
@@ -667,7 +746,10 @@ if (!process.env.MSLXDFF_DAEMON) {
 
 const { token, created } = await loadToken();
 // 插件系统：加载（在 upstream 创建前，插件可整体替换上游实现）
-const { plugins: loadedPlugins, errors: pluginErrors } = await loadPlugins({});
+// 双目录：<安装目录>/plugins/（官方插件，随包分发）+ ~/.config/mslxdff/plugins/（用户自定义，升级不丢）
+const pkgRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const pluginDirs = resolvePluginDirs({ pkgRoot });
+const { plugins: loadedPlugins, errors: pluginErrors } = await loadPlugins({ dirs: pluginDirs });
 for (const e of pluginErrors) {
   console.log(`plugin load failed: ${e.file} — ${e.error}`);
   appendEvent({ ts: Date.now(), type: "plugin-load-error", file: e.file, error: e.error });
@@ -1083,7 +1165,9 @@ Usage:
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon, models, recent calls, last error)
   mslxdff -log [N]                 show last N events (default 10, e.g. -log 100)
-  mslxdff -model list              list the free models this proxy serves (cached)
+  mslxdff -models                interactive picker: ↑/↓ select a model, Enter sets it as the default (non-TTY: plain list)
+  mslxdff -model list            list the free models this proxy serves (cached)
+  mslxdff -model set <id>        set the default (preferred) model without the interactive picker
   mslxdff -model status            show per-model health status (normal/limit/error)
   mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
