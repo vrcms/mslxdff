@@ -38,9 +38,19 @@ export function createUpstreamClient({
     504: { attempts: 1, delayMs: 500 },
   },
   fetchImpl,
+  hooks,
 } = {}) {
   // 使用 undici 的 fetch 与 Agent 配对，避免 global fetch 与 npm undici Agent 不兼容
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  // hooks: async (name, ctx) => ({ value, changed }) | null — 由 bin 用 runHook 绑定；错误已在上层隔离
+  const applyHook = async (name, ctx) => {
+    if (!hooks) return null;
+    try {
+      return await hooks(name, ctx);
+    } catch {
+      return null;
+    }
+  };
   const baseHeaders = {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${authToken}`,
@@ -129,7 +139,17 @@ export function createUpstreamClient({
       connectTimeoutMs
     );
     try {
-      const headers = buildHeaders(body);
+      let reqUrl = url;
+      let headers = buildHeaders(body);
+      // 插件 hook：upstream:headers — 返回 { headers } 可替换请求头
+      const hh = await applyHook("upstream:headers", { url, body, headers });
+      if (hh?.changed && hh.value?.headers) headers = hh.value.headers;
+      // 插件 hook：upstream:before-request — 返回 { url, headers } 可改目标地址/头（上游不限于 opencode）
+      const br = await applyHook("upstream:before-request", { url, method: "POST", body, headers });
+      if (br?.changed && br.value) {
+        if (typeof br.value.url === "string" && br.value.url) reqUrl = br.value.url;
+        if (br.value.headers && typeof br.value.headers === "object") headers = br.value.headers;
+      }
       const opts = {
         method: "POST",
         headers,
@@ -137,7 +157,7 @@ export function createUpstreamClient({
         signal: controller.signal,
       };
       if (dispatcher) opts.dispatcher = dispatcher;
-      const res = await fetchImpl(url, opts);
+      const res = await fetchImpl(reqUrl, opts);
       return res;
     } catch (err) {
       return err;

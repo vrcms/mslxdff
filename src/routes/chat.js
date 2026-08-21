@@ -6,13 +6,24 @@ import { buildFallbackInfo } from "./fallback.js";
 import { relay, SLOW_TOTAL_MS, STREAM_TIMEOUT_MS, STALL_TIMEOUT_MS, SCORE_STALL_MS } from "./stream.js";
 import { racePeerCandidates } from "./peers.js";
 import { tryBroadbandRelay } from "./relay-queue.js";
+import { runHook } from "../plugins.js";
 
-export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHops, groups, bus, token }) {
+export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHops, groups, bus, token, plugins }) {
   let body;
   try {
     body = await readBody(req);
   } catch {
     return json(res, 400, { error: "Invalid JSON body" });
+  }
+
+  // 插件 hook：request:received — 读到 body 后触发；返回 { respond:{status,body} } 可短路请求
+  if (plugins?.length) {
+    const rc = await runHook(plugins, "request:received", { ip: clientIp(req), hops: parseHops(req.headers["x-mslxdff-hops"]), headers: { "content-type": req.headers["content-type"] }, body });
+    for (const e of rc.errors) logs?.appendEvent?.({ ts: Date.now(), type: "plugin-hook-error", hook: "request:received", plugin: e.plugin, error: e.error });
+    const respond = rc.value?.respond;
+    if (respond && typeof respond === "object") {
+      return json(res, respond.status || 200, respond.body ?? {});
+    }
   }
 
   const startedAt = Date.now();
@@ -49,14 +60,32 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     if (bus) bus.emit(entry);
     logs?.appendEvent?.(entry);
   };
+  // 插件 hook：request:completed — 每个请求出口触发一次（只观察）
+  const done = (info) => {
+    if (!plugins?.length) return;
+    runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body.stream), durationMs: Date.now() - startedAt, ...info }).catch(() => {});
+  };
   evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body), rawModel, requested, lockModel: lockModel || null });
   evt("ordered", { reqId, order, canFallback, canForwardPeers, useAuto, statuses: auto?.statuses?.() ?? null });
 
+  // 插件 hook：model:select — 可返回新数组替换候选顺序（lockModel 时不可改）
+  if (plugins?.length && !lockModel) {
+    const sel = await runHook(plugins, "model:select", { reqId, requested, useAuto, order: [...order], hops, stream: Boolean(body.stream) });
+    if (sel.changed && Array.isArray(sel.value) && sel.value.length) {
+      order = sel.value.filter(Boolean);
+      if (!order.length) order = [requested];
+      evt("plugin-hook", { reqId, hook: "model:select", applied: true, order: [...order] });
+    }
+    for (const e of sel.errors) evt("plugin-hook-error", { reqId, hook: "model:select", plugin: e.plugin, error: e.error });
+  }
+
   const handlerCtx = {
+    reqId,
     model: null,
     body,
     hops,
     peers,
+    plugins,
     evt,
     logError,
     logCall,
@@ -67,8 +96,26 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     const model = order[idx];
     handlerCtx.model = model;
     evt("model-try", { reqId, model, idx, remaining: order.length - idx });
+    // 插件 hook：model:beforeTry — 返回 false 可跳过该候选
+    if (plugins?.length) {
+      const bt = await runHook(plugins, "model:beforeTry", { reqId, requested, model, idx, hops });
+      for (const e of bt.errors) evt("plugin-hook-error", { reqId, hook: "model:beforeTry", plugin: e.plugin, error: e.error });
+      if (bt.value === false || bt.value?.skip === true) {
+        evt("plugin-hook", { reqId, hook: "model:beforeTry", applied: true, skipped: model });
+        continue;
+      }
+    }
     let upRes = null;
-    const forwarded = { ...injectReasoningContent(model, body), model };
+    let forwarded = { ...injectReasoningContent(model, body), model };
+    // 插件 hook：upstream:request — 返回 { payload } 可替换本次发往上游的负载
+    if (plugins?.length) {
+      const ur = await runHook(plugins, "upstream:request", { reqId, requested, model, payload: forwarded, stream: Boolean(body.stream) });
+      for (const e of ur.errors) evt("plugin-hook-error", { reqId, hook: "upstream:request", plugin: e.plugin, error: e.error });
+      if (ur.changed && ur.value?.payload && typeof ur.value.payload === "object") {
+        forwarded = ur.value.payload;
+        evt("plugin-hook", { reqId, hook: "upstream:request", applied: true, model, rewrittenModel: forwarded.model ?? null });
+      }
+    }
     const tUp = performance.now();
     evt("upstream-try", { reqId, model, attempt: idx + 1 });
     try {
@@ -79,6 +126,16 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
       lastErr = { model, upstream: null, status: 502, message: errMsg(err) };
       logError(model, 502, errMsg(err));
       evt("upstream-error", { reqId, model, status: 502, message: errMsg(err), timing: err._t ?? { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - tUp) } });
+    }
+    // 插件 hook：upstream:response — 上游响应（或错误）后观察
+    if (plugins?.length) {
+      runHook(plugins, "upstream:response", {
+        reqId, requested, model,
+        status: upRes instanceof Error ? null : upRes instanceof Object ? (upRes.status ?? null) : null,
+        ok: !(upRes instanceof Error) && upRes ? upRes.status < 400 : false,
+        error: upRes instanceof Error ? errMsg(upRes) : null,
+        timing: upRes?._t ?? null,
+      }).catch(() => {});
     }
     mark(`up-${model}`);
     if (upRes && upRes.status >= 400) {
@@ -98,6 +155,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
         onFirstChunk: (delta) => {
           mark(`ttf-${model}`);
           evt("relay-first-chunk", { reqId, model, ttfMs: delta });
+          if (plugins?.length) runHook(plugins, "relay:first-chunk", { reqId, requested, model, via: "local", ttfMs: delta }).catch(() => {});
         },
         onDownstreamAbort: () => {
           evt("client-abort", { reqId, model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] });
@@ -122,6 +180,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
         logCall(model, 200);
         evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null, fallback, requested, actual: model });
         evt("client-response", { requested, actual: model, via: "local", fallback, status: out.status, interrupted: true, reqId });
+        done({ via: "local", status: out.status, actual: model, interrupted: true, fallback });
         return;
       }
       const elapsed = Date.now() - startedAt;
@@ -146,6 +205,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
       }
       evt("result", { model, status: out.status, via: "local", timing: upRes._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback, requested, actual: model });
       evt("client-response", { requested, actual: model, via: "local", fallback, status: out.status, reqId });
+      done({ via: "local", status: out.status, actual: model, fallback });
       return;
     }
 
@@ -178,6 +238,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
         }
         evt("result", { model: win.target, status: out.status, via: "peer", timing: win.res._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: peerFallback, requested, actual: win.target });
         evt("client-response", { requested, actual: win.target, via: "peer", fallback: peerFallback, status: out.status, reqId });
+        done({ via: "peer", status: out.status, actual: win.target, fallback: peerFallback });
         return;
       }
       evt("peer-race-lose", { reqId, model });
@@ -208,6 +269,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
           }
           evt("result", { model, status: out.status, via: "broadband", timing: bb.result._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: bbFallback, requested, actual: model });
           evt("client-response", { requested, actual: model, via: "broadband", fallback: bbFallback, status: out.status, reqId });
+          done({ via: "broadband", status: out.status, actual: model, fallback: bbFallback });
           return;
         } else if (bb.result && typeof bb.result.status === "number") {
           const fakeRes = {
@@ -235,6 +297,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
           evt("relay-done", { reqId, model, via: "broadband-local", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
           evt("result", { model, status: out.status, via: "broadband", timing: null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback: bbLocalFallback, requested, actual: model });
           evt("client-response", { requested, actual: model, via: "broadband", fallback: bbLocalFallback, status: out.status, reqId });
+          done({ via: "broadband", status: out.status, actual: model, fallback: bbLocalFallback });
           return;
         }
       }
@@ -258,6 +321,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
       return;
     }
     evt("result", { reqId, model, status: lastErr?.status ?? 502, via: "none", timing: null });
+    done({ via: "none", status: lastErr?.status ?? 502, error: lastErr?.message || "all auto models failed" });
     return json(res, 502, { error: lastErr?.message || "all auto models failed" });
   }
 
