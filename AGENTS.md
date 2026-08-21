@@ -63,8 +63,8 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 - 深度思考被截断时不要自发压测，补细粒度日志（reqId/detail）后等用户复现。
 - 慢模型不掐当前流：首块 25s 内到来即视为可用，后续无限等；stall 15s 仅作质量分（stallHits 累计数进 5 分钟降权），总耗时>20s 也降权。
 - 指定模型 429 不可用时按延迟 EMA 择优切最快模型（nemotron-3.5 快、hy3/laguna 慢）。
-- 需要内置日志查询 `mslxdff -log [N]`（默认 10 条），日志在 `~/.config/mslxdff/` 或 `MSLXDFF_DAEMON_DIR`。
 - A 转发给 B 时上游应以 B 的出口 IP 访问 opencode.ai（分散免费池 IP 级限流）。
+- 扩展功能优先做成可配置常量/单一变量（如 `PREFERRED_MODEL` + env 覆盖），避免到处硬编码；跨系统扩展（如 WorkBuddy）先在 mslxdff 侧留稳定 hook 契约。
 
 ## 代码文件大小约束（强制）
 
@@ -79,11 +79,11 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 - `-group list` 的序号按 state 成员顺序（过滤 `leader`，leader 不占号）固定渲染，`-group remove <seq>` 用同一顺序踢人（仅组长）。
 - 组长节点 `-leavegroup` 会提示改用 `-delgroup`；`-delgroup` 在组员节点报错并提示该组由谁领导。
 - 上游 opencode.ai 免费额度会 429 限流导致 failover：同一请求的模型可能被静默换成健康模型响应；用 `x-mslxdff-model-lock` 头可锁定模型拿到真实状态。
-- 免费模型当前约 7 个：`deepseek-v4-flash-free`/`big-pickle`/`mimo-v2.5-free`/`hy3-free`/`nemotron-3-ultra-free`/`nemotron-3.5-lightning-free`/`laguna-s-2.1-free`。
+- 免费模型当前约 9 个（0.1.43 实测）：`deepseek-v4-flash-free`/`big-pickle`/`x-preview-f-free`/`muse-spark-1.2-contributor-free`/`mimo-v2.5-free`/`hy3-free`/`nemotron-3-ultra-free`/`nemotron-3.5-lightning-free`/`laguna-s-2.1-free`。
 - 服务器节点：i-69b368cf221da7821163239e（leader，port 8989）、172.93.221.187:8989、149.13.91.10:8989，组名 `my@mslxd`。
-- 耗时优化（0.1.27）：① 上游 429/5xx 重试从 `2次×2s` 收到 `1次×500ms`（`src/upstream.js`），每个失败模型 failover 从 ~6.7s → ~2.3s；② 慢模型按**整体墙钟耗时**降权（`SLOW_TOTAL_MS` 默认 15s，env `MSLXDFF_SLOW_TOTAL_MS`；`out.totalMs`/`Date.now()-startedAt` 判断，超阈值 `recordError(slow)` → 下次 auto 排到最后），nemotron-3-ultra 36s 被降权后接请求改用快模型 2.7s；③ 流式首块超时断路器 `STREAM_TIMEOUT_MS` 默认 25s（env `MSLXDFF_STREAM_TIMEOUT_MS`），首块未到且未写任何下游字节则干净切下一模型。
-- 慢模型评分机制（0.1.28）：`SLOW_TOTAL_MS` 提到默认 **20s**；超阈值请求被标 `slow:true`（`recordError({slow:true})`，`src/auto.js` 持久化 `slow` 字段）并进入**更长冷却 `SLOW_COOLDOWN_MS` 默认 5 分钟**（env `MSLXDFF_SLOW_COOLDOWN_MS`，对比普通 60s `MSLXDFF_MODEL_COOLDOWN_MS`），冷却期内 `rankModels` 把 slow 模型排到最后（近似禁用），冷却期过自动解冻（自愈，不会永久锁死；若再慢则刷新冷却）。workbuddy 连续追问时，慢模型（hy3/nemotron-ultra 24-27s）被压后、快模型（nemotron-3.5 3.7s）顶上，避免第二次提问因 20s+ 等待而"停止"。
-- 流式生成卡顿超时（0.1.30，取代 0.1.29 的 `GEN_TIMEOUT_MS`）：`STALL_TIMEOUT_MS` 默认 15s（env `MSLXDFF_STALL_TIMEOUT_MS`）——监测**相邻 chunk 间隔**，连续 N 秒无新 chunk 判定模型卡死，主动 `res.end()` 中断给出干净 EOF；**只要持续有输出就整段保留，不再按固定总时长砍**（0.1.29 的 `GEN_TIMEOUT_MS`=20s 会对正常慢流误伤砍半截，如 laguna 输出 12.7s 被切）。另加宽松总上限 `MAX_STREAM_MS` 默认 120s（env `MSLXDFF_MAX_STREAM_MS`）防无限流。relay 返回 `{status,ttfMs,totalMs,aborted,interrupted}`，`interrupted` 触发该模型 slow + `slow-model` 事件打 `interrupted:true`。首块超时 `STREAM_TIMEOUT_MS`（25s，未写字节）才走 failover 切换，已写字节只能中断不换模型（无法干净拼接）。
-- 请求打点：`src/routes.js` handler 按 stage 记录 `parsed/ordered/up-<model>/ttf-<model>`（相对请求起点 ms），随 `evt`/`logs.appendCall` 落入 events.log/calls.log；`src/upstream.js` 记录每次 attempt 的 `{attempt,type,ms}` 与总 `waitMs/totalMs` 挂到 `res._t`/`err._t`。排查耗时直接看这两类日志。
-- 首块断路器 bug 教训：relay 返回值从 number 改成 `{status,ttfMs,totalMs,aborted}`，新增常量须在文件顶部定义（`ReferenceError: STREAM_TIMEOUT is not defined`/`ttf is not defined` 是作用域/未定义踩坑）；`upstream.body.cancel()` 用于超时释放流但不写 res（否则 `ERR_HTTP_HEADERS_SENT`）。
-- workbuddy 自定义模型条目 id 会被当作 model 名原样发给 mslxdff → 会 failover 到上游不认识的假名（Nvidia 502）。若按真实模型命名（如 `deepseek-v4-flash-free`）则正常。
+- 超时与慢模型机制（0.1.27~0.1.30 演进）：上游重试 `1次×500ms`；`SLOW_TOTAL_MS` 默认 20s 超时标 `slow:true` 进 5 分钟长冷却（普通冷却 60s），`rankModels` 把 slow 排最后、过期自愈；`STREAM_TIMEOUT_MS` 25s 首块未到且未写字节才 failover，已写字节只能中断不换模型；`STALL_TIMEOUT_MS` 监测相邻 chunk 间隔（现默认 0 关闭，仅作 stallHits 质量分）；`MAX_STREAM_MS` 120s 防无限流。教训：新增常量须在文件顶部定义（曾踩 ReferenceError）；`upstream.body.cancel()` 释放流但不写 res（否则 ERR_HTTP_HEADERS_SENT）。
+- Keep-Alive + 预热（0.1.42）：`src/upstream.js` 显式 `undici.Agent(keepAlive 30s/60s, connections 20)` + `dispatcher` 透传 chat/preheat；`srv.ready` 后 100ms 异步 `GET /zen/v1/models` 预热（`upstream-preheat` 事件）；`MSLXDFF_PREHEAT=0` 可关、`MSLXDFF_UPSTREAM_KEEPALIVE_*` 可调。npm undici 与 Node 内置 fetch 不兼容（`invalid onRequestStart`），必须配对 `UndiciFetch || fetch`。
+- auto 首选模型（0.1.43）：`PREFERRED_MODEL = env MSLXDFF_PREFERRED_MODEL || "big-pickle"` 单点定义于 `src/auto.js`；排序优先级 `cooling > preferred > latency EMA > errAt`（preferred 强制第一，慢/429 冷却自动让位自愈）；`DEFAULT_AUTO_MODELS` 首位引用它并去重。
+- 插件系统（0.1.44 未发版）：插件目录 `~/.config/mslxdff/plugins/`（env `MSLXDFF_PLUGINS_DIR`），`.mjs` default export `{name,version,hooks,onEvent,createUpstream}`；hook 全表见 `docs/plugins.md`——请求链路 `request:received`(可短路)/`model:select`(可改序)/`model:beforeTry`(可跳过)/`upstream:request`(可改payload)，上游层 `upstream:headers`/`upstream:before-request`(可改URL+头)，旁路 `models:list`/`peer:*`/`server:start|stop`/`onEvent`；插件 `createUpstream(ctx)` 可整体替换上游 provider；`runHook` 语义=任何非 undefined 返回值生效且链式传递；错误全隔离只记日志；`x-mslxdff-model-lock` 时 model:select 不触发。
+- 本机 daemon 启动方式：`Start-Process node bin/mslxdff.js --daemon`（直启 node，勿用 cmd /c 包装——会撞 daemon.log EBUSY 句柄占用）；pid/version 落 `~/.config/mslxdff/daemon.pid`。
+- WorkBuddy（腾讯 CodeBuddy 系）支持插件：`.codebuddy-plugin/plugin.json` + `skills/<name>/SKILL.md`（兼容 `.workbuddy-plugin/`），本机已装 agent-browser/pdf 等 7 个官方插件于 `C:\Users\mslxd\.workbuddy\plugins\`；其自定义模型条目 id 会原样发给 mslxdff（假名会 failover 到上游 502，按真实模型命名则正常）；SKILL.md 可教 AI 执行命令，是 mslxdff hook 契约的消费端。

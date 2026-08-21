@@ -6,7 +6,7 @@ import { joinHandler, leaveHandler } from "./groups.js";
 import { heartbeatHandler, pollHandler, resultHandler, forwardHandler } from "./groups-relay.js";
 import { modelsHandler, modelsStatusHandler } from "./models-route.js";
 
-export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus }) {
+export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins }) {
   return async function router(req, res) {
     const method = req.method || "GET";
     const path = (req.url || "").split("?")[0];
@@ -17,7 +17,7 @@ export function createRouter({ token, upstream, models, auto, logs, peers, maxHo
       res.setHeader("WWW-Authenticate", "Bearer");
       return json(res, 401, { error: "Unauthorized" });
     }
-    await route.handler({ req, res, upstream, models, auto, logs, peers, maxHops, groups, bans, token, bus });
+    await route.handler({ req, res, upstream, models, auto, logs, peers, maxHops, groups, bans, token, bus, plugins });
   };
 }
 

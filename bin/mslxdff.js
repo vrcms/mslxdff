@@ -15,6 +15,7 @@ import { createPeersService } from "../src/peers.js";
 import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
 import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents, eventsFile, callsFile, errorsFile } from "../src/logs.js";
+import { loadPlugins, runHook, pluginsDir } from "../src/plugins.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -105,6 +106,23 @@ if (args.includes("-log") || args.includes("--log") || args.includes("-logs") ||
   if (count <= 10) {
     console.log(`\nhint: mslxdff -log 100  |  calls: ${callsFile()}  errors: ${errorsFile()}  daemon: ${logFile()}`);
   }
+  process.exit(0);
+}
+
+// -plugins: list plugins in the plugins dir (and their hooks) without starting the daemon
+if (args.includes("-plugins") || args.includes("--plugins")) {
+  const dir = pluginsDir();
+  console.log(`plugins dir: ${dir}`);
+  const { plugins, errors } = await loadPlugins({ dir });
+  if (!plugins.length && !errors.length) {
+    console.log("(no plugins — drop *.mjs files into the dir above, see docs/plugins.md)");
+  }
+  for (const p of plugins) {
+    const hooks = Object.keys(p.hooks || {});
+    console.log(`  ${p.name}${p.version ? `@${p.version}` : ""}  [${hooks.join(", ") || "no hooks"}]`);
+    if (p.description) console.log(`    ${p.description}`);
+  }
+  for (const e of errors) console.log(`  load error: ${e.file} — ${e.error}`);
   process.exit(0);
 }
 
@@ -648,7 +666,33 @@ if (!process.env.MSLXDFF_DAEMON) {
 }
 
 const { token, created } = await loadToken();
-const upstream = createUpstreamClient({});
+// 插件系统：加载（在 upstream 创建前，插件可整体替换上游实现）
+const { plugins: loadedPlugins, errors: pluginErrors } = await loadPlugins({});
+for (const e of pluginErrors) {
+  console.log(`plugin load failed: ${e.file} — ${e.error}`);
+  appendEvent({ ts: Date.now(), type: "plugin-load-error", file: e.file, error: e.error });
+}
+if (loadedPlugins.length) {
+  console.log(`plugins loaded (${loadedPlugins.length}): ${loadedPlugins.map((p) => `${p.name}${p.version ? `@${p.version}` : ""}`).join(", ")}`);
+  appendEvent({ ts: Date.now(), type: "plugins-loaded", plugins: loadedPlugins.map((p) => ({ name: p.name, version: p.version })) });
+}
+const upstreamHooks = loadedPlugins.length
+  ? (name, ctx) => runHook(loadedPlugins, name, ctx)
+  : null;
+// 插件可提供 createUpstream(ctx) 整体替换上游（接任意 provider）；取第一个声明者
+const providerPlugin = loadedPlugins.find((p) => typeof p.createUpstream === "function");
+let upstream;
+if (providerPlugin) {
+  try {
+    upstream = await providerPlugin.createUpstream({ baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai", authToken: process.env.UPSTREAM_AUTH_TOKEN || "public", env: process.env });
+    console.log(`upstream provider replaced by plugin: ${providerPlugin.name}`);
+    appendEvent({ ts: Date.now(), type: "plugin-upstream-active", plugin: providerPlugin.name });
+  } catch (err) {
+    console.log(`plugin upstream (${providerPlugin.name}) failed: ${errMsg(err)} — falling back to default`);
+    appendEvent({ ts: Date.now(), type: "plugin-upstream-error", plugin: providerPlugin.name, error: errMsg(err) });
+  }
+}
+if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks });
 const baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
 const models = createModelsService({
   baseUrl,
@@ -673,9 +717,16 @@ const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshol
 
 const isDebug = process.env.MSLXDFF_DEBUG === "1";
 const bus = createEventBus();
-const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus });
+const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus, plugins: loadedPlugins });
 const listenHost = effectiveHost();
-const srv = startServer({ router, signals: !isDebug, host: listenHost });
+const srv = startServer({
+  router,
+  signals: !isDebug,
+  host: listenHost,
+  onBeforeClose: loadedPlugins.length
+    ? () => runHook(loadedPlugins, "server:stop", { version: VERSION }).then(() => {})
+    : undefined,
+});
 
 // -debug: push every event straight to this terminal.
 if (isDebug) {
@@ -702,6 +753,20 @@ if (isDebug) {
 }
 
 await srv.ready();
+
+// 插件 hook：server:start — 服务就绪后触发（只观察）
+if (loadedPlugins.length) {
+  runHook(loadedPlugins, "server:start", { port: srv.server.address()?.port, host: listenHost, version: VERSION }).catch(() => {});
+  // 插件 onEvent(evt) — 订阅全部事件流（fire-and-forget，错误隔离）
+  const eventPlugins = loadedPlugins.filter((p) => typeof p.onEvent === "function");
+  if (eventPlugins.length) {
+    bus.subscribe((e) => {
+      for (const p of eventPlugins) {
+        try { p.onEvent(e); } catch {}
+      }
+    });
+  }
+}
 
 // 上游 Keep-Alive 预热：首条 TCP+TLS 暖好，100ms 后异步触发，不阻塞 ready
 setTimeout(() => {

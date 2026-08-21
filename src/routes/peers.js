@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { isAutoModel } from "../auto.js";
 import { errMsg } from "./helpers.js";
+import { runHook } from "../plugins.js";
 
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
@@ -86,11 +87,19 @@ export async function racePeerCandidates(candidates, ctx) {
       const total = prepared.length;
       for (const { peer, target } of prepared) {
         ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1 });
+        // 插件 hook：peer:beforeForward — 转发给组员前观察
+        if (ctx.plugins?.length) {
+          runHook(ctx.plugins, "peer:beforeForward", { reqId: ctx.reqId, peer: peer.url, model: target, hops: ctx.hops + 1 }).catch(() => {});
+        }
         const t0 = performance.now();
         forwardToPeer(peer, ctx.body, target, ctx.hops).then((res) => {
           const latencyMs = Math.round(performance.now() - t0);
           const failed = res instanceof Error || res.status >= 400;
           ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1, latencyMs, ok: !failed });
+          // 插件 hook：peer:result — 组员响应后观察
+          if (ctx.plugins?.length) {
+            runHook(ctx.plugins, "peer:result", { reqId: ctx.reqId, peer: peer.url, model: target, ok: !failed, status: failed ? (res instanceof Error ? 502 : res.status) : res.status, latencyMs }).catch(() => {});
+          }
           if (failed) {
             const status = res instanceof Error ? 502 : res.status;
             ctx.logError(ctx.model, status, res instanceof Error ? errMsg(res) : `peer ${status}`);

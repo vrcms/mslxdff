@@ -1,7 +1,7 @@
 import { createServer as httpCreateServer } from "node:http";
 import { DEFAULT_PORT, getPort } from "./state.js";
 
-export function startServer({ router, signals = true, host }, port = resolvePort()) {
+export function startServer({ router, signals = true, host, onBeforeClose }, port = resolvePort()) {
   const listenHost = host ?? resolveHost();
   const server = httpCreateServer((req, res) => {
     router(req, res).catch((err) => {
@@ -18,13 +18,16 @@ export function startServer({ router, signals = true, host }, port = resolvePort
       else server.listen(port, resolve);
     });
 
-  const close = () =>
-    new Promise((resolve) => {
+  const close = async () => {
+    // 插件 hook：server:stop — 关闭前触发（fire-and-forget，不阻塞关停）
+    try { await onBeforeClose?.(); } catch {}
+    await new Promise((resolve) => {
       server.close(resolve);
       // SSE debug streams keep connections open — force-close so shutdown
       // never waits on them.
       server.closeAllConnections?.();
     });
+  };
 
   if (signals) {
     process.on("SIGINT", close);
