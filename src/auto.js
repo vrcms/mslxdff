@@ -1,14 +1,17 @@
 import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies } from "./state.js";
 
+// auto 的默认首选模型：一处定义，全局生效（可用 MSLXDFF_PREFERRED_MODEL 覆盖）
+export const PREFERRED_MODEL = (process.env.MSLXDFF_PREFERRED_MODEL || "big-pickle").trim();
+
 export const DEFAULT_AUTO_MODELS = [
+  PREFERRED_MODEL,
   "deepseek-v4-flash-free",
   "mimo-v2.5-free",
   "ling-3.0-flash-free",
   "nemotron-3-ultra-free",
   "north-mini-code-free",
   "laguna-s-2.1-free",
-  "big-pickle",
-];
+].filter((id, i, arr) => id && arr.indexOf(id) === i);
 
 export function isAutoModel(model) {
   return !model || model === "auto";
@@ -78,16 +81,16 @@ export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0,
       id,
       e: normEntry(errors[id]),
       err: normEntry(errors[id])?.at ?? 0,
-      isDeepseek: /deepseek/i.test(id),
+      isPreferred: id === PREFERRED_MODEL,
       cooling: inCooldown(id, errors, now, cooldownMs, slowCooldownMs),
       latency: normLatency(latencies[id]) ?? Number.MAX_SAFE_INTEGER,
     }))
     .sort(
       (a, b) =>
         (a.cooling ? 1 : 0) - (b.cooling ? 1 : 0) ||
+        (b.isPreferred ? 1 : 0) - (a.isPreferred ? 1 : 0) ||
         a.latency - b.latency ||
-        a.err - b.err ||
-        (b.isDeepseek ? 1 : 0) - (a.isDeepseek ? 1 : 0)
+        a.err - b.err
     )
     .map((x) => x.id);
 }

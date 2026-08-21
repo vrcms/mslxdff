@@ -12,6 +12,7 @@ import {
   rankModels,
   isAutoModel,
   DEFAULT_AUTO_MODELS,
+  PREFERRED_MODEL,
 } from "../src/auto.js";
 const TOKEN = "a".repeat(64);
 
@@ -28,22 +29,22 @@ test("isAutoModel treats empty and auto as auto, others explicit", () => {
   assert.equal(isAutoModel("deepseek-v4-flash-free"), false);
 });
 
-test("rankModels puts deepseek first when no errors", () => {
-  const ids = ["big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free"];
+test("rankModels puts the preferred model first when no errors", () => {
+  const ids = [PREFERRED_MODEL, "deepseek-v4-flash-free", "mimo-v2.5-free"];
   const ranked = rankModels(ids, {});
-  assert.equal(ranked[0], "deepseek-v4-flash-free");
+  assert.equal(ranked[0], PREFERRED_MODEL);
   assert.deepEqual([...ranked].sort(), [...ids].sort(), "set preserved");
 });
 
 test("rankModels prefers the model that errored longest ago", () => {
-  const ids = ["deepseek-v4-flash-free", "mimo-v2.5-free", "big-pickle"];
+  const ids = ["m-one-free", "m-two-free", "m-three-free"];
   const errors = {
-    "deepseek-v4-flash-free": 3000,
-    "mimo-v2.5-free": 1000,
-    "big-pickle": 2000,
+    "m-one-free": 3000,
+    "m-two-free": 1000,
+    "m-three-free": 2000,
   };
-  // mimo errored at 1000 (longest ago) -> first; big-pickle 2000; deepseek 3000 last
-  assert.deepEqual(rankModels(ids, errors), ["mimo-v2.5-free", "big-pickle", "deepseek-v4-flash-free"]);
+  // m-two errored at 1000 (longest ago) -> first; m-three 2000; m-one 3000 last
+  assert.deepEqual(rankModels(ids, errors), ["m-two-free", "m-three-free", "m-one-free"]);
 });
 
 test("a recently-errored deepseek yields to never-errored others", () => {
@@ -317,7 +318,7 @@ async function postChat(app, body) {
   return res;
 }
 
-test("empty model resolves to auto: deepseek forwarded, other models not touched", async () => {
+test("empty model resolves to auto: preferred model forwarded, other models not touched", async () => {
   const seen = [];
   const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors: {} });
   const app = await boot({
@@ -331,7 +332,7 @@ test("empty model resolves to auto: deepseek forwarded, other models not touched
   try {
     const res = await postChat(app, { messages: [] });
     assert.equal(res.status, 200);
-    assert.deepEqual(seen, ["deepseek-v4-flash-free"]);
+    assert.deepEqual(seen, [PREFERRED_MODEL]);
   } finally {
     await app.close();
   }
@@ -340,13 +341,14 @@ test("empty model resolves to auto: deepseek forwarded, other models not touched
 test("auto: first model 400, falls back to next candidate, records error", async () => {
   const seen = [];
   const errors = {};
+  const nextAfterPreferred = DEFAULT_AUTO_MODELS.filter((m) => m !== PREFERRED_MODEL)[0];
   const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors });
   const app = await boot({
     auto,
     upstreamHandler: (req, res, body) => {
       const model = JSON.parse(body).model;
       seen.push(model);
-      if (model === "deepseek-v4-flash-free") {
+      if (model === PREFERRED_MODEL) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "nope" }));
         return;
@@ -360,11 +362,11 @@ test("auto: first model 400, falls back to next candidate, records error", async
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.ok, true);
-    assert.equal(json.model, "mimo-v2.5-free");
-    assert.ok(seen.includes("deepseek-v4-flash-free"));
-    assert.ok(seen.includes("mimo-v2.5-free"));
-    assert.ok(auto.errors()["deepseek-v4-flash-free"], "deepseek error must be recorded");
-    assert.equal(auto.errors()["mimo-v2.5-free"]?.status, "normal", "success resets the model to normal");
+    assert.equal(json.model, nextAfterPreferred);
+    assert.ok(seen.includes(PREFERRED_MODEL));
+    assert.ok(seen.includes(nextAfterPreferred));
+    assert.ok(auto.errors()[PREFERRED_MODEL], "preferred model error must be recorded");
+    assert.equal(auto.errors()[nextAfterPreferred]?.status, "normal", "success resets the model to normal");
   } finally {
     await app.close();
   }
