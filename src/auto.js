@@ -1,7 +1,29 @@
-import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies } from "./state.js";
+import { statSync } from "node:fs";
+import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies, loadPreferredModel, defaultStateFile } from "./state.js";
 
-// auto 的默认首选模型：一处定义，全局生效（可用 MSLXDFF_PREFERRED_MODEL 覆盖）
-export const PREFERRED_MODEL = (process.env.MSLXDFF_PREFERRED_MODEL || "big-pickle").trim();
+// 出厂默认首选模型（state.json 的 preferredModel / env MSLXDFF_PREFERRED_MODEL 可覆盖）
+export const DEFAULT_PREFERRED_MODEL = "big-pickle";
+// 兼容旧导出名：语义为"出厂默认"，当前生效值请用 getPreferredModel()
+export const PREFERRED_MODEL = DEFAULT_PREFERRED_MODEL;
+
+// 当前生效的首选模型：state.json > env > 出厂默认；mtime 缓存保证 daemon 热生效
+const _prefCache = { mtimeMs: -1, file: null, value: null };
+export function getPreferredModel({ file = defaultStateFile() } = {}) {
+  try {
+    const st = statSync(file);
+    if (_prefCache.file !== file || st.mtimeMs !== _prefCache.mtimeMs) {
+      _prefCache.file = file;
+      _prefCache.mtimeMs = st.mtimeMs;
+      _prefCache.value = loadPreferredModel({ file });
+    }
+  } catch {
+    _prefCache.file = file;
+    _prefCache.mtimeMs = -1;
+    _prefCache.value = null;
+  }
+  const env = (process.env.MSLXDFF_PREFERRED_MODEL || "").trim();
+  return _prefCache.value || env || DEFAULT_PREFERRED_MODEL;
+}
 
 export const DEFAULT_AUTO_MODELS = [
   PREFERRED_MODEL,
@@ -74,14 +96,15 @@ function normLatency(e) {
   return Number.isFinite(ema) && ema > 0 ? ema : null;
 }
 
-export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0, slowCooldownMs = 0, latencies = {} } = {}) {
+export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0, slowCooldownMs = 0, latencies = {}, preferred } = {}) {
+  const pref = preferred ?? getPreferredModel();
   return [...new Set(ids)]
     .filter(Boolean)
     .map((id) => ({
       id,
       e: normEntry(errors[id]),
       err: normEntry(errors[id])?.at ?? 0,
-      isPreferred: id === PREFERRED_MODEL,
+      isPreferred: id === pref,
       cooling: inCooldown(id, errors, now, cooldownMs, slowCooldownMs),
       latency: normLatency(latencies[id]) ?? Number.MAX_SAFE_INTEGER,
     }))
@@ -122,7 +145,7 @@ export function createAutoSelector({
   }
 
   async function candidates() {
-    return rankModels(await loadList(), lastErrorAt, { now: now(), cooldownMs, slowCooldownMs, latencies });
+    return rankModels(await loadList(), lastErrorAt, { now: now(), cooldownMs, slowCooldownMs, latencies, preferred: getPreferredModel({ file: file ?? undefined }) });
   }
 
   async function candidatesFor(requested) {
@@ -134,6 +157,7 @@ export function createAutoSelector({
       cooldownMs,
       slowCooldownMs,
       latencies,
+      preferred: getPreferredModel({ file: file ?? undefined }),
     });
     // 显式指定模型：严格优先，永不因冷却被挤到最后（原设计：A deepseek 失败 → B/D deepseek 并发 → 都失败才 fallback）
     // 冷却仅影响 auto 的择优，不影响指定模型的“很难被更改”语义

@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -16,6 +16,8 @@
   "files": [
     "bin/",
     "src/",
+    "plugins/",
+    "docs/",
     "README.md"
   ],
   "keywords": [

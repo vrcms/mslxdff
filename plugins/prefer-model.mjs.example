@@ -1,0 +1,14 @@
+// 示例：把首选模型排到最前（复制为 prefer-model.mjs 即生效；或放 ~/.config/mslxdff/plugins/ 永久生效）
+const PREFER = "big-pickle";
+
+export default {
+  name: "prefer-model",
+  version: "1.0.0",
+  description: `auto 时优先使用 ${PREFER}`,
+  hooks: {
+    "model:select": (ctx) => {
+      if (!ctx.order.includes(PREFER)) return;
+      return [PREFER, ...ctx.order.filter((m) => m !== PREFER)];
+    },
+  },
+};

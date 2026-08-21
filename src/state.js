@@ -58,6 +58,17 @@ export function saveModelLatencies(latencies, { file = defaultStateFile() } = {}
   return latencies;
 }
 
+export function loadPreferredModel({ file = defaultStateFile() } = {}) {
+  const v = readState(file).preferredModel;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+export function savePreferredModel(id, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  writeState(file, { ...state, preferredModel: String(id || "").trim() });
+  return String(id || "").trim();
+}
+
 export function loadPeers({ file = defaultStateFile() } = {}) {
   const peers = readState(file).peers;
   return Array.isArray(peers) ? peers : [];

@@ -4,12 +4,17 @@ mslxdff 内置一个零依赖的插件系统：把符合约定的 `.mjs` 模块�
 
 ## 快速开始
 
-### 1. 找到插件目录
+### 1. 插件目录（双目录，都会被加载）
 
 ```
-默认: ~/.config/mslxdff/plugins/
-覆盖: 环境变量 MSLXDFF_PLUGINS_DIR=/path/to/your/plugins
+官方插件:  <mslxdff安装目录>/plugins/     ← 随包分发，auto-update 一起更新
+用户插件:  ~/.config/mslxdff/plugins/    ← 你自己的正式插件，升级永不丢
+完全接管:  环境变量 MSLXDFF_PLUGINS_DIR=/path/to/dir（只扫这一个）
 ```
+
+优先级：同名文件时**用户目录覆盖官方目录**；加载顺序官方在前、用户在后。
+
+> 为什么不直接放安装目录？npm 升级会重置包内文件——所以自己的正式插件务必放用户目录。
 
 ### 2. 写一个最小插件
 
