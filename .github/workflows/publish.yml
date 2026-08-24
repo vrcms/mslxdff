@@ -18,9 +18,5 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org/
-      - name: dump oidc subject
-        run: |
-          curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm" \
-            | jq -r '.value' | cut -d. -f2 | base64 -d 2>/dev/null
+      - run: npm --version && node --version
       - run: npm publish --access public --provenance
