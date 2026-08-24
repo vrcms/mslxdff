@@ -8,8 +8,10 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
+import { normalizeModel } from "../src/reasoning.js";
+import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
 import { startDaemon, stopDaemon, writePid, pidFile, logFile, readPid, readPidVersion, isPidAlive } from "../src/daemon.js";
 import { createAutoSelector } from "../src/auto.js";
 import { createPeersService } from "../src/peers.js";
@@ -191,22 +193,43 @@ if (args.includes("-model") || args.includes("-models")) {
     process.exit(1);
   }
   const cacheFile = join(logDir(), "models.json");
-  try {
-    let ids = [];
-    let cachedAt = null;
-    const cached = readModelsCache(cacheFile);
-    if (cached) {
-      ids = (cached.data || []).map((m) => m.id).filter(Boolean);
-      cachedAt = cached.cachedAt || null;
-    } else {
+  // 主动刷新：每次执行都尝试拉取上游最新列表（4s 超时），成功则更新缓存，失败则回退到 stale
+  async function tryRefreshModels() {
+    try {
       const models = createModelsService({
         baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
         headers: createUpstreamClient({}).headers,
         refreshMs: 0,
         cacheFile,
       });
-      const list = await models.get();
-      ids = (list.data || []).map((m) => m.id).filter(Boolean);
+      // 4s 超时，避免阻塞
+      const list = await Promise.race([
+        models.get(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("refresh timeout")), 4000)),
+      ]);
+      return list;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    let ids = [];
+    let cachedAt = null;
+    let refreshed = null;
+    // 每次都主动尝试刷新
+    refreshed = await tryRefreshModels();
+    if (refreshed?.data) {
+      ids = (refreshed.data || []).map((m) => m.id).filter(Boolean);
+      cachedAt = refreshed.cachedAt || Date.now();
+    } else {
+      const cached = readModelsCache(cacheFile);
+      if (cached) {
+        ids = (cached.data || []).map((m) => m.id).filter(Boolean);
+        cachedAt = cached.cachedAt || null;
+      } else {
+        // 无缓存且刷新失败，尝试一次兜底 fetch（已在 tryRefreshModels 中尝试过，此处直接报错）
+        throw new Error("no cached models and refresh failed");
+      }
     }
     if (!ids.length) {
       console.log("no models available — try: mslxdff -model refresh");
@@ -239,6 +262,74 @@ if (args.includes("-model") || args.includes("-models")) {
     console.log(`\ninteractive pick needs a TTY; set directly with: mslxdff -model set <id>`);
   } catch (err) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+// -setto workbuddy [modelId]: set default model and sync to WorkBuddy models.json
+if (args.includes("-setto") || args.includes("--setto")) {
+  const idx = args.findIndex((x) => x === "-setto" || x === "--setto");
+  const target = args[idx + 1];
+  if (target !== "workbuddy") {
+    console.error("usage: mslxdff -setto workbuddy [modelId]");
+    process.exit(1);
+  }
+  const raw = args[idx + 2] && !String(args[idx + 2]).startsWith("-") ? String(args[idx + 2]).trim() : null;
+  let id;
+  if (raw) {
+    if (raw === "auto" || !raw) {
+      console.error("modelId 不能为 auto 或空");
+      process.exit(1);
+    }
+    const norm = normalizeModel(raw);
+    if (!norm) {
+      console.error("modelId 不能为空");
+      process.exit(1);
+    }
+    savePreferredModel(norm);
+    console.log(`default model set to: ${norm} (daemon hot-reloads on next request)`);
+    id = norm;
+  } else {
+    id = loadPreferredModel() || getPreferredModel();
+    if (!id) {
+      console.error("no preferred model set; use: mslxdff -setto workbuddy <modelId>");
+      process.exit(1);
+    }
+  }
+  // 主动刷新模型列表（每次 -setto 都尝试，保证 deepseek 等最新模型可见；失败不阻断同步）
+  try {
+    const cacheFile = join(logDir(), "models.json");
+    const models = createModelsService({
+      baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
+      headers: createUpstreamClient({}).headers,
+      refreshMs: 0,
+      cacheFile,
+    });
+    const fresh = await Promise.race([
+      models.get(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("refresh timeout")), 4000)),
+    ]);
+    if (fresh?.data?.length) {
+      const ids = fresh.data.map((m) => m.id);
+      if (!ids.includes(id)) {
+        console.log(`warn: "${id}" not in current free list (${ids.length} models), still syncing to WorkBuddy`);
+      }
+    }
+  } catch {
+    // refresh failed, still proceed with sync using stale/cached list
+  }
+  try {
+    const { token } = await loadToken();
+    const persisted = getPort();
+    const envPort = Number(process.env.MSLXDFF_PORT);
+    const port = persisted !== null ? persisted : (Number.isInteger(envPort) && envPort > 0 ? envPort : 8989);
+    const file = workbuddyModelsPath();
+    const r = await syncToWorkbuddy({ id, token, port, file });
+    console.log(`synced to WorkBuddy: ${r.action} "${id}" @ ${file}`);
+    console.log(`  url: http://127.0.0.1:${port}/v1/chat/completions`);
+  } catch (err) {
+    console.error(`failed to sync to WorkBuddy: ${String(err?.message || err)}`);
     process.exit(1);
   }
   process.exit(0);
@@ -1177,6 +1268,7 @@ Usage:
   mslxdff -update                  update mslxdff to the latest published version
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
+  mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups

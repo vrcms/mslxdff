@@ -13,9 +13,26 @@ export function pluginsDir() {
     join(os.homedir(), ".config", "mslxdff", "plugins");
 }
 
+// 安装目录下的 plugins/（随仓库/内置分发；auto-update 重装会丢，仅作开发/内置用）
+export function bundledPluginsDir(pkgRoot) {
+  if (!pkgRoot) return null;
+  return join(pkgRoot, "plugins");
+}
+
+// 解析扫描目录列表：env 完全接管；否则安装目录 plugins/ + 用户目录（同名文件用户目录优先）
+export function resolvePluginDirs({ pkgRoot } = {}) {
+  const env = process.env.MSLXDFF_PLUGINS_DIR;
+  if (env) return [env];
+  const dirs = [];
+  const bundled = bundledPluginsDir(pkgRoot);
+  if (bundled) dirs.push(bundled);
+  dirs.push(pluginsDir());
+  return dirs;
+}
+
 const PLUGIN_EXTS = new Set([".mjs", ".js"]);
 
-export async function loadPlugins({ dir = pluginsDir() } = {}) {
+async function loadFromDir(dir, skipFiles) {
   const plugins = [];
   const errors = [];
   if (!dir || !existsSync(dir)) return { plugins, errors };
@@ -29,6 +46,7 @@ export async function loadPlugins({ dir = pluginsDir() } = {}) {
   files.sort();
   for (const f of files) {
     const file = join(dir, f);
+    if (skipFiles?.has(f)) continue; // 用户目录同名文件优先
     try {
       const mod = await import(pathToFileURL(file).href);
       const plugin = mod?.default;
@@ -46,6 +64,21 @@ export async function loadPlugins({ dir = pluginsDir() } = {}) {
     } catch (err) {
       errors.push({ file, error: String(err?.message || err) });
     }
+  }
+  return { plugins, errors };
+}
+
+export async function loadPlugins({ dir, dirs } = {}) {
+  // 兼容旧签名 loadPlugins({ dir })；新签名 dirs 数组按优先级从低到高（后者覆盖前者同名文件）
+  const list = dirs || (dir ? [dir] : [pluginsDir()]);
+  let plugins = [];
+  const errors = [];
+  const seen = new Set(); // 已加载的 basename，先扫的目录跳过它们 → 后目录（高优先）覆盖
+  for (let i = list.length - 1; i >= 0; i--) {
+    const r = await loadFromDir(list[i], seen);
+    for (const p of r.plugins) seen.add(basename(p.file));
+    plugins = [...r.plugins, ...plugins]; // 低优先目录在前，目录内保持文件名序
+    errors.push(...r.errors);
   }
   return { plugins, errors };
 }
