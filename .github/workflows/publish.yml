@@ -17,5 +17,11 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org/
-      - run: npm --version && node --version
-      - run: npm publish --access public --provenance
+      - name: OIDC publish (provenance)
+        continue-on-error: true
+        run: npm publish --access public --provenance
+      - name: Token fallback publish
+        if: ${{ !cancelled() }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
