@@ -964,6 +964,11 @@ if (created) {
   console.log(`auth token: ${token}`);
 }
 console.log(`endpoint:   http://${host}:${addr.port}/v1`);
+try {
+  const { hedgeDelayMs } = await import("../src/routes/hedge.js");
+  const hd = hedgeDelayMs();
+  console.log(`hedge:      ${hd ? `${hd}ms` : "off"} (MSLXDFF_HEDGE_DELAY_MS)`);
+} catch {}
 
 // Periodically pull the freshest member lists for every joined group so a
 // new member becomes a failover peer on all nodes without manual re-joining.
@@ -1295,6 +1300,7 @@ Environment:
   MSLXDFF_MAX_HOPS           max peer-forwarding depth (default 3)
   MSLXDFF_BAN_THRESHOLD   failed joins before an ip is banned (default 5)
   MSLXDFF_BAN_WINDOW_MS   ban duration after too many failures (default 48h)
+  MSLXDFF_HEDGE_DELAY_MS  hedge peer race when local stream first chunk slow (default 1000, 0/off to disable)
   MSLXDFF_AUTO_UPDATE   auto-update: hourly by default, 0/off/false to disable, 1/true or ms
   MSLXDFF_AUTO_UPDATE_MS  same as above, explicit ms (overrides AUTO_UPDATE)
 `);
