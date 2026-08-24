@@ -23,4 +23,4 @@ jobs:
           curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm" \
             | jq -r '.value' | cut -d. -f2 | base64 -d 2>/dev/null
-      - run: npm publish --access public --verbose
+      - run: npm publish --access public --provenance
