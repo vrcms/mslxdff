@@ -6,23 +6,57 @@ import { runHook } from "../plugins.js";
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
 
+function peerHealthTtlMs() {
+  const n = Number(process.env.MSLXDFF_PEER_HEALTH_TTL_MS);
+  return Number.isInteger(n) && n >= 0 ? n : 30_000;
+}
+
+const healthCache = new Map(); // url -> { at, data }
+const healthInflight = new Map(); // url -> Promise
+
+export function clearPeerHealthCache() {
+  healthCache.clear();
+  healthInflight.clear();
+}
+
 export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_MS, fetchImpl = fetch } = {}) {
-  try {
-    const res = await fetchImpl(`${peer.url}/v1/models/status`, {
-      headers: {
-        "Authorization": `Bearer ${peer.token || ""}`,
-        "Accept": "application/json",
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return [];
-    const j = await res.json().catch(() => ({}));
-    return (j.data || [])
-      .filter((m) => m && typeof m.id === "string" && m.status === "normal")
-      .map((m) => m.id);
-  } catch {
-    return [];
+  const key = peer?.url || "";
+  const ttl = peerHealthTtlMs();
+  if (ttl > 0) {
+    const hit = healthCache.get(key);
+    if (hit && Date.now() - hit.at < ttl) return hit.data;
+    const inflight = healthInflight.get(key);
+    if (inflight) return inflight;
   }
+  const p = (async () => {
+    try {
+      const res = await fetchImpl(`${peer.url}/v1/models/status`, {
+        headers: {
+          "Authorization": `Bearer ${peer.token || ""}`,
+          "Accept": "application/json",
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) return [];
+      const j = await res.json().catch(() => ({}));
+      return (j.data || [])
+        .filter((m) => m && typeof m.id === "string" && m.status === "normal")
+        .map((m) => m.id);
+    } catch {
+      return [];
+    }
+  })();
+  if (ttl > 0) {
+    healthInflight.set(key, p);
+    try {
+      const data = await p;
+      healthCache.set(key, { at: Date.now(), data });
+      return data;
+    } finally {
+      healthInflight.delete(key);
+    }
+  }
+  return p;
 }
 
 async function forwardToPeer(peer, body, model, hops) {

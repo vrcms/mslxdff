@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
 
@@ -14,21 +15,160 @@ export function generateToken() {
   return randomBytes(32).toString("hex");
 }
 
+// ---- 缓存层：读走内存，写分“热/冷”两档，热数据 500ms 批量刷盘 ----
+const stateCache = new Map(); // file -> { data, dirty, timer, mtimeMs }
+const FLUSH_MS = (() => {
+  const n = Number(process.env.MSLXDFF_STATE_FLUSH_MS);
+  return Number.isInteger(n) && n >= 0 ? n : 500;
+})();
+
+function getEntry(file) {
+  let e = stateCache.get(file);
+  if (!e) {
+    e = { data: null, dirty: false, timer: null, mtimeMs: 0 };
+    stateCache.set(file, e);
+  }
+  return e;
+}
+
+function loadFromDisk(file) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function readState(file) {
+  const e = getEntry(file);
+  // 脏数据直接从内存拿，不碰磁盘
+  if (e.data !== null && e.dirty) return e.data;
+  // 已有干净缓存且文件未变，直接命中
+  if (e.data !== null) {
+    try {
+      const st = statSync(file);
+      if (st.mtimeMs === e.mtimeMs) return e.data;
+    } catch {
+      // 文件不存在等，沿用内存
+      if (e.data) return e.data;
+    }
+  }
+  const disk = loadFromDisk(file);
+  const obj = typeof disk === "object" && disk !== null ? disk : {};
+  e.data = obj;
+  try {
+    const st = statSync(file);
+    e.mtimeMs = st.mtimeMs;
+  } catch {
+    e.mtimeMs = Date.now();
+  }
+  e.dirty = false;
+  return e.data;
+}
+
+function writeStateImmediate(file, patch) {
+  const e = getEntry(file);
+  const base = e.data !== null ? e.data : readState(file);
+  const merged = { ...base, ...patch };
+  e.data = merged;
+  e.dirty = false;
+  if (e.timer) {
+    clearTimeout(e.timer);
+    e.timer = null;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  try {
+    e.mtimeMs = statSync(file).mtimeMs;
+  } catch {
+    e.mtimeMs = Date.now();
+  }
+  return merged;
+}
+
+function scheduleFlush(file) {
+  const e = getEntry(file);
+  if (e.timer) return;
+  if (FLUSH_MS === 0) {
+    // 同步刷（测试用）
+    flushStateSync(file);
+    return;
+  }
+  e.timer = setTimeout(() => {
+    e.timer = null;
+    void flushState(file);
+  }, FLUSH_MS);
+  e.timer.unref?.();
+}
+
+async function flushState(file) {
+  const e = stateCache.get(file);
+  if (!e || !e.dirty || !e.data) return;
+  const snapshot = e.data;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(snapshot, null, 2), { mode: 0o600 });
+    e.dirty = false;
+    try {
+      e.mtimeMs = statSync(file).mtimeMs;
+    } catch {
+      e.mtimeMs = Date.now();
+    }
+  } catch {
+    // 保留 dirty，下次重试
+  }
+}
+
+function writeStateDeferred(file, patch) {
+  const e = getEntry(file);
+  const base = e.data !== null ? e.data : readState(file);
+  const merged = { ...base, ...patch };
+  e.data = merged;
+  e.dirty = true;
+  scheduleFlush(file);
+  return merged;
+}
+
+export function flushStateSync(file = defaultStateFile()) {
+  const e = stateCache.get(file);
+  if (!e || !e.dirty || !e.data) return;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(e.data, null, 2), { mode: 0o600 });
+    e.dirty = false;
+    try {
+      e.mtimeMs = statSync(file).mtimeMs;
+    } catch {
+      e.mtimeMs = Date.now();
+    }
+    if (e.timer) {
+      clearTimeout(e.timer);
+      e.timer = null;
+    }
+  } catch {}
+}
+
+export function clearStateCache(file) {
+  if (file) stateCache.delete(file);
+  else stateCache.clear();
+}
+
+// ---- 对外 API：冷数据立即落盘，热数据延迟批量 ----
+
 export async function loadToken({ file = defaultStateFile() } = {}) {
   const state = readState(file);
   if (typeof state.token === "string" && state.token.length > 0) {
     return { token: state.token, created: false };
   }
-  return { token: writeState(file, { token: generateToken(), createdAt: new Date().toISOString() }).token, created: true };
+  return { token: writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token, created: true };
 }
 
 export async function refreshToken({ file = defaultStateFile() } = {}) {
-  return writeState(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
+  return writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
 }
 
 export function setPort(port, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, port: Number(port) });
+  writeStateImmediate(file, { port: Number(port) });
 }
 
 export function getPort({ file = defaultStateFile() } = {}) {
@@ -42,8 +182,7 @@ export function loadModelErrors({ file = defaultStateFile() } = {}) {
 }
 
 export function saveModelErrors(errors, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, modelErrors: errors });
+  writeStateDeferred(file, { modelErrors: errors });
   return errors;
 }
 
@@ -53,8 +192,7 @@ export function loadModelLatencies({ file = defaultStateFile() } = {}) {
 }
 
 export function saveModelLatencies(latencies, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, modelLatencies: latencies });
+  writeStateDeferred(file, { modelLatencies: latencies });
   return latencies;
 }
 
@@ -64,8 +202,7 @@ export function loadPreferredModel({ file = defaultStateFile() } = {}) {
 }
 
 export function savePreferredModel(id, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, preferredModel: String(id || "").trim() });
+  writeStateImmediate(file, { preferredModel: String(id || "").trim() });
   return String(id || "").trim();
 }
 
@@ -75,8 +212,7 @@ export function loadPeers({ file = defaultStateFile() } = {}) {
 }
 
 export function savePeers(peers, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, peers });
+  writeStateImmediate(file, { peers });
   return peers;
 }
 
@@ -86,8 +222,7 @@ export function loadPeerErrors({ file = defaultStateFile() } = {}) {
 }
 
 export function savePeerErrors(errors, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, peerErrors: errors });
+  writeStateDeferred(file, { peerErrors: errors });
   return errors;
 }
 
@@ -97,8 +232,7 @@ export function loadPeerStats({ file = defaultStateFile() } = {}) {
 }
 
 export function savePeerStats(stats, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, peerStats: stats });
+  writeStateDeferred(file, { peerStats: stats });
   return stats;
 }
 
@@ -113,8 +247,7 @@ export function loadGroupsJoined({ file = defaultStateFile() } = {}) {
 }
 
 export function saveGroupsJoined(joined, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, groupsJoined: joined });
+  writeStateImmediate(file, { groupsJoined: joined });
   return joined;
 }
 
@@ -124,29 +257,16 @@ export function loadBans({ file = defaultStateFile() } = {}) {
 }
 
 export function saveBans(bans, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, bans });
+  writeStateImmediate(file, { bans });
   return bans;
 }
 
 export function saveGroups(groups, { file = defaultStateFile() } = {}) {
-  const state = readState(file);
-  writeState(file, { ...state, groups });
+  writeStateImmediate(file, { groups });
   return groups;
 }
 
-function readState(file) {
-  try {
-    const saved = JSON.parse(readFileSync(file, "utf8"));
-    return typeof saved === "object" && saved !== null ? saved : {};
-  } catch {
-    return {};
-  }
-}
-
 function writeState(file, patch) {
-  const merged = { ...readState(file), ...patch };
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(merged, null, 2), { mode: 0o600 });
-  return merged;
+  // 兼容旧调用：默认走立即落盘
+  return writeStateImmediate(file, patch);
 }
