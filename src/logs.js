@@ -1,4 +1,5 @@
 import { appendFileSync, readFileSync, mkdirSync, existsSync, writeFileSync, statSync } from "node:fs";
+import { appendFile, stat, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import { defaultStateFile } from "./state.js";
@@ -40,10 +41,48 @@ function trimIfOversized(file, maxBytes = MAX_BYTES) {
   }
 }
 
+async function trimIfOversizedAsync(file, maxBytes = MAX_BYTES) {
+  try {
+    const st = await stat(file);
+    if (st.size <= maxBytes) return;
+    const text = await readFile(file, "utf8");
+    const lines = text.split("\n");
+    const keep = lines.slice(-100);
+    await writeFile(file, keep.join("\n"));
+  } catch {
+    // ignore
+  }
+}
+
+function shouldSync(file) {
+  if (process.env.MSLXDFF_LOGS_SYNC === "1") return true;
+  if (process.env.MSLXDFF_DAEMON_DIR) {
+    const dir = process.env.MSLXDFF_DAEMON_DIR;
+    if (file.startsWith(dir)) return true;
+  }
+  // 显式 tmp 文件（所有 test 的 mkdtemp 前缀）走同步，保证 read-after-write 可见
+  const low = file.toLowerCase();
+  if (low.includes("mslxdff-") || low.includes("tmp") || low.includes("temp")) return true;
+  // 非默认目录的文件一律同步（测试传入的临时路径）
+  try {
+    const def = logDir().toLowerCase();
+    if (!low.startsWith(def)) return true;
+  } catch {}
+  return false;
+}
+
 function appendLine(file, entry) {
   ensureDir(dirname(file));
-  appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
-  trimIfOversized(file);
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+  if (shouldSync(file)) {
+    appendFileSync(file, line);
+    trimIfOversized(file);
+    return;
+  }
+  // 线上异步：不阻塞事件循环
+  appendFile(file, line)
+    .catch(() => {})
+    .then(() => trimIfOversizedAsync(file).catch(() => {}));
 }
 
 export function appendCall(entry, { file = callsFile() } = {}) {

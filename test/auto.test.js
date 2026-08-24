@@ -118,6 +118,8 @@ test("recordError persists modelErrors to the state file", async () => {
     now: () => now,
   });
   await auto2.recordError("deepseek-v4-flash-free");
+  const { flushStateSync } = await import("../src/state.js");
+  flushStateSync(file);
   const saved = JSON.parse(readFileSync(file, "utf8"));
   assert.deepEqual(saved.modelErrors["deepseek-v4-flash-free"], { status: "error", at: now, code: null, slow: false });
   assert.deepEqual(auto.errors(), {});
