@@ -45,4 +45,32 @@ describe("chooser", () => {
     assert.equal(parseKey("x"), null);
     assert.equal(parseKey(""), null);
   });
+
+  test("parseKey maps space for multi-select toggle", () => {
+    assert.equal(parseKey(" "), "space");
+  });
+
+  test("renderChooser multi mode shows checked/unchecked and keeps current marker", () => {
+    const multiItems = [
+      { id: "big-pickle", current: true, picked: true },
+      { id: "mimo-v2.5-free", picked: false },
+      { id: "hy3-free", picked: true, status: "limit" },
+    ];
+    const lines = renderChooser(multiItems, 0, { multi: true });
+    assert.match(lines[0], /^❯ big-pickle \[✓\]$/);
+    assert.match(lines[1], /^  mimo-v2.5-free \[ \]$/);
+    assert.match(lines[2], /^  hy3-free \[✓\]  \[limit\]$/);
+  });
+
+  test("single-select rendering is unchanged by picked flag without multi mode", () => {
+    const items = [{ id: "big-pickle", current: true, picked: true }];
+    const lines = renderChooser(items, 0);
+    assert.match(lines[0], /^❯ big-pickle ✓ \(current\)$/);
+  });
+
+  test("multi help mentions Space", () => {
+    const [_blank, help] = renderChooserHelp(true);
+    assert.match(help, /Space/);
+    assert.match(help, /picks/);
+  });
 });

@@ -201,6 +201,19 @@ export function loadPreferredModel({ file = defaultStateFile() } = {}) {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+// 常用模型勾选集（auto 候选池白名单）：空数组 = 不启用筛选（全量 auto）
+export function loadModelPicks({ file = defaultStateFile() } = {}) {
+  const picks = readState(file).modelPicks;
+  if (!Array.isArray(picks)) return [];
+  return [...new Set(picks.filter((x) => typeof x === "string" && x.trim().length))];
+}
+
+export function saveModelPicks(picks, { file = defaultStateFile() } = {}) {
+  const list = [...new Set((Array.isArray(picks) ? picks : []).filter((x) => typeof x === "string" && x.trim().length))];
+  writeStateImmediate(file, { modelPicks: list });
+  return list;
+}
+
 export function savePreferredModel(id, { file = defaultStateFile() } = {}) {
   writeStateImmediate(file, { preferredModel: String(id || "").trim() });
   return String(id || "").trim();

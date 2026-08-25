@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies, loadPreferredModel, defaultStateFile } from "./state.js";
+import { loadModelErrors, saveModelErrors, loadModelLatencies, saveModelLatencies, loadPreferredModel, loadModelPicks, saveModelPicks, defaultStateFile } from "./state.js";
 
 // 出厂默认首选模型（state.json 的 preferredModel / env MSLXDFF_PREFERRED_MODEL 可覆盖）
 export const DEFAULT_PREFERRED_MODEL = "big-pickle";
@@ -129,6 +129,8 @@ export function createAutoSelector({
   latencies: seedLatencies,
   persist = (errors, f = file) => saveModelErrors(errors, f ? { file: f } : {}),
   persistLatencies = (latencies, f = file) => saveModelLatencies(latencies, f ? { file: f } : {}),
+  loadPicks = () => (file ? loadModelPicks({ file }) : []),
+  persistPicks = (picks) => (file ? saveModelPicks(picks, { file }) : picks),
 } = {}) {
   const lastErrorAt = { ...(seedErrors ?? loadModelErrors(file ? { file } : {})) };
   const latencies = { ...(seedLatencies ?? loadModelLatencies(file ? { file } : {})) };
@@ -144,13 +146,29 @@ export function createAutoSelector({
     return [...new Set(list)].filter(Boolean);
   }
 
+  // 勾选集 = auto 候选池白名单：只在勾选的模型里择优；空勾选或勾选中无可用模型时回退全量
+  async function pickedPool(list) {
+    const picks = loadPicks();
+    if (!picks.length) return list;
+    const pickedSet = new Set(picks);
+    const filtered = list.filter((id) => pickedSet.has(id));
+    return filtered.length ? filtered : list;
+  }
+
   async function candidates() {
-    return rankModels(await loadList(), lastErrorAt, { now: now(), cooldownMs, slowCooldownMs, latencies, preferred: getPreferredModel({ file: file ?? undefined }) });
+    const list = await loadList();
+    const pool = await pickedPool(list);
+    return rankModels(pool, lastErrorAt, { now: now(), cooldownMs, slowCooldownMs, latencies, preferred: getPreferredModel({ file: file ?? undefined }) });
   }
 
   async function candidatesFor(requested) {
     if (!requested) return candidates();
     const list = await loadList();
+    // 显式指定某模型 = 认可它，自动加入勾选集（仅当它是真实上游 free 模型时，避免垃圾 id 污染）
+    const picks = loadPicks();
+    if (list.includes(requested) && !picks.includes(requested) && persistPicks) {
+      await persistPicks([...picks, requested]);
+    }
     const all = list.includes(requested) ? list : [requested, ...list];
     const others = rankModels(all.filter((id) => id !== requested), lastErrorAt, {
       now: now(),

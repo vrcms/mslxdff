@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadToken, refreshToken, setPort, getPort } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadModelPicks, saveModelPicks } from "../src/state.js";
 
 function tmpStateFile() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-"));
@@ -77,4 +77,35 @@ test("getPort returns null when no port persisted", async () => {
   const file = tmpStateFile();
   await loadToken({ file });
   assert.equal(getPort({ file }), null);
+});
+
+test("saveModelPicks persists and loadModelPicks reads back", async () => {
+  const file = tmpStateFile();
+  const saved = saveModelPicks(["big-pickle", "hy3-free"], { file });
+  assert.deepEqual(saved, ["big-pickle", "hy3-free"]);
+  assert.deepEqual(loadModelPicks({ file }), ["big-pickle", "hy3-free"]);
+  const onDisk = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(onDisk.modelPicks, ["big-pickle", "hy3-free"]);
+});
+
+test("saveModelPicks dedupes and ignores empty strings", async () => {
+  const file = tmpStateFile();
+  saveModelPicks(["big-pickle", "big-pickle", "", " "], { file });
+  assert.deepEqual(loadModelPicks({ file }), ["big-pickle"]);
+});
+
+test("loadModelPicks returns [] when never saved or not an array", async () => {
+  const f1 = tmpStateFile();
+  assert.deepEqual(loadModelPicks({ file: f1 }), []);
+  // 直接用 JSON 注入非法形状（绕开状态内存缓存，避免同毫秒 mtime 命中旧缓存）
+  const f2 = tmpStateFile();
+  writeFileSync(f2, JSON.stringify({ modelPicks: { big: 1 } }));
+  assert.deepEqual(loadModelPicks({ file: f2 }), []);
+});
+
+test("clearing picks (empty array) is stored and loads back empty", async () => {
+  const file = tmpStateFile();
+  saveModelPicks(["big-pickle"], { file });
+  saveModelPicks([], { file });
+  assert.deepEqual(loadModelPicks({ file }), []);
 });
