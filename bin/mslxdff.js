@@ -8,7 +8,7 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
 import { normalizeModel } from "../src/reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
@@ -185,11 +185,42 @@ if (args.includes("-model") || args.includes("-models")) {
   if (sub === "set" && args[idx + 2]) {
     const id = args[idx + 2];
     savePreferredModel(id);
+    const picks = [...new Set([...loadModelPicks(), id])];
+    saveModelPicks(picks);
     console.log(`default model set to: ${id} (daemon hot-reloads on next request)`);
+    console.log(`picked: ${picks.join(", ") || "(none)"} (auto will pick within these)`);
+    process.exit(0);
+  }
+  // -model pick <id> | -model unpick <id> | -model picks : 常用模型勾选集管理（非 TTY 用）
+  if (sub === "pick" && args[idx + 2] && args[idx + 2] !== "clear") {
+    const picks = [...new Set([...loadModelPicks(), args[idx + 2]])];
+    saveModelPicks(picks);
+    console.log(`picked: ${picks.join(", ") || "(none)"} (auto will pick within these)`);
+    process.exit(0);
+  }
+  if (sub === "pick" && args[idx + 2] === "clear") {
+    saveModelPicks([]);
+    console.log("picks cleared — auto uses the full model list again");
+    process.exit(0);
+  }
+  if (sub === "unpick" && args[idx + 2]) {
+    const picks = loadModelPicks().filter((x) => x !== args[idx + 2]);
+    saveModelPicks(picks);
+    console.log(`picked: ${picks.join(", ") || "(none)"}${picks.length === 0 ? " (auto uses full list)" : ""}`);
+    process.exit(0);
+  }
+  if (sub === "picks") {
+    const picks = loadModelPicks();
+    if (!picks.length) {
+      console.log("no picks — auto uses the full model list");
+    } else {
+      console.log(`${picks.length} picked model(s), auto only selects within these:`);
+    }
+    for (const id of picks) console.log(`  ${id}`);
     process.exit(0);
   }
   if (sub !== undefined && sub !== "list") {
-    console.error("usage: mslxdff -models (interactive picker) | mslxdff -model list | mslxdff -model set <id> | mslxdff -model status | mslxdff -model refresh");
+    console.error("usage: mslxdff -models (interactive multi-pick) | mslxdff -model list | mslxdff -model set <id> | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear | mslxdff -model picks | mslxdff -model status | mslxdff -model refresh");
     process.exit(1);
   }
   const cacheFile = join(logDir(), "models.json");
@@ -235,31 +266,35 @@ if (args.includes("-model") || args.includes("-models")) {
       console.log("no models available — try: mslxdff -model refresh");
       process.exit(0);
     }
-    // TTY：交互式箭头选择默认模型；非 TTY（管道/脚本）：保持纯列表
+    // TTY：交互式多选勾选常用模型（空格勾选，Enter 保存）；非 TTY（管道/脚本）：保持纯列表并标注勾选
     if (process.stdin.isTTY && process.stdout.isTTY) {
       const statuses = loadModelErrors();
       const current = getPreferredModel();
+      const pickedIds = loadModelPicks();
       const items = ids.map((id) => {
         const e = statuses[id];
         return {
           id,
           status: typeof e === "number" ? "error" : e?.status || "normal",
           current: id === current,
+          picked: pickedIds.includes(id),
         };
       });
-      const picked = await pickInteractive(items, Math.max(0, items.findIndex((x) => x.current)));
-      if (!picked) {
-        console.log("cancelled — default model unchanged");
+      const result = await pickInteractiveMulti(items, new Set(pickedIds), Math.max(0, items.findIndex((x) => x.current)));
+      if (!result) {
+        console.log("cancelled — picks unchanged");
         process.exit(0);
       }
-      savePreferredModel(picked);
-      console.log(`default model set to: ${picked} (daemon hot-reloads on next request)`);
+      saveModelPicks([...result]);
+      console.log(`saved ${result.size} picked model(s): ${[...result].join(", ") || "(none — auto uses full list)"}`);
       process.exit(0);
     }
     const at = cachedAt ? ` (cached ${new Date(cachedAt).toISOString().slice(0, 16).replace("T", " ")})` : "";
-    console.log(`${ids.length} free model(s)${at}:`);
-    for (const id of ids) console.log(`  ${id}`);
-    console.log(`\ninteractive pick needs a TTY; set directly with: mslxdff -model set <id>`);
+    const pickedIds = loadModelPicks();
+    const mark = (id) => (pickedIds.includes(id) ? "*" : " ");
+    console.log(`${ids.length} free model(s)${at} (${pickedIds.length} picked, * = picked):`);
+    for (const id of ids) console.log(`  ${mark(id)} ${id}`);
+    console.log(`\npicked only constrains auto; manage with: mslxdff -models (TTY) | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear`);
   } catch (err) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
     process.exit(1);
@@ -366,6 +401,53 @@ async function pickInteractive(items, startCursor = 0) {
       } else if (key === "enter") {
         cleanup();
         resolve(items[cursor].id);
+      } else if (key === "cancel") {
+        cleanup();
+        resolve(null);
+      }
+    };
+    process.stdin.on("data", onData);
+  });
+}
+
+// 多选勾选：↑/↓ 移动，Space 勾选/取消，Enter 保存，q/Esc 取消（返回 Set 或 null）
+async function pickInteractiveMulti(items, initialPicked = new Set(), startCursor = 0) {
+  const { renderChooser, renderChooserHelp, parseKey } = await import("../src/chooser.js");
+  let cursor = Math.min(Math.max(startCursor, 0), items.length - 1);
+  const picked = new Set(items.filter((it) => initialPicked.has(it.id)).map((it) => it.id));
+  const draw = () => {
+    const rows = items.map((it, i) => ({ ...it, picked: picked.has(it.id) }));
+    const lines = [...renderChooser(rows, cursor, { multi: true }), ...renderChooserHelp(true)];
+    process.stdout.write("\x1b[G\x1b[J" + lines.join("\n"));
+  };
+  draw();
+  return new Promise((resolve) => {
+    const wasRaw = process.stdin.isRaw;
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    const cleanup = () => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\n");
+    };
+    const onData = (chunk) => {
+      const key = parseKey(String(chunk));
+      if (key === "up") {
+        cursor = (cursor - 1 + items.length) % items.length;
+        draw();
+      } else if (key === "down") {
+        cursor = (cursor + 1) % items.length;
+        draw();
+      } else if (key === "space") {
+        const id = items[cursor].id;
+        if (picked.has(id)) picked.delete(id);
+        else picked.add(id);
+        draw();
+      } else if (key === "enter") {
+        cleanup();
+        resolve(new Set(picked));
       } else if (key === "cancel") {
         cleanup();
         resolve(null);
@@ -876,6 +958,7 @@ const models = createModelsService({
 const auto = createAutoSelector({
   cooldownMs: modelCooldownMs(),
   slowCooldownMs: slowCooldownMs(),
+  file: defaultStateFile(),
   loadCandidates: async () => {
     try {
       return (await models.get()).data.map((m) => m.id);

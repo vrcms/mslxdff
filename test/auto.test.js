@@ -530,3 +530,80 @@ test("all explicit candidates fail, last upstream error relayed", async () => {
     await app.close();
   }
 });
+
+// ---- 常用模型勾选集（modelPicks）：auto 只在勾选内择优 ----
+
+test("candidates restricts pool to picked models when picks non-empty", async () => {
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free", "c-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => ["a-free", "c-free"],
+  });
+  const list = await auto.candidates();
+  assert.deepEqual(list, ["a-free", "c-free"]);
+});
+
+test("candidates uses full pool when picks empty", async () => {
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free", "c-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => [],
+  });
+  const list = await auto.candidates();
+  assert.deepEqual(list, ["a-free", "b-free", "c-free"]);
+});
+
+test("candidates falls back to full pool when none of the picks exist upstream", async () => {
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => ["ghost-free", "dropped-free"],
+  });
+  const list = await auto.candidates();
+  assert.deepEqual(list, ["a-free", "b-free"], "all-missing picks must not starve auto");
+});
+
+test("candidatesFor auto-picks the requested model (persists via persistPicks)", async () => {
+  const persisted = [];
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => [],
+    persistPicks: async (picks) => { persisted.push([...picks]); return picks; },
+  });
+  const list = await auto.candidatesFor("a-free");
+  assert.equal(list[0], "a-free");
+  assert.deepEqual(persisted, [["a-free"]], "explicit request auto-adds to picks");
+});
+
+test("candidatesFor does not auto-pick a non-existent model id", async () => {
+  const persisted = [];
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => [],
+    persistPicks: async (picks) => { persisted.push([...picks]); return picks; },
+  });
+  const list = await auto.candidatesFor("ghost-free");
+  assert.equal(list[0], "ghost-free", "explicit request still tried first");
+  assert.equal(persisted.length, 0, "garbage id must not pollute picks");
+});
+
+test("candidatesFor does not re-persist already-picked model", async () => {
+  let persistCalls = 0;
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["a-free", "b-free"],
+    errors: {},
+    now: () => 1000,
+    loadPicks: () => ["a-free", "b-free"],
+    persistPicks: async (picks) => { persistCalls++; return picks; },
+  });
+  await auto.candidatesFor("a-free");
+  await auto.candidatesFor("a-free");
+  assert.equal(persistCalls, 0, "already-picked model should not rewrite picks");
+});
