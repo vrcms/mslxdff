@@ -10,6 +10,13 @@ The full implementation blueprint lives in `./CLAUDE.md` — **read it first**; 
 - 启动长驻进程务必用 `Start-Process cmd.exe /c "... >> log 2>> err"`（见全局 CLAUDE.md），并在返回前必须验证：端口监听 + 最小请求日志落盘。
 - 如果某条命令预计会跑很久（如全量测试），先单独执行，且设置合理超时；不要跟其他命令堆叠。
 
+## 文档变更契约（强制，改功能必读）
+
+- **`docs/ARCHITECTURE.md` 是长效架构总览 + 变更记账门**：任何新增/改动功能，都必须在其中更新对应章节（CLI 表 / Env 表 / 功能地图 / 目录导览 / 请求链路）。表格见该文件 §1。
+- **结构性决策**（新模块、改请求链路、改存储 schema）额外追加 `docs/adr/` 新条目（当前最大 0007，下一个 0008），并在 ARCHITECTURE.md §8 索引登记。
+- **检查**：改动涉及代码或文档后，跑 `npm run docs:check`（验证模块引用、ADR 索引、AGENTS.md 契约三件事）。CI/发布前必须通过。
+- 写了新源文件记得补进 ARCHITECTURE.md §7 目录导览。
+
 ## Source of truth
 
 - **Reference repo**: `/root/9router` (git tag `v0.5.45`). Original implementation and request chains
