@@ -11,7 +11,6 @@ const allowedRoots = [
   resolve(pkgRoot),
   resolve(logDir()),
   resolve(dirname(defaultStateFile())),
-  resolve(process.cwd()),
 ];
 
 function isAllowed(p) {
