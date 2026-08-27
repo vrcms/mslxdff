@@ -12,8 +12,8 @@
 
 | 变更类型 | 必须更新 | 附加要求 |
 |---|---|---|
-| 新增/修改 CLI 命令或 `-参数` | `## 6 契约与配置` 的 CLI 表 | — |
-| 新增/修改环境变量 | 同上 的 Env 表 | 命名遵循 `MSLXDFF_*`/`UPSTREAM_*` 前缀 |
+| 新增/修改 CLI 命令或 `-参数` | `## 6 契约与配置` 的 CLI 表 **+ `docs/cli_help.md`** | 详细参数手册与 CLI 表保持一致 |
+| 新增/修改环境变量 | 同上 的 Env 表 **+ `docs/cli_help.md` 附录 A** | 命名遵循 `MSLXDFF_*`/`UPSTREAM_*` 前缀 |
 | 新增/修改 HTTP 路由 | `## 4 请求链路` 路由图 + `## 6` 契约 | 鉴权规则按 ADR-0004 |
 | 新增/修改 State 持久化字段 | `## 6` `## 7` | 兼容旧值或写明迁移，记 ADR |
 | 新增/修改供应商 Provider | `## 3 多供应商` + `## 5` 功能地图 | 默认 opencode，其余加 `<id>/` 前缀（见 ADR-0007） |
@@ -107,6 +107,8 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 
 ### CLI（bin/mslxdff.js）
 
+> 完整参数手册见 **[`docs/cli_help.md`](./cli_help.md)**（与本表同源，改 CLI 时两处必同步）。
+
 | 命令 | 作用 |
 |---|---|
 | `mslxdff` / `-d` | 启动为后台 daemon |
@@ -175,9 +177,11 @@ mslxdff/
 │       └── index.js           导出
 ├── docs/
 │   ├── ARCHITECTURE.md        ← 本文件（总览 + 变更契约）
+│   ├── cli_help.md            CLI 完整参数手册（与 §6 同源，改 CLI 必同步）
 │   ├── plugins.md             插件开发指南
-│   ├── adr/                   架构决策记录（0001..0007，见 §8 索引）
+│   ├── adr/                   架构决策记录（0001..0008，见 §8 索引）
 │   └── agents/                agent 工作流用领域文档
+├── cli_help.md                根级同文件（`docs/cli_help.md` 的镜像，满足“新增 cli_help.md”约定）
 ├── test/                      单元+集成测试（node --test，全量 250+）
 └── scripts/docs-check.js      npm run docs:check 文档就绪检查
 ```
