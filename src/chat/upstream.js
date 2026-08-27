@@ -6,7 +6,7 @@ function modelForAttempt(attempt) {
 }
 
 export async function chatOnce({ messages, tools, model }) {
-  const client = createUpstreamClient({ connectTimeoutMs: CHAT_TIMEOUT_MS });
+  const client = createUpstreamClient({ connectTimeoutMs: CHAT_TIMEOUT_MS, keepAlive: false, fetchImpl: globalThis.fetch });
   const body = {
     model: model || CHAT_PREFERRED,
     messages,
@@ -41,7 +41,7 @@ export async function chatOnce({ messages, tools, model }) {
 }
 
 async function chatOnceNoTools({ messages, model }) {
-  const client = createUpstreamClient({ connectTimeoutMs: CHAT_TIMEOUT_MS });
+  const client = createUpstreamClient({ connectTimeoutMs: CHAT_TIMEOUT_MS, keepAlive: false, fetchImpl: globalThis.fetch });
   const body = { model: model || CHAT_PREFERRED, messages, stream: false };
   try {
     const res = await client.chat(body);
