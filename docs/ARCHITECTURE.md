@@ -172,10 +172,11 @@ mslxdff/
 │   ├── sync-workbuddy.js      WorkBuddy models.json 同步
 │   ├── chat/                  对话终端 -chat（mimo 优先/big-pickle 兜底、历史持久化、超长压缩、run_command/read_file/curl、仅拦 uninstall）
 │   │   ├── index.js           入口
-│   │   ├── repl.js            REPL 循环与 slash 命令
+│   │   ├── repl.js            REPL 循环与 slash 命令 + 美化 banner/统计
+│   │   ├── stats.js           统计聚合：模型延迟/网关请求/勾选集/最近错误
 │   │   ├── upstream.js        上游调用与 fallback/压缩摘要
 │   │   ├── prompt.js          系统提示词（mini + 实时模型列表）
-│   │   ├── tools.js           run_command/read_file/curl 工具与校验
+│   │   ├── tools.js           run_command/read_file 工具与校验（仅项目/日志/state，curl 探活）
 │   │   ├── store.js           历史持久化与压缩判定
 │   │   └── config.js          模型与阈值常量
 │   └── providers/
@@ -211,5 +212,5 @@ mslxdff/
 | 0006 | 宽带成员 | 动态 IP 成员经 Leader 中继 |
 | 0007 | 多供应商前缀 | `<provider>/<id>` 前缀路由，默认 opencode 裸 id（0.1.56 新增） |
 | 0008 | 瞬时 key 共享 | shareKeysToPeers 开关（默认关），转发时附带 key 给组员借用一次，opencode 恒排除（0.1.57） |
-| 0009 | 对话终端 -chat | mimo-v2.5-free 优先/big-pickle 兜底，自然语言转精确命令，模糊匹配由模型完成，仅拦 -uninstall，历史持久化超长压缩，read_file 限项目内 + curl 上游/本机探活（0.1.58.1） |
+| 0009 | 对话终端 -chat | mimo-v2.5-free 优先/big-pickle 兜底，自然语言转精确命令，模糊匹配由模型完成，仅拦 -uninstall，历史持久化超长压缩，read_file 限项目内 + curl 探活，美化 banner/统计（0.1.58.2） |
 
