@@ -135,6 +135,17 @@ if (args.includes("-plugins") || args.includes("--plugins")) {
   process.exit(0);
 }
 
+if (args.includes("-chat") || args.includes("--chat")) {
+  const idx = args.findIndex((x) => x === "-chat" || x === "--chat");
+  const rest = args.slice(idx + 1);
+  // rest 中若全是空白或以 - 开头的“选项”，仍视作本次对话的输入（单次模式）；
+  // 无 rest 则进入常驻 REPL。REPL 本身就是前台独立进程，与 daemon 无父子关系，daemon 重启不影响它。
+  const singleShot = rest.length ? rest.join(" ").trim() : null;
+  const { startChat } = await import("../src/chat/index.js");
+  await startChat({ singleShot: singleShot || undefined });
+  process.exit(0);
+}
+
 if (args.includes("-status") || args.includes("--status") || args.includes("-s")) {
   await printStatus();
   process.exit(0);
@@ -1526,6 +1537,7 @@ Usage:
   mslxdff -group remove <seq>      leader only: kick a member by its list sequence number
   mslxdff -leavegroup              leave every joined group as a member (leaders: use -delgroup)
   mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
+  mslxdff -chat ["prompt"]       chat REPL（mimo-v2.5-free 优先/big-pickle 兜底，自然语言转命令，模糊匹配由模型完成，历史持久化，超长自动压缩，仅拦 -uninstall，daemon 重启不影响）
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -help                    show this help
 
