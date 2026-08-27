@@ -46,6 +46,7 @@ export function createUpstreamClient({
   },
   fetchImpl,
   hooks,
+  keepAlive = true,
 } = {}) {
   // 使用 undici 的 fetch 与 Agent 配对，避免 global fetch 与 npm undici Agent 不兼容
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
@@ -187,7 +188,7 @@ export function createUpstreamClient({
   const keepAliveConnections = envInt("MSLXDFF_UPSTREAM_KEEPALIVE_CONNECTIONS", 20);
   let dispatcher = null;
   let agent = null;
-  if (UndiciAgent) {
+  if (keepAlive && UndiciAgent) {
     try {
       agent = new UndiciAgent({
         keepAliveTimeout,
