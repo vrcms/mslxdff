@@ -6,27 +6,21 @@ import { getToolDefs, execCommand, readFileTool, curlTool } from "./tools.js";
 import { chatWithFallback, summarizeHistory } from "./upstream.js";
 import { loadHistory, saveHistory, clearHistory, histPath, estimateChars, needsCompress } from "./store.js";
 import { CHAT_KEEP_RECENT, CHAT_MAX_TOOL_LOOPS, CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
-import { formatBannerLines, formatStatsDetail } from "./stats.js";
+import { formatBannerLines, formatStatsDetail, collectStats } from "./stats.js";
 
 const SLASH_HELP = `自然语言直接说，斜杠快捷：
   /help     本帮助
-  /stats    详细统计（模型/延迟/网关请求）
+  /stats    详细统计（网关 -d 的请求/延迟/模型）
   /history  查看对话历史
   /clear    清空历史
   /exit     退出
 示例：设置 hy3 为默认模型 / 查看组列表 / 看最近20条日志 / 读一下 src/logs.js`;
 
-let sessionReq = 0;
-let sessionOk = 0;
-let sessionFail = 0;
-let sessionTokensIn = 0;
-let sessionTokensOut = 0;
-
 function printBanner() {
   const { lines } = formatBannerLines();
   for (const l of lines) console.log(l);
-  console.log(`\x1b[90m输入自然语言即可执行；/help 帮助，/stats 统计，/exit 退出\x1b[0m`);
-  console.log(`\x1b[90m历史：${histPath()} · 仅拦截 -uninstall · 本会话独立，daemon 重启不影响\x1b[0m`);
+  console.log(`\x1b[90m输入自然语言即可执行；/help 帮助，/stats 看网关统计，/exit 退出\x1b[0m`);
+  console.log(`\x1b[90m历史：${histPath()} · 仅拦截 -uninstall · 数据来自网关 -d，非本会话计数\x1b[0m`);
 }
 
 async function maybeCompress(messages) {
@@ -61,8 +55,6 @@ async function runAgentTurn(userText, messages) {
     const res = await chatWithFallback({ messages, tools });
     lastLatency = Math.round(performance.now() - tCall);
     if (!res.ok) {
-      sessionReq++;
-      sessionFail++;
       const err = `大模型暂不可用：${res.error}`;
       messages.push({ role: "assistant", content: err });
       return { text: err, model: null, latency: lastLatency, usage: null, fallback: false, ok: false };
@@ -70,10 +62,6 @@ async function runAgentTurn(userText, messages) {
     lastModel = res.model;
     lastUsage = res.usage || null;
     lastFallback = !!res.fallback;
-    if (lastUsage) {
-      sessionTokensIn += Number(lastUsage.prompt_tokens || 0);
-      sessionTokensOut += Number(lastUsage.completion_tokens || 0);
-    }
     const msg = res.message;
     const toolCalls = msg.tool_calls || [];
     let fallbackCmd = null;
@@ -84,8 +72,6 @@ async function runAgentTurn(userText, messages) {
     if (!toolCalls.length && !fallbackCmd) {
       const text = String(msg.content || "").trim() || "(空回复)";
       messages.push({ role: "assistant", content: text });
-      sessionReq++;
-      sessionOk++;
       const totalMs = Math.round(performance.now() - t0);
       const note = lastFallback ? "\n\x1b[90m[注：mimo 不可用，已用 big-pickle]\x1b[0m" : "";
       return { text: text + note, model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
@@ -120,21 +106,27 @@ async function runAgentTurn(userText, messages) {
     }
     loops++;
   }
-  sessionReq++;
-  sessionFail++;
   return { text: "（工具调用次数已达上限，已停止）", model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: false };
 }
 
 function printFooter({ model, latency, usage, totalMs, fallback }) {
   const dim = "\x1b[90m";
   const rst = "\x1b[0m";
+  let gw = null;
+  try { gw = collectStats(); } catch {}
   const modelLabel = model || "—";
   const latLabel = latency ? `${latency}ms` : "—";
   const totalLabel = totalMs ? ` · 总耗时 ${totalMs}ms` : "";
   const tokLabel = usage ? ` · tokens ${usage.prompt_tokens ?? "?"}→${usage.completion_tokens ?? "?"}` : "";
-  const sessLabel = ` · 本会话 ${sessionReq}次 成功${sessionOk} 失败${sessionFail}`;
   const fbLabel = fallback ? " · fallback" : "";
-  console.log(`${dim}─ ${modelLabel}  ${latLabel}${totalLabel}${tokLabel}${sessLabel}${fbLabel}${rst}`);
+  let gwLabel = "";
+  if (gw) {
+    const cnt = gw.latencies?.[model]?.count;
+    const ema = gw.latencies?.[model]?.emaMs;
+    const per = cnt ? ` · 网关该模型 ${cnt}次 EMA ${ema}ms` : "";
+    gwLabel = ` · 网关 总${gw.total} 成功${gw.success} 失败${gw.fail}${per}`;
+  }
+  console.log(`${dim}─ ${modelLabel}  ${latLabel}${totalLabel}${tokLabel}${fbLabel}${gwLabel}${rst}`);
 }
 
 export async function startRepl({ singleShot } = {}) {
@@ -175,15 +167,13 @@ export async function startRepl({ singleShot } = {}) {
     }
     if (["/stats", "/status", "stats", "status"].includes(low)) {
       console.log(formatStatsDetail());
-      console.log(`\x1b[90m本会话：${sessionReq}次 成功${sessionOk} 失败${sessionFail}  tokens ${sessionTokensIn}→${sessionTokensOut}\x1b[0m`);
       rl.prompt();
       continue;
     }
     if (["/clear", "clear"].includes(low)) {
       clearHistory();
       messages = [{ role: "system", content: system }];
-      sessionReq = sessionOk = sessionFail = sessionTokensIn = sessionTokensOut = 0;
-      console.log("\x1b[90m[已清空历史与本会话计数]\x1b[0m");
+      console.log("\x1b[90m[已清空历史]\x1b[0m");
       rl.prompt();
       continue;
     }
@@ -200,7 +190,6 @@ export async function startRepl({ singleShot } = {}) {
     } catch (e) {
       console.log(`\x1b[31m[错误] ${String(e.message || e).slice(0, 800)}\x1b[0m`);
       messages.push({ role: "assistant", content: `error: ${String(e.message || e)}` });
-      sessionReq++; sessionFail++;
     }
     saveHistory(messages.slice(1));
     if (needsCompress(messages)) {
