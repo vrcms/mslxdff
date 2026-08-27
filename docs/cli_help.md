@@ -71,6 +71,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
+| `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：mimo 优先/big-pickle 兜底，模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
 ---
@@ -597,7 +598,40 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
 
 ---
 
-## 9. 帮助
+## 9. 对话终端
+
+### `-chat ["prompt"]` / `--chat ["prompt"]`
+
+- **语法**：`mslxdff -chat`（进入常驻 REPL）或 `mslxdff -chat "把 hy3 设为默认模型"`（单次执行后退出）
+- **作用**：自然语言转精确 CLI 命令并执行。背后是 `src/chat/*` 独立模块，**优先调 `mimo-v2.5-free`**，失败自动降级 `big-pickle`（与 auto 同套冷却），把用户说的简称（如 `hy3`）自行查可用模型列表补全为全称（如 `hy3-free`）再调用工具。
+- **交互**：
+  - `mimo> ` 提示符，支持上下历史、`/help`（看可用说法）、`/clear`（清历史）、`/history`（看条数）、`/exit`/`quit`/`退出`/`Ctrl+D` 退出。
+  - 单次模式：`mslxdff -chat "查看组列表"` 直接执行一次后退出，适合管道/脚本。
+- **工具**（仅 3 类，无其他命令）：
+  - `run_command`：执行 `cli_help.md` 所列任意命令（不含 `mslxdff` 前缀），**仅拦截 `-uninstall`**，`-stop`/`-port` 等可执行；模糊匹配与精确性由大模型负责，进程侧不做二次归一。
+  - `read_file`：读取**项目内**文件（`src/` `docs/` `package.json`）或日志目录（`~/.config/mslxdff/*`），用于“看看日志/配置”，超出项目根或超 20KB 截断，目录则列文件名。
+  - 纯回答：闲聊或解释时不调工具，直接中文回复。
+- **历史与压缩**：
+  - 持久化：`~/.config/mslxdff/chat-history.json`（`MSLXDFF_CHAT_HISTORY` 可覆盖），存最近 60 条，`daemon` 重启不影响（chat 是前台独立进程，与 daemon 无父子关系）。
+  - 压缩原理：当总字符 > `18000`（`CHAT_HISTORY_MAX_CHARS`）时触发——**保留 system + 最近 8 条**，将其余旧消息打包让**大模型自己做摘要**（`summarizeHistory` 发一次 `mimo`/`big-pickle` 调用，提示“压缩成 300 字内中文摘要，保留关键操作与偏好”），成功则用 `【历史摘要】…` 替代旧段，失败则直接截断。这样长期对话不爆上下文，又不丢关键信息。
+- **独立进程保证**：`mslxdff -chat` 就是用户终端的前台进程，`bin` 中直接 `await startChat()`，不经 `startDaemon`，`daemon` 的 `stopDaemonIfOutdated`/`-port` 重启完全走另一条链路。
+- **示例**：
+  ```bash
+  mslxdff -chat
+  # mimo> 设置hy3为默认模型
+  # → 执行: mslxdff -model set hy3-free
+  # → OK: default model set to: hy3-free
+
+  mslxdff -chat "查看最近20条日志"
+  # → 执行: mslxdff -log 20
+
+  mslxdff -chat "读一下 src/logs.js"
+  # → 读取: src/logs.js OK
+  ```
+
+---
+
+## 10. 帮助
 
 ### `-help` / `--help` / `-h`
 
