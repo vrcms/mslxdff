@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadToken, refreshToken, setPort, getPort, loadModelPicks, saveModelPicks, loadProviderKeys, loadProviderKey, saveProviderKeys, addProviderKey, removeProviderKey } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadModelPicks, saveModelPicks, loadProviderKeys, loadProviderKey, saveProviderKeys, addProviderKey, removeProviderKey, removeProviderKeys } from "../src/state.js";
 
 function tmpStateFile() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-"));
@@ -152,4 +152,23 @@ test("provider keys: clear via saveProviderKeys empty removes the entry", async 
   assert.deepEqual(loadProviderKeys("openrouter", { file }), []);
   const onDisk = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(onDisk.providerKeys.openrouter, undefined);
+});
+
+test("provider keys: removeProviderKeys removes several by value in one call", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-1", "sk-2", "sk-3", "sk-4"], { file });
+  assert.deepEqual(removeProviderKeys("openrouter", ["sk-1", "sk-3"], { file }), ["sk-2", "sk-4"]);
+  assert.deepEqual(loadProviderKeys("openrouter", { file }), ["sk-2", "sk-4"]);
+});
+
+test("provider keys: addProviderKey dedupes identical key (no duplicates stored)", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-1"], { file });
+  assert.deepEqual(addProviderKey("openrouter", "sk-1", { file }), ["sk-1"], "duplicate add is a no-op");
+  assert.deepEqual(loadProviderKeys("openrouter", { file }), ["sk-1"]);
+});
+
+test("provider keys: saveProviderKeys dedupes incoming duplicates", async () => {
+  const file = tmpStateFile();
+  assert.deepEqual(saveProviderKeys("openrouter", ["sk-1", "sk-2", "sk-1", "SK-1"], { file }), ["sk-1", "sk-2", "SK-1"]);
 });

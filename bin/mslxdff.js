@@ -388,7 +388,7 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
-  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKey } = await import("../src/state.js");
+  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys } = await import("../src/state.js");
   if (sub === "clear") {
     saveProviderKeys(id, []);
     console.log(`cleared ${id} API keys (provider disabled on next daemon start)`);
@@ -398,7 +398,8 @@ if (args.includes("-provider") || args.includes("--provider")) {
     const keys = loadProviderKeys(id);
     if (keys.length) {
       console.log(`provider: ${id} (${keys.length} key${keys.length > 1 ? "s" : ""})`);
-      keys.forEach((k, i) => console.log(`  [${i}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
+      keys.forEach((k, i) => console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
+      console.log(`  remove by: mslxdff -provider ${id} remove <seq> [seq...] | <key-value>`);
     } else {
       console.log(`provider: ${id} (no keys configured)`);
     }
@@ -415,13 +416,31 @@ if (args.includes("-provider") || args.includes("--provider")) {
     process.exit(0);
   }
   if (sub === "remove") {
-    const key = rest[1];
-    if (!key) {
-      console.error("usage: mslxdff -provider openrouter remove <key>");
+    const targets = rest.slice(1).filter((k) => !k.startsWith("-"));
+    if (!targets.length) {
+      console.error("usage: mslxdff -provider openrouter remove <seq|key> [seq|key ...]   (seq = index shown by 'list')");
       process.exit(1);
     }
-    const remaining = removeProviderKey(id, key);
-    console.log(`removed ${id} API key (now ${remaining.length} total) — restart daemon to activate`);
+    const current = loadProviderKeys(id);
+    const toRemove = [];
+    for (const raw of targets.flatMap((t) => String(t).split(","))) {
+      const t = raw.trim();
+      if (!t) continue;
+      if (/^\d+$/.test(t)) {
+        const seq = Number(t);
+        const idx = seq - 1;
+        if (Number.isInteger(seq) && idx >= 0 && idx < current.length) toRemove.push(current[idx]);
+        else console.log(`  ! no key at sequence ${seq} (provider has ${current.length}) — skipped`);
+      } else {
+        toRemove.push(t);
+      }
+    }
+    if (!toRemove.length) {
+      console.log("nothing to remove");
+      process.exit(0);
+    }
+    const remaining = removeProviderKeys(id, [...new Set(toRemove)]);
+    console.log(`removed ${current.length - remaining.length} ${id} API key(s) (now ${remaining.length} total) — restart daemon to activate`);
     process.exit(0);
   }
   if (sub && !sub.startsWith("-")) {

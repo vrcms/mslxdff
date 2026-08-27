@@ -241,8 +241,12 @@ export function addProviderKey(id, key, opts = {}) {
 }
 
 export function removeProviderKey(id, key, opts = {}) {
-  const clean = String(key || "").trim();
-  const list = loadProviderKeys(id, opts).filter((k) => k !== clean);
+  return removeProviderKeys(id, [key], opts);
+}
+
+export function removeProviderKeys(id, targets = [], opts = {}) {
+  const set = new Set((Array.isArray(targets) ? targets : [targets]).map((k) => String(k || "").trim()).filter(Boolean));
+  const list = loadProviderKeys(id, opts).filter((k) => !set.has(k));
   return saveProviderKeys(id, list, opts);
 }
 
