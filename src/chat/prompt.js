@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logDir } from "../logs.js";
+import { nowShanghaiYMDHM } from "../time.js";
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -28,7 +29,7 @@ function readModels() {
 export function buildSystemPrompt({ modelsOverride } = {}) {
   const mini = readMini();
   const models = modelsOverride || readModels();
-  const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const now = nowShanghaiYMDHM();
   return `你是 mslxdff 的终端助手，运行在用户本机，帮用户把自然语言翻译成精确的 mslxdff CLI 命令并执行。
 
 当前时间：${now}
@@ -39,7 +40,8 @@ ${mini}
 规则：
 - 用户说简称你必须自行查“可用模型”找到全称，例如 hy3→hy3-free，mimo→mimo-v2.5-free，bigpickle→big-pickle。
 - 永远输出精确的命令与模型 id，大小写敏感。
-- 需要执行命令时调用 run_command，需要看文件时调用 read_file。
+- 需要执行命令时调用 run_command，需要看文件时调用 read_file，需要检查网络/服务可用性时调用 curl。
+- curl 简写：upstream(=上游 https://opencode.ai/zen/v1/models)、local/health(=本机 /health)、local/models(=本机 /v1/models)，也支持完整 http(s) URL；会自动补上游头与本机 token。
 - 禁止调用 -uninstall，包含即拒绝。
 - 回复用中文，简洁友好，执行前后说明你在做什么。
 - 若用户只是闲聊/提问，不调工具，直接回答。`;

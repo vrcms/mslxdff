@@ -102,6 +102,7 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | 插件系统 | 可替换上游/.mjs hook，失败仅记日志 | `src/plugins.js` + `docs/plugins.md` | `MSLXDFF_PLUGINS_DIR` |
 | WorkBuddy 同步 | `-setto workbuddy` 原子写 `~/.workbuddy/models.json` | `src/sync-workbuddy.js` | 仅认 127.0.0.1/v1 |
 | Daemon | 后台守护，pid/日志/事件流，auto-update | `src/daemon.js`, `bin/mslxdff.js` | `-d/-status/-debug/-log/-update` |
+| 对话探活 curl | `-chat` 新增 `curl` 工具：简写 `upstream`/`local/health`/`local/models` 自动补全，上游自动补头、本机 /v1/* 自动带 token，返回状态/耗时/头/前 6KB body | `src/chat/tools.js`, `src/chat/repl.js` | `curl url [method headers body timeoutMs]` |
 
 ## 6. 契约与配置
 
@@ -121,7 +122,7 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | `-setto workbuddy [modelId]` | 同步默认模型到 WorkBuddy |
 | `-creategroup` / `-addtogroup` / `-group …` / `-leavegroup` / `-delgroup` | 群组生命周期（组员用 `-group leave`，组长用 `-delgroup`，ADR-0005/0006） |
 | `-showtoken` / `-refresh-token` | 读 / 轮换 auth token |
-| `-chat ["prompt"]` | 对话式终端（mimo-v2.5-free 优先/big-pickle 兜底，模糊匹配由模型完成，历史持久化超长压缩，仅拦 `-uninstall`，独立进程 daemon 重启不影响） |
+| `-chat ["prompt"]` | 对话式终端（mimo-v2.5-free 优先/big-pickle 兜底，模糊匹配由模型完成，历史持久化超长压缩，仅拦 `-uninstall`，`curl` 探活上游/本机，独立进程 daemon 重启不影响） |
 | `-update` | 更新到最新已发布版本 |
 
 ### Env
@@ -164,16 +165,17 @@ mslxdff/
 │   ├── models.js              模型服务：刷新、到期、cacheFile、providers 聚合
 │   ├── auto.js                自动模型：排序、冷却自愈、勾选集
 │   ├── reasoning.js           思考模式 reasoning_content 注入
+│   ├── time.js                上海时间格式化（Asia/Shanghai，fmtShanghai/YMDHM/HMS，用于所有展示）
 │   ├── state.js               state 持久化（缓存层 + token/port/modelPicks/providerKeys）
 │   ├── daemon.js              后台守护
 │   ├── plugins.js             插件加载/执行，失败隔离
 │   ├── sync-workbuddy.js      WorkBuddy models.json 同步
-│   ├── chat/                  对话终端 -chat（mimo 优先/big-pickle 兜底、历史持久化、超长压缩、run_command/read_file、仅拦 uninstall）
+│   ├── chat/                  对话终端 -chat（mimo 优先/big-pickle 兜底、历史持久化、超长压缩、run_command/read_file/curl、仅拦 uninstall）
 │   │   ├── index.js           入口
 │   │   ├── repl.js            REPL 循环与 slash 命令
 │   │   ├── upstream.js        上游调用与 fallback/压缩摘要
 │   │   ├── prompt.js          系统提示词（mini + 实时模型列表）
-│   │   ├── tools.js           run_command/read_file 工具与校验
+│   │   ├── tools.js           run_command/read_file/curl 工具与校验
 │   │   ├── store.js           历史持久化与压缩判定
 │   │   └── config.js          模型与阈值常量
 │   └── providers/
@@ -209,5 +211,5 @@ mslxdff/
 | 0006 | 宽带成员 | 动态 IP 成员经 Leader 中继 |
 | 0007 | 多供应商前缀 | `<provider>/<id>` 前缀路由，默认 opencode 裸 id（0.1.56 新增） |
 | 0008 | 瞬时 key 共享 | shareKeysToPeers 开关（默认关），转发时附带 key 给组员借用一次，opencode 恒排除（0.1.57） |
-| 0009 | 对话终端 -chat | mimo-v2.5-free 优先/big-pickle 兜底，自然语言转精确命令，模糊匹配由模型完成，仅拦 -uninstall，历史持久化超长压缩，read_file 限项目内（0.1.58） |
+| 0009 | 对话终端 -chat | mimo-v2.5-free 优先/big-pickle 兜底，自然语言转精确命令，模糊匹配由模型完成，仅拦 -uninstall，历史持久化超长压缩，read_file 限项目内 + curl 上游/本机探活（0.1.58.1） |
 

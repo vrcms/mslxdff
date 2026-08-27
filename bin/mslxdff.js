@@ -20,6 +20,7 @@ import { createGroupsService, createBansService, refreshGroupMembers, syncPeersF
 import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents, eventsFile, callsFile, errorsFile } from "../src/logs.js";
 import { loadPlugins, runHook, pluginsDir, resolvePluginDirs } from "../src/plugins.js";
 import { createOpenCodeProvider } from "../src/providers/opencode.js";
+import { fmtShanghai, fmtShanghaiYMDHM, fmtShanghaiHMS } from "../src/time.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -186,9 +187,7 @@ if (args.includes("-model") || args.includes("-models")) {
       const e = statuses[id];
       const st = typeof e === "number" ? "error" : e?.status || "normal";
       const at = typeof e === "number" ? e : e?.at;
-      const when = at
-        ? `  (${new Date(at).toISOString().slice(5, 19).replace("T", " ")})`
-        : "";
+      const when = at ? `  (${fmtShanghai(at)})` : "";
       const extra = e?.code ? `  HTTP ${e.code}` : "";
       console.log(`  ${id}  ${st}${when}${extra}`);
     }
@@ -301,7 +300,7 @@ if (args.includes("-model") || args.includes("-models")) {
       console.log(`saved ${result.size} picked model(s): ${[...result].join(", ") || "(none — auto uses full list)"}`);
       process.exit(0);
     }
-    const at = cachedAt ? ` (cached ${new Date(cachedAt).toISOString().slice(0, 16).replace("T", " ")})` : "";
+    const at = cachedAt ? ` (cached ${fmtShanghaiYMDHM(cachedAt)})` : "";
     const pickedIds = loadModelPicks();
     const mark = (id) => (pickedIds.includes(id) ? "*" : " ");
     console.log(`${ids.length} free model(s)${at} (${pickedIds.length} picked, * = picked):`);
@@ -1690,9 +1689,9 @@ async function printStatus() {
 
 function fmtStatus(id, statuses) {
   const e = statuses[id];
-  if (typeof e === "number") return `error ${fmtTs(new Date(e).toISOString())}`;
+  if (typeof e === "number") return `error ${fmtTs(e)}`;
   if (!e?.status || e.status === "normal") return "";
-  const when = e.at ? ` ${fmtTs(new Date(e.at).toISOString())}` : "";
+  const when = e.at ? ` ${fmtTs(e.at)}` : "";
   const code = e.code ? ` HTTP ${e.code}` : "";
   return `${e.status}${when}${code}`;
 }
@@ -1703,7 +1702,7 @@ function fmtDur(ms) {
 }
 
 function fmtEvent(e) {
-  const t = e?.ts ? new Date(e.ts).toISOString().slice(11, 19) : "--:--:--";
+  const t = e?.ts ? fmtShanghaiHMS(e.ts) : "--:--:--";
   const head = `[${t}]`;
   const m = (x) => x || "-";
   const fallbackTag = e.fallback?.fallback ? ` fallback=${e.fallback.requested_model || e.requested}->${e.fallback.actual_model || e.actual}(${e.fallback.reason || e.reason})` : "";
@@ -1752,7 +1751,7 @@ function fmtEvent(e) {
     case "relay-forward":
       return `${head} relay fwd     ${e.target || e.peer || "?"} via leader model=${m(e.model)} hops=${e.hops || 0}`;
     case "relay-heartbeat":
-      return `${head} relay hb      ${e.member || "?"} ip=${e.ip || "?"} lastSeen=${e.lastSeen ? new Date(e.lastSeen).toISOString().slice(11,19) : "?"}`;
+      return `${head} relay hb      ${e.member || "?"} ip=${e.ip || "?"} lastSeen=${e.lastSeen ? fmtShanghaiHMS(e.lastSeen) : "?"}`;
     case "client-abort":
       return `${head} client abort  ${m(e.model)} total=${fmtDur(e.totalMs)}`;
     case "result":
@@ -1791,12 +1790,7 @@ function fmtEvent(e) {
 }
 
 function fmtTs(iso) {
-  if (!iso) return "-";
-  try {
-    return new Date(iso).toISOString().replace("T", " ").slice(5, 19);
-  } catch {
-    return "-";
-  }
+  return fmtShanghai(iso);
 }
 
 function npmCmd() {
