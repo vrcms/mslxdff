@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadToken, refreshToken, setPort, getPort, loadModelPicks, saveModelPicks } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadModelPicks, saveModelPicks, loadProviderKeys, loadProviderKey, saveProviderKeys, addProviderKey, removeProviderKey } from "../src/state.js";
 
 function tmpStateFile() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-"));
@@ -108,4 +108,48 @@ test("clearing picks (empty array) is stored and loads back empty", async () => 
   saveModelPicks(["big-pickle"], { file });
   saveModelPicks([], { file });
   assert.deepEqual(loadModelPicks({ file }), []);
+});
+test("provider keys: save multiple, load back as array", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-1", "sk-2", "sk-3"], { file });
+  assert.deepEqual(loadProviderKeys("openrouter", { file }), ["sk-1", "sk-2", "sk-3"]);
+  const onDisk = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(onDisk.providerKeys.openrouter, ["sk-1", "sk-2", "sk-3"]);
+});
+
+test("provider keys: legacy single string state reads back as array", async () => {
+  const file = tmpStateFile();
+  writeFileSync(file, JSON.stringify({ providerKeys: { openrouter: "sk-old" } }));
+  assert.deepEqual(loadProviderKeys("openrouter", { file }), ["sk-old"]);
+  assert.equal(loadProviderKey("openrouter", { file }), "sk-old");
+});
+
+test("provider keys: env MSLXDFF_<ID>_KEY takes priority over state", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-state"], { file });
+  const key = process.env.MSLXDFF_OPENROUTER_KEY;
+  process.env.MSLXDFF_OPENROUTER_KEY = "sk-env";
+  try {
+    assert.deepEqual(loadProviderKeys("openrouter", { file }), ["sk-env"]);
+  } finally {
+    if (key === undefined) delete process.env.MSLXDFF_OPENROUTER_KEY;
+    else process.env.MSLXDFF_OPENROUTER_KEY = key;
+  }
+});
+
+test("provider keys: add appends, remove deletes by value", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-1"], { file });
+  assert.deepEqual(addProviderKey("openrouter", "sk-2", { file }), ["sk-1", "sk-2"]);
+  assert.deepEqual(addProviderKey("openrouter", "sk-1", { file }), ["sk-1", "sk-2"], "dedupe on add");
+  assert.deepEqual(removeProviderKey("openrouter", "sk-1", { file }), ["sk-2"]);
+});
+
+test("provider keys: clear via saveProviderKeys empty removes the entry", async () => {
+  const file = tmpStateFile();
+  saveProviderKeys("openrouter", ["sk-1", "sk-2"], { file });
+  saveProviderKeys("openrouter", [], { file });
+  assert.deepEqual(loadProviderKeys("openrouter", { file }), []);
+  const onDisk = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(onDisk.providerKeys.openrouter, undefined);
 });

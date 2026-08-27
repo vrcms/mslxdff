@@ -1,5 +1,6 @@
 import { joinModelId } from "./model-id.js";
-import { loadProviderKey } from "../state.js";
+import { createKeyRing } from "./keyring.js";
+import { loadProviderKeys } from "../state.js";
 
 let UndiciAgent = null;
 let UndiciFetch = null;
@@ -16,12 +17,23 @@ function envInt(name, fallback) {
   return Number.isInteger(v) && v > 0 ? v : fallback;
 }
 
-// OpenRouter Provider：OpenAI 兼容 `/api/v1`，Bear 鉴权 + HTTP-Referer/X-Title 品牌头。
-// 免费模型 = pricing.prompt/completion 全为 0；模型 id 对外带 `openrouter/` 前缀。
+// 把 `apiKeys`(数组) + `apiKey`(单串) + state 的 key 合并成去重数组。
+// state 为空时只看显式传入；两者皆空 → []（无 key）。
+function collectApiKeys(apiKeys, apiKey) {
+  const list = [
+    ...(Array.isArray(apiKeys) ? apiKeys : [apiKeys].filter(Boolean)),
+    apiKey,
+    ...(apiKeys === undefined && apiKey === undefined ? loadProviderKeys("openrouter") : []),
+  ].filter((k) => typeof k === "string" && k.trim().length);
+  return [...new Set(list.map((k) => k.trim()))];
+}
+
 export function createOpenRouterProvider({
+  apiKeys,
   apiKey,
   baseUrl = process.env.MSLXDFF_OPENROUTER_BASE_URL || DEFAULT_BASE_URL,
   connectTimeoutMs = Number(process.env.MSLXDFF_OPENROUTER_TIMEOUT_MS) || 30_000,
+  cooldownMs = envInt("MSLXDFF_OPENROUTER_COOLDOWN_MS", 30_000),
   retry = {
     network: { attempts: 2, delayMs: 300 },
     429: { attempts: 1, delayMs: 100 },
@@ -33,7 +45,8 @@ export function createOpenRouterProvider({
   headers: extraHeaders,
 } = {}) {
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
-  if (!apiKey) apiKey = loadProviderKey("openrouter");
+
+  const ring = createKeyRing(collectApiKeys(apiKeys, apiKey), { cooldownMs });
 
   let dispatcher = null;
   let agent = null;
@@ -49,32 +62,27 @@ export function createOpenRouterProvider({
     } catch {}
   }
 
-  if (!apiKey) {
-    // 无 key 时禁用一个关键能力并给出可观测错误，但构造不抛（便于测试/降级）
-    apiKey = "";
-  }
-
-  function buildHeaders(body) {
+  function buildHeaders(body, key) {
     const isStream = body?.stream !== false;
     const h = {
       "Content-Type": "application/json",
       "Accept": isStream ? "text/event-stream" : "*/*",
       "User-Agent": "mslxdff",
     };
-    if (apiKey) h["Authorization"] = `Bearer ${apiKey}`;
+    if (key) h["Authorization"] = `Bearer ${key}`;
     h["HTTP-Referer"] = process.env.MSLXDFF_OPENROUTER_REFERER || "https://github.com/mslxdff";
     h["X-Title"] = process.env.MSLXDFF_OPENROUTER_TITLE || "mslxdff";
     return { ...h, ...extraHeaders };
   }
 
-  async function attemptOnce(url, body) {
+  async function attemptOnce(url, body, key) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`openrouter timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
     try {
-      const opts = { method: "POST", headers: buildHeaders(body), body: JSON.stringify(body), signal: controller.signal };
+      const opts = { method: "POST", headers: buildHeaders(body, key), body: JSON.stringify(body), signal: controller.signal };
       if (dispatcher) opts.dispatcher = dispatcher;
       const res = await fetchImpl(url, opts);
-      if (res.status === 401 && !apiKey) return { __needKey: true };
+      if (res.status === 401 && !ring.size) return { __needKey: true };
       return res;
     } catch (err) {
       return err;
@@ -88,14 +96,21 @@ export function createOpenRouterProvider({
     const t0 = performance.now();
     const attempts = [];
     let waitMs = 0;
+
+    // 轮转取一个可用 key；仅当"有 key 但全部在冷却"才算供应商暂时失效。
+    // 没有配置任何 key 时不在这拦截——下降到 401 无 key 报错路径（__needKey）。
+    const key = ring.next();
+    if (!key && ring.size > 0) {
+      const err = new Error(`openrouter: all API keys are in cooldown (last error < ${cooldownMs}ms ago) — provider temporarily unavailable`);
+      err._t = { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - t0), cooldownMs };
+      throw err;
+    }
+
     for (let attempt = 0; ; attempt++) {
       const t = performance.now();
-      const result = await attemptOnce(url, body);
-      attempts.push({
-        attempt,
-        type: result instanceof Error ? "network" : `http${result?.status}`,
-        ms: Math.round(performance.now() - t),
-      });
+      const result = await attemptOnce(url, body, key);
+      const type = result instanceof Error ? "network" : `http${result?.status}`;
+      attempts.push({ attempt, type, ms: Math.round(performance.now() - t) });
       if (result?.__needKey) {
         const err = new Error("openrouter: missing MSLXDFF_OPENROUTER_KEY (chat requires a real key)");
         err._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
@@ -108,6 +123,7 @@ export function createOpenRouterProvider({
           waitMs += entry.delayMs;
           continue;
         }
+        ring.onError(key);
         result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
         throw result;
       }
@@ -117,6 +133,7 @@ export function createOpenRouterProvider({
         waitMs += entry.delayMs;
         continue;
       }
+      if (result.status === 401 || result.status === 403 || result.status === 429 || result.status >= 500) ring.onError(key);
       result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
       return result;
     }
@@ -172,7 +189,15 @@ export function createOpenRouterProvider({
     }
   }
 
-  return { id: "openrouter", chat, listModels, preheat, close, agent };
+  return {
+    id: "openrouter",
+    chat,
+    listModels,
+    preheat,
+    close,
+    agent,
+    keyRing: ring,
+  };
 }
 
 function sleep(ms) {
