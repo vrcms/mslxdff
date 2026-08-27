@@ -8,7 +8,7 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
 import { normalizeModel } from "../src/reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
@@ -369,6 +369,56 @@ if (args.includes("-setto") || args.includes("--setto")) {
     process.exit(1);
   }
   process.exit(0);
+}
+
+// -provider <id> [key|clear]: 配置需鉴权的供应商 API key（如 openrouter）。
+// 无 key 参数且为 TTY → 交互式隐藏输入；非 TTY → 打印用法。key 持久化到 state。
+if (args.includes("-provider") || args.includes("--provider")) {
+  const idx = args.findIndex((x) => x === "-provider" || x === "--provider");
+  const id = args[idx + 1];
+  const sub = args[idx + 2];
+  if (!id) {
+    console.error("usage: mslxdff -provider <id> [key | clear]");
+    console.error("       e.g. mslxdff -provider openrouter <your-key>     set openrouter key");
+    console.error("            mslxdff -provider openrouter                interactive hidden input");
+    console.error("            mslxdff -provider openrouter clear          remove the key");
+    console.error("            mslxdff -provider <id> status               show configured state (masked)");
+    process.exit(1);
+  }
+  const { loadProviderKey, saveProviderKey } = await import("../src/state.js");
+  if (sub === "clear") {
+    saveProviderKey(id, "");
+    console.log(`cleared ${id} API key (provider disabled on next daemon start)`);
+    process.exit(0);
+  }
+  if (sub === "status") {
+    const key = loadProviderKey(id);
+    console.log(`provider: ${id}`);
+    console.log(`key:      ${key ? `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)` : "(empty — chat requests will fail)"}`);
+    process.exit(0);
+  }
+  if (sub && !sub.startsWith("-")) {
+    saveProviderKey(id, sub);
+    console.log(`set ${id} API key (${sub.length} chars) — restart daemon to activate`);
+    process.exit(0);
+  }
+  // 交互式隐藏输入
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    const readline = await import("node:readline/promises");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    const key = await rl.question(`Enter ${id} API key (input hidden): `);
+    rl.close();
+    const clean = String(key || "").trim();
+    if (!clean) {
+      console.log("empty input — nothing changed");
+      process.exit(0);
+    }
+    saveProviderKey(id, clean);
+    console.log(`set ${id} API key (${clean.length} chars) — restart daemon to activate`);
+    process.exit(0);
+  }
+  console.error("provide the key inline (non-TTY): mslxdff -provider openrouter <your-key>");
+  process.exit(1);
 }
 
 // 交互式选择器：↑/↓ 移动，Enter 确认，q/Esc 取消；ANSI 原地重绘
@@ -964,11 +1014,11 @@ if (providerPlugin) {
     cacheFile: join(logDir(), "models.json"),
   });
   providers.push(createOpenCodeProvider({ upstream: opencodeClient, modelsService: opencodeModels }));
-  const orKey = process.env.MSLXDFF_OPENROUTER_KEY || "";
+  const orKey = loadProviderKey("openrouter");
   if (orKey) {
     const { createOpenRouterProvider } = await import("../src/providers/openrouter.js");
     providers.push(createOpenRouterProvider({ apiKey: orKey }));
-    console.log("provider enabled: openrouter (MSLXDFF_OPENROUTER_KEY)");
+    console.log("provider enabled: openrouter");
     appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter" });
   }
   const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
@@ -1385,6 +1435,7 @@ Usage:
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
+  mslxdff -provider openrouter [key|clear|status]  configure a provider API key (interactive hidden input if no key given)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups
@@ -1402,6 +1453,7 @@ Environment:
   MSLXDFF_DAEMON_DIR      daemon pid/log/models dir
   UPSTREAM_BASE_URL       upstream base (default https://opencode.ai)
   UPSTREAM_AUTH_TOKEN     upstream bearer value (default "public")
+  MSLXDFF_OPENROUTER_KEY  openrouter provider API key (or use "mslxdff -provider openrouter", which persists to state)
   UPSTREAM_CONNECT_TIMEOUT_MS  upstream connect timeout (default 30000)
   MODELS_REFRESH_MS       model-list background refresh interval (default 7200000)
   MSLXDFF_MODEL_COOLDOWN_MS  fallback cooldown after a model error (default 60000)
