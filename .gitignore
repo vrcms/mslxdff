@@ -5,3 +5,9 @@ state.json
 9router/
 hermes-agent/
 free-anon-extra.txt
+
+# 供应商 API key 状态：任何命名的 state 文件都绝不入库
+**/*state.json
+**/*state*.json
+**/*key*.json
+*.mslxdff-state.json
