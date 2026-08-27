@@ -1,7 +1,7 @@
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { buildSystemPrompt, getModelsForPrompt } from "./prompt.js";
-import { getToolDefs, execCommand, readFileTool } from "./tools.js";
+import { getToolDefs, execCommand, readFileTool, curlTool } from "./tools.js";
 import { chatWithFallback, summarizeHistory } from "./upstream.js";
 import { loadHistory, saveHistory, clearHistory, histPath, estimateChars, needsCompress } from "./store.js";
 import { CHAT_KEEP_RECENT, CHAT_MAX_TOOL_LOOPS } from "./config.js";
@@ -87,6 +87,12 @@ async function runAgentTurn(userText, messages) {
         const r = await readFileTool(args);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output.slice(0, 6000)}`;
         console.log(`\x1b[90m→ 读取: ${args.path} ${r.ok ? "OK" : "FAIL"}\x1b[0m`);
+      } else if (name === "curl") {
+        const u = String(args.url || "").trim();
+        console.log(`\x1b[90m→ 探活: ${u} ${args.method || "GET"}\x1b[0m`);
+        const r = await curlTool(args);
+        result = `${r.ok ? "OK" : "FAIL"}: ${r.output.slice(0, 6000)}`;
+        console.log(r.ok ? `\x1b[32m${r.output.slice(0, 800)}\x1b[0m` : `\x1b[31m${r.output.slice(0, 800)}\x1b[0m`);
       } else {
         result = `unknown tool ${name}`;
       }

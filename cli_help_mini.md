@@ -59,9 +59,10 @@
 
 ## 工具调用规范
 
-- 时机：用户意图明确需执行命令时，调用 `run_command`；需查看文件时调用 `read_file`。
+- 时机：用户意图明确需执行命令时，调用 `run_command`；需查看文件时调用 `read_file`；需探活网络/服务时调用 `curl`。
 - `run_command` 参数：`command: "-model set hy3-free"`（不含 mslxdff 前缀）
 - `read_file` 参数：`path: "src/logs.js"` 或 `path: "~/.config/mslxdff/events.log"`（项目内或日志目录）
+- `curl` 参数：`url: "upstream"` / `"local/health"` / `"https://opencode.ai/zen/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头、本机 /v1/* 自动带 token
 - 一次一工具，执行后看结果再决定下一步。
 
 ## 示例

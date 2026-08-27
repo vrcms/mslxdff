@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import os from "node:os";
 import { isFreeModel } from "./models.js";
 import { defaultStateFile } from "./state.js";
+import { fmtShanghaiYMDHMS } from "./time.js";
 
 let UndiciAgent = null;
 let UndiciFetch = null;
@@ -98,7 +99,7 @@ export function createUpstreamClient({
 
   function logFreeAnon({ model, publicStatus, anonStatus, anonAttempts, hit, totalMs }) {
     const file = freeAnonLogFile();
-    const line = `${new Date().toISOString()} model=${model} public=429 anonTries=${anonAttempts} anonStatus=${anonStatus ?? "none"} hit=${hit ? "YES额外额度" : "NO无额外"} totalMs=${totalMs} count=${hit ? "1" : "0"}\n`;
+    const line = `${fmtShanghaiYMDHMS(new Date())} model=${model} public=429 anonTries=${anonAttempts} anonStatus=${anonStatus ?? "none"} hit=${hit ? "YES额外额度" : "NO无额外"} totalMs=${totalMs} count=${hit ? "1" : "0"}\n`;
     try {
       mkdirSync(dirname(file), { recursive: true });
     } catch {}
