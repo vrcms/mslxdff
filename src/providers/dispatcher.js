@@ -14,10 +14,16 @@ export function createProviderDispatcher(providers = []) {
     };
   }
 
-  async function chat(body) {
+  async function chat(body, opts = {}) {
     const { provider, raw } = resolve(body?.model);
     if (!provider) throw new Error(`no provider for model ${body?.model ?? "(empty)"}`);
     const forwarded = raw === body?.model ? body : { ...body, model: raw };
+    // ADR-0008：本请求携带瞬时共享 key（shareKeys 由组员侧按 header 解析后传入）。
+    // 命中时用共享 key 覆盖该供应商的 key 集合，组员无需配置自己的 key。
+    const sharedKeys = opts?.shareKeys?.[provider.id];
+    if (sharedKeys && sharedKeys.length && typeof provider.chatWithKeys === "function") {
+      return provider.chatWithKeys(forwarded, sharedKeys);
+    }
     return provider.chat(forwarded);
   }
 

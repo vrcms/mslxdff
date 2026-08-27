@@ -58,6 +58,7 @@ mslxdff 是把 opencode.ai 的免费模型池（以及可选的 OpenRouter 免�
 - **前缀规则**：`<provider>/<raw-id>`。裸 id 恒指默认供应商（opencode），向后兼容。模型对外 id 由各 provider 用 `joinModelId` 前缀化，客户端看到的就是带前缀的完整 id；转发时 dispatcher 剥前缀。（ADR-0007）
 - **默认供应商 opencode 恒启用**；`openrouter` 在配了任一 key 时自动启用（env `MSLXDFF_OPENROUTER_KEY` 或 state `providerKeys.openrouter`）。
 - **未识别前缀**回退：整体当裸 id 交给默认供应商处理（例如用户传 `claude/sonnet` 想走 opencode，兼容）。
+- **瞬时 key 共享（ADR-0008）**：供应商可配置 `shareKeysToPeers`（默认关）。开启后，本节点在 outgoing 转发（peer/组员接力）时把该供应商 key 列表放 `x-mslxdff-share-keys` 头附带；组员仅本次请求借用，用完即弃不落盘。**opencode 恒被排除**（无 key、限流以 IP 为主，IP 分散由 peer 转发天然实现）。
 
 ## 4. 请求链路
 
@@ -92,6 +93,7 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | 模型自动选择 | auto: 冷却>首选>延迟EMA>错误时间排序 | `src/auto.js` | `MSLXDFF_PREFERRED_MODEL`（默认 big-pickle） |
 | 模型勾选集 | state `modelPicks` 限制候选池；显式指定真实上游模型自动勾选 | `src/auto.js` | `-model pick/unpick/…` |
 | 多账户 key 轮转 | 每供应商多 key round-robin + 30s 冷却隔离（401/403/429/5xx），全冷却即报失效 | `src/providers/keyring.js` | `MSLXDFF_OPENROUTER_COOLDOWN_MS`、`-provider` |
+| 瞬时 key 共享 | 开启 share 的供应商在 outgoing 转发时附带 key 给组员借用一次（不落盘）；opencode 恒排除 | `src/providers/share-keys.js`, `src/routes/peers.js` | `-provider <id> share on\|off`、`MSLXDFF_<ID>_SHARE_KEYS` |
 | 冷却/慢模型 | 模型出错 60s 冷却(慢 5min)，`slow:true` 排最后 | `src/upstream.js`, `src/auto.js` | `SLOW_TOTAL_MS`(20s)、`MSLXDFF_MODEL_COOLDOWN_MS`、`STREAM_TIMEOUT_MS`(25s)、`MAX_STREAM_MS`(120s) |
 | 首块对冲 (hedge) | 流式 1s 未回发并发组员/备用竞速 | `src/routes/chat/*` + `hedge.js` | `MSLXDFF_HEDGE_DELAY_MS`(1000) |
 | 群组接力 | 组员/组长网格，赶 IP 级限流，宽带成员经 Leader 中继 | `src/routes/chat/peer*` | `-creategroup/-addtogroup/-group…` |
@@ -113,7 +115,7 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | `-port N` | 持久化端口（写 state，重启 daemon） |
 | `-model list/set/status/refresh/pick/unpick/…` | 模型查看/默认/健康/勾选集管理 |
 | `-models` | 交互式模型多选 |
-| `-provider <id> [key...|add|remove|list|clear]` | 配置供应商 key（多 key 轮转，remove 支持序号；list 1 起编） |
+| `-provider <id> [key...|add|remove|list|clear|share]` | 配置供应商 key（多 key 轮转，remove 支持序号；list 1 起编；share on\|off 开关键瞬时共享，ADR-0008） |
 | `-setto workbuddy [modelId]` | 同步默认模型到 WorkBuddy |
 | `-creategroup` / `-addtogroup` / `-group …` / `-leavegroup` / `-delgroup` | 群组生命周期（组员用 `-group leave`，组长用 `-delgroup`，ADR-0005/0006） |
 | `-showtoken` / `-refresh-token` | 读 / 轮换 auth token |
@@ -167,8 +169,9 @@ mslxdff/
 │       ├── dispatcher.js      前缀路由、聚合 listModels、剥前缀
 │       ├── model-id.js        splitModelId/joinModelId/normalizeProviderId
 │       ├── opencode.js        opencode 上游 provider
-│       ├── openrouter.js      OpenRouter provider（keyring + 品牌头 + 免费 filter）
+│       ├── openrouter.js      OpenRouter provider（keyring + 品牌头 + 免费 filter + chatWithKeys 瞬时共享）
 │       ├── keyring.js         多 key 轮转 + 冷却隔离
+│       ├── share-keys.js      ADR-0008 瞬时共享：header 组装/解析、opencode 恒排除
 │       └── index.js           导出
 ├── docs/
 │   ├── ARCHITECTURE.md        ← 本文件（总览 + 变更契约）
@@ -190,4 +193,5 @@ mslxdff/
 | 0005 | 组网 mesh | 组员/组长接力，IP 级限流分散 |
 | 0006 | 宽带成员 | 动态 IP 成员经 Leader 中继 |
 | 0007 | 多供应商前缀 | `<provider>/<id>` 前缀路由，默认 opencode 裸 id（0.1.56 新增） |
+| 0008 | 瞬时 key 共享 | shareKeysToPeers 开关（默认关），转发时附带 key 给组员借用一次，opencode 恒排除（0.1.57） |
 

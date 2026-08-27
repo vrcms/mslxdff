@@ -250,6 +250,25 @@ export function removeProviderKeys(id, targets = [], opts = {}) {
   return saveProviderKeys(id, list, opts);
 }
 
+// 供应商 key 瞬时共享开关（ADR-0008）：默认 false；true = 本节点在 outgoing 转发时附带
+// 该供应商 key 给组员（瞬时借用，不落盘）。env `MSLXDFF_<ID>_SHARE_KEYS` 可覆盖 state。
+export const providerShareEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_SHARE_KEYS`;
+
+export function loadProviderShareKeys(id, { file = defaultStateFile() } = {}) {
+  const env = process.env[providerShareEnv(id)] || "";
+  if (env) return ["1", "true", "on", "yes"].includes(String(env).trim().toLowerCase());
+  const map = readState(file).providerShareKeys;
+  return !!(map && typeof map === "object" && map[id]);
+}
+
+export function saveProviderShareKeys(id, on, { file = defaultStateFile() } = {}) {
+  const map = { ...(readState(file).providerShareKeys || {}) };
+  if (on) map[id] = true;
+  else delete map[id];
+  writeStateImmediate(file, { providerShareKeys: map });
+  return !!on;
+}
+
 // 常用模型勾选集（auto 候选池白名单）：空数组 = 不启用筛选（全量 auto）
 export function loadModelPicks({ file = defaultStateFile() } = {}) {
   const picks = readState(file).modelPicks;

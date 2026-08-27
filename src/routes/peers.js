@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { isAutoModel } from "../auto.js";
 import { errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
+import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
 
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
@@ -63,15 +64,19 @@ async function forwardToPeer(peer, body, model, hops) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PEER_TIMEOUT_MS);
   try {
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${peer.token}`,
+      "x-mslxdff-hops": String(hops + 1),
+      "x-mslxdff-model-lock": model,
+      "Accept": "text/event-stream",
+    };
+    // ADR-0008：该模型命中的供应商若开启 share → 附带瞬时 key 给组员借用（opencode 恒排除）
+    const shareHeader = buildShareKeysHeader(model);
+    if (shareHeader) headers[SHARE_KEYS_HEADER] = shareHeader;
     return await fetch(`${peer.url}/v1/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${peer.token}`,
-        "x-mslxdff-hops": String(hops + 1),
-        "x-mslxdff-model-lock": model,
-        "Accept": "text/event-stream",
-      },
+      headers,
       body: JSON.stringify({ ...body, model }),
       signal: controller.signal,
     });

@@ -379,19 +379,40 @@ if (args.includes("-provider") || args.includes("--provider")) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
+    console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
-  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys } = await import("../src/state.js");
+  if (id === "opencode" || id === "oc") {
+    console.log("opencode is the default (bare) provider — it needs no API key and can never be shared with peers");
+    console.log("(its IP-based rate limit is spread by peer forwarding itself)");
+    process.exit(0);
+  }
+  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys, loadProviderShareKeys, saveProviderShareKeys } = await import("../src/state.js");
   if (sub === "clear") {
     saveProviderKeys(id, []);
     console.log(`cleared ${id} API keys (provider disabled on next daemon start)`);
+    process.exit(0);
+  }
+  if (sub === "share") {
+    const on = rest[1];
+    if (!on) {
+      console.log(`share keys to peers: ${loadProviderShareKeys(id) ? "ON" : "off"}`);
+      process.exit(0);
+    }
+    if (!["on", "off", "1", "0", "true", "false"].includes(String(on).toLowerCase())) {
+      console.error("usage: mslxdff -provider openrouter share on|off");
+      process.exit(1);
+    }
+    const state = ["on", "1", "true"].includes(String(on).toLowerCase());
+    saveProviderShareKeys(id, state);
+    console.log(`share keys to peers: ${state ? "ON" : "off"} — restart daemon to activate`);
     process.exit(0);
   }
   if (sub === "list" || sub === "status") {
@@ -403,6 +424,8 @@ if (args.includes("-provider") || args.includes("--provider")) {
     } else {
       console.log(`provider: ${id} (no keys configured)`);
     }
+    console.log(`  share keys to peers:   ${loadProviderShareKeys(id) ? "ON" : "off"}   (mslxdff -provider ${id} share on|off)`);
+    console.log(`  NOTE: opencode is the default provider and can never be shared`);
     process.exit(0);
   }
   if (sub === "add") {
