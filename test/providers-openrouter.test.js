@@ -128,3 +128,80 @@ test("openrouter chat retries a 5xx once then succeeds", async () => {
     await closeSrv(srv);
   }
 });
+test("openrouter chat rotates multiple apiKeys round-robin", async () => {
+  const seen = [];
+  const srv = await stub((req, res) => {
+    seen.push(req.headers["authorization"]);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  let p;
+  try {
+    p = createOpenRouterProvider({ apiKeys: ["sk-a", "sk-b"], baseUrl: urlOf(srv), connectTimeoutMs: 2000 });
+    await p.chat({ model: "x:free", messages: [], stream: false });
+    await p.chat({ model: "x:free", messages: [], stream: false });
+    await p.chat({ model: "x:free", messages: [], stream: false });
+    assert.deepEqual(seen, ["Bearer sk-a", "Bearer sk-b", "Bearer sk-a"]);
+  } finally {
+    await p?.close();
+    await closeSrv(srv);
+  }
+});
+
+test("openrouter chat: all keys cooldown => throws provider unavailable", async () => {
+  let calls = 0;
+  const used = [];
+  const srv = await stub((req, res) => {
+    calls++;
+    used.push(req.headers["authorization"]);
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  let p;
+  try {
+    p = createOpenRouterProvider({
+      apiKeys: ["sk-a", "sk-b"],
+      baseUrl: urlOf(srv),
+      cooldownMs: 60_000,
+      retry: { 502: { attempts: 0 } },
+      connectTimeoutMs: 1000,
+    });
+    await assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 502); // sk-a 失败（返回 res，不抛）
+    await assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 502); // sk-b 失败
+    // 两个 key 均已在冷却 → 第三请求直接报 provider unavailable，零上游调用
+    await assert.rejects(() => p.chat({ model: "x:free", messages: [] }), /cooldown|unavailable/);
+    assert.equal(calls, 2, "third request must not hit upstream");
+    assert.deepEqual(used.map((h) => h), ["Bearer sk-a", "Bearer sk-b"]);
+  } finally {
+    await p?.close();
+    await closeSrv(srv);
+  }
+});
+
+test("openrouter chat: a failing key is cooled while healthy key still serves", async () => {
+  const used = [];
+  const srv = await stub((req, res) => {
+    used.push(req.headers["authorization"]);
+    if (req.headers["authorization"] === "Bearer sk-bad") {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end("{}");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  let p;
+  try {
+    p = createOpenRouterProvider({ apiKeys: ["sk-bad", "sk-good"], baseUrl: urlOf(srv), cooldownMs: 60_000, connectTimeoutMs: 2000 });
+    // 轮转：第 1 次 sk-bad(429 失败，默认重试 1 次 → 两次请求，冷却)；第 2 次 sk-good(成功)；
+    // 第 3 次 sk-bad 已冷却 → 直接 sk-good
+    assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 429);
+    await p.chat({ model: "x:free", messages: [] });
+    const r3 = await p.chat({ model: "x:free", messages: [] });
+    assert.equal(r3.status, 200);
+    assert.deepEqual(used, ["Bearer sk-bad", "Bearer sk-bad", "Bearer sk-good", "Bearer sk-good"]);
+  } finally {
+    await p?.close();
+    await closeSrv(srv);
+  }
+});

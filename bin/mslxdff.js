@@ -8,7 +8,7 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey, loadProviderKeys } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
 import { normalizeModel } from "../src/reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
@@ -371,53 +371,93 @@ if (args.includes("-setto") || args.includes("--setto")) {
   process.exit(0);
 }
 
-// -provider <id> [key|clear]: 配置需鉴权的供应商 API key（如 openrouter）。
-// 无 key 参数且为 TTY → 交互式隐藏输入；非 TTY → 打印用法。key 持久化到 state。
+// -provider <id> [key...|add|remove|list|clear]: 配置需鉴权的供应商 API key（如 openrouter）。
+// 行为：无参数且 TTY → 交互式隐藏输入（多行直到空行，逐一追加）；非 TTY → 打印用法。key 持久化到 state。
 if (args.includes("-provider") || args.includes("--provider")) {
   const idx = args.findIndex((x) => x === "-provider" || x === "--provider");
   const id = args[idx + 1];
   const sub = args[idx + 2];
+  const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key | clear]");
-    console.error("       e.g. mslxdff -provider openrouter <your-key>     set openrouter key");
-    console.error("            mslxdff -provider openrouter                interactive hidden input");
-    console.error("            mslxdff -provider openrouter clear          remove the key");
-    console.error("            mslxdff -provider <id> status               show configured state (masked)");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear]");
+    console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
+    console.error("            mslxdff -provider openrouter add sk-4             append one key");
+    console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
+    console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
+    console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
+    console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
-  const { loadProviderKey, saveProviderKey } = await import("../src/state.js");
+  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKey } = await import("../src/state.js");
   if (sub === "clear") {
-    saveProviderKey(id, "");
-    console.log(`cleared ${id} API key (provider disabled on next daemon start)`);
+    saveProviderKeys(id, []);
+    console.log(`cleared ${id} API keys (provider disabled on next daemon start)`);
     process.exit(0);
   }
-  if (sub === "status") {
-    const key = loadProviderKey(id);
-    console.log(`provider: ${id}`);
-    console.log(`key:      ${key ? `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)` : "(empty — chat requests will fail)"}`);
+  if (sub === "list" || sub === "status") {
+    const keys = loadProviderKeys(id);
+    if (keys.length) {
+      console.log(`provider: ${id} (${keys.length} key${keys.length > 1 ? "s" : ""})`);
+      keys.forEach((k, i) => console.log(`  [${i}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
+    } else {
+      console.log(`provider: ${id} (no keys configured)`);
+    }
+    process.exit(0);
+  }
+  if (sub === "add") {
+    const key = rest[1];
+    if (!key) {
+      console.error("usage: mslxdff -provider openrouter add <key>");
+      process.exit(1);
+    }
+    const added = addProviderKey(id, key);
+    console.log(`added ${id} API key (now ${added.length} total) — restart daemon to activate`);
+    process.exit(0);
+  }
+  if (sub === "remove") {
+    const key = rest[1];
+    if (!key) {
+      console.error("usage: mslxdff -provider openrouter remove <key>");
+      process.exit(1);
+    }
+    const remaining = removeProviderKey(id, key);
+    console.log(`removed ${id} API key (now ${remaining.length} total) — restart daemon to activate`);
     process.exit(0);
   }
   if (sub && !sub.startsWith("-")) {
-    saveProviderKey(id, sub);
-    console.log(`set ${id} API key (${sub.length} chars) — restart daemon to activate`);
+    const keys = rest.filter((k) => !k.startsWith("-"));
+    if (!keys.length) {
+      console.error("no key given");
+      process.exit(1);
+    }
+    saveProviderKeys(id, keys);
+    console.log(`set ${id} API keys (${keys.length}: ${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}) — restart daemon to activate`);
     process.exit(0);
   }
-  // 交互式隐藏输入
+  // 交互式隐藏输入：多行直到空行，逐一追加到现有 keys
   if (process.stdin.isTTY && process.stdout.isTTY) {
     const readline = await import("node:readline/promises");
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    const key = await rl.question(`Enter ${id} API key (input hidden): `);
+    console.log(`Enter ${id} API keys, one per line (input hidden). Blank line to finish:`);
+    const existing = loadProviderKeys(id);
+    const collected = [];
+    for (;;) {
+      const key = await rl.question(existing.length || collected.length ? "" : "");
+      const clean = String(key || "").trim();
+      if (!clean) break;
+      collected.push(clean);
+    }
     rl.close();
-    const clean = String(key || "").trim();
-    if (!clean) {
+    if (!collected.length) {
       console.log("empty input — nothing changed");
       process.exit(0);
     }
-    saveProviderKey(id, clean);
-    console.log(`set ${id} API key (${clean.length} chars) — restart daemon to activate`);
+    for (const k of collected) addProviderKey(id, k);
+    const total = (await import("../src/state.js")).loadProviderKeys(id).length;
+    console.log(`added ${collected.length} ${id} API key(s) (now ${total} total) — restart daemon to activate`);
     process.exit(0);
   }
-  console.error("provide the key inline (non-TTY): mslxdff -provider openrouter <your-key>");
+  console.error("provide keys inline (non-TTY): mslxdff -provider openrouter <key1> [key2 ...]");
   process.exit(1);
 }
 
@@ -1014,12 +1054,12 @@ if (providerPlugin) {
     cacheFile: join(logDir(), "models.json"),
   });
   providers.push(createOpenCodeProvider({ upstream: opencodeClient, modelsService: opencodeModels }));
-  const orKey = loadProviderKey("openrouter");
-  if (orKey) {
+  const orKeys = loadProviderKeys("openrouter");
+  if (orKeys.length) {
     const { createOpenRouterProvider } = await import("../src/providers/openrouter.js");
-    providers.push(createOpenRouterProvider({ apiKey: orKey }));
-    console.log("provider enabled: openrouter");
-    appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter" });
+    providers.push(createOpenRouterProvider({ apiKeys: orKeys }));
+    console.log(`provider enabled: openrouter (${orKeys.length} key${orKeys.length > 1 ? "s" : ""})`);
+    appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter", keys: orKeys.length });
   }
   const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
   upstream = createProviderDispatcher(providers);
@@ -1435,7 +1475,7 @@ Usage:
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
-  mslxdff -provider openrouter [key|clear|status]  configure a provider API key (interactive hidden input if no key given)
+  mslxdff -provider openrouter [key...|add|remove|list|clear]  configure provider API keys (multiple keys = rotating accounts; interactive hidden append on empty input)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups
@@ -1453,7 +1493,7 @@ Environment:
   MSLXDFF_DAEMON_DIR      daemon pid/log/models dir
   UPSTREAM_BASE_URL       upstream base (default https://opencode.ai)
   UPSTREAM_AUTH_TOKEN     upstream bearer value (default "public")
-  MSLXDFF_OPENROUTER_KEY  openrouter provider API key (or use "mslxdff -provider openrouter", which persists to state)
+  MSLXDFF_OPENROUTER_KEY  openrouter provider API keys(s) (single env value; multiple use "mslxdff -provider openrouter k1 k2 ..." to persist)
   UPSTREAM_CONNECT_TIMEOUT_MS  upstream connect timeout (default 30000)
   MODELS_REFRESH_MS       model-list background refresh interval (default 7200000)
   MSLXDFF_MODEL_COOLDOWN_MS  fallback cooldown after a model error (default 60000)

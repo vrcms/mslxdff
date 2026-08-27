@@ -201,25 +201,49 @@ export function loadPreferredModel({ file = defaultStateFile() } = {}) {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
-// 供应商 API key：state 存 `providerKeys: { openrouter: "sk-..." }`
+// 供应商 API key：state 存 `providerKeys: { openrouter: ["sk-1", "sk-2"] }`
+// 兼容旧版单字符串 `openrouter: "sk-1"`（读到自动转数组）。
 // env `MSLXDFF_<ID>_KEY`（大写）优先，state 兜底；key 为空视为未配置
 export const providerKeyEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_KEY`;
 
-export function loadProviderKey(id, { file = defaultStateFile() } = {}) {
+export function loadProviderKeys(id, { file = defaultStateFile() } = {}) {
   const env = (process.env[providerKeyEnv(id)] || "").trim();
-  if (env) return env;
+  if (env) return [env];
   const keys = readState(file).providerKeys;
   const v = keys && typeof keys === "object" ? keys[id] : undefined;
-  return typeof v === "string" && v.trim() ? v.trim() : "";
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
+  if (Array.isArray(v)) return [...new Set(v.filter((x) => typeof x === "string" && x.trim().length))];
+  return [];
 }
 
-export function saveProviderKey(id, key, { file = defaultStateFile() } = {}) {
+export function loadProviderKey(id, opts = {}) {
+  return loadProviderKeys(id, opts)[0] || "";
+}
+
+export function saveProviderKeys(id, list, { file = defaultStateFile() } = {}) {
   const keys = { ...(readState(file).providerKeys || {}) };
-  const clean = String(key || "").trim();
-  if (clean) keys[id] = clean;
+  const clean = [...new Set((Array.isArray(list) ? list : []).map((k) => String(k || "").trim()).filter(Boolean))];
+  if (clean.length) keys[id] = clean;
   else delete keys[id];
   writeStateImmediate(file, { providerKeys: keys });
   return clean;
+}
+
+export function saveProviderKey(id, key, opts = {}) {
+  const list = [...loadProviderKeys(id, opts)];
+  const clean = String(key || "").trim();
+  if (clean && !list.includes(clean)) list.push(clean);
+  return saveProviderKeys(id, clean ? list : [], opts);
+}
+
+export function addProviderKey(id, key, opts = {}) {
+  return saveProviderKey(id, key, opts);
+}
+
+export function removeProviderKey(id, key, opts = {}) {
+  const clean = String(key || "").trim();
+  const list = loadProviderKeys(id, opts).filter((k) => k !== clean);
+  return saveProviderKeys(id, list, opts);
 }
 
 // 常用模型勾选集（auto 候选池白名单）：空数组 = 不启用筛选（全量 auto）
