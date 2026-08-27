@@ -43,6 +43,7 @@ export function createOpenRouterProvider({
   },
   fetchImpl,
   headers: extraHeaders,
+  noAgent = false,
 } = {}) {
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
 
@@ -50,7 +51,7 @@ export function createOpenRouterProvider({
 
   let dispatcher = null;
   let agent = null;
-  if (UndiciAgent) {
+  if (UndiciAgent && !noAgent) {
     try {
       agent = new UndiciAgent({
         keepAliveTimeout: envInt("MSLXDFF_OA_KEEPALIVE_TIMEOUT", 30_000),
@@ -75,14 +76,14 @@ export function createOpenRouterProvider({
     return { ...h, ...extraHeaders };
   }
 
-  async function attemptOnce(url, body, key) {
+  async function attemptOnce(url, body, key, activeRing) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`openrouter timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
     try {
       const opts = { method: "POST", headers: buildHeaders(body, key), body: JSON.stringify(body), signal: controller.signal };
       if (dispatcher) opts.dispatcher = dispatcher;
       const res = await fetchImpl(url, opts);
-      if (res.status === 401 && !ring.size) return { __needKey: true };
+      if (res.status === 401 && !activeRing.size) return { __needKey: true };
       return res;
     } catch (err) {
       return err;
@@ -91,7 +92,7 @@ export function createOpenRouterProvider({
     }
   }
 
-  async function chat(body) {
+  async function runChat(body, activeRing, sourceKey) {
     const url = `${baseUrl}/chat/completions`;
     const t0 = performance.now();
     const attempts = [];
@@ -99,8 +100,8 @@ export function createOpenRouterProvider({
 
     // 轮转取一个可用 key；仅当"有 key 但全部在冷却"才算供应商暂时失效。
     // 没有配置任何 key 时不在这拦截——下降到 401 无 key 报错路径（__needKey）。
-    const key = ring.next();
-    if (!key && ring.size > 0) {
+    const key = activeRing.next();
+    if (!key && activeRing.size > 0) {
       const err = new Error(`openrouter: all API keys are in cooldown (last error < ${cooldownMs}ms ago) — provider temporarily unavailable`);
       err._t = { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - t0), cooldownMs };
       throw err;
@@ -108,11 +109,11 @@ export function createOpenRouterProvider({
 
     for (let attempt = 0; ; attempt++) {
       const t = performance.now();
-      const result = await attemptOnce(url, body, key);
+      const result = await attemptOnce(url, body, key, activeRing);
       const type = result instanceof Error ? "network" : `http${result?.status}`;
       attempts.push({ attempt, type, ms: Math.round(performance.now() - t) });
       if (result?.__needKey) {
-        const err = new Error("openrouter: missing MSLXDFF_OPENROUTER_KEY (chat requires a real key)");
+        const err = new Error(`openrouter: missing ${sourceKey} (chat requires a real key)`);
         err._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
         throw err;
       }
@@ -123,7 +124,7 @@ export function createOpenRouterProvider({
           waitMs += entry.delayMs;
           continue;
         }
-        ring.onError(key);
+        activeRing.onError(key);
         result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
         throw result;
       }
@@ -133,10 +134,20 @@ export function createOpenRouterProvider({
         waitMs += entry.delayMs;
         continue;
       }
-      if (result.status === 401 || result.status === 403 || result.status === 429 || result.status >= 500) ring.onError(key);
+      if (result.status === 401 || result.status === 403 || result.status === 429 || result.status >= 500) activeRing.onError(key);
       result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
       return result;
     }
+  }
+
+  async function chat(body) {
+    return runChat(body, ring, "MSLXDFF_OPENROUTER_KEY");
+  }
+
+  // ADR-0008 瞬时共享：用组员方传来的临时 key 发布请求（不污染本 provider 的持久 ring）。
+  async function chatWithKeys(body, keys) {
+    const tmp = createKeyRing(keys, { cooldownMs });
+    return runChat(body, tmp, "shared provider keys");
   }
 
   // 拉免费模型：pricing 全 0 + 前缀化；可匿名
@@ -192,6 +203,7 @@ export function createOpenRouterProvider({
   return {
     id: "openrouter",
     chat,
+    chatWithKeys,
     listModels,
     preheat,
     close,

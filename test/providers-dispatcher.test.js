@@ -113,3 +113,32 @@ test("dispatcher falls back to default provider for unknown prefixed model, forw
     await closeSrv(up);
   }
 });
+test("dispatcher uses chatWithKeys when shareKeys hit the provider (no local key needed)", async () => {
+  let usedKeys = null;
+  const d = createProviderDispatcher([
+    { id: "opencode", chat: async (b) => ({ status: 500, body: null, _t: {} }), listModels: async () => [], close: async () => {} },
+    {
+      id: "openrouter",
+      chat: async (b) => ({ status: 500, body: null, _t: {} }),
+      chatWithKeys: async (b, keys) => { usedKeys = keys; return { status: 200, body: null, _t: {} }; },
+      listModels: async () => [],
+      close: async () => {},
+    },
+  ]);
+  try {
+    const res = await d.chat({ model: "openrouter/google/gemma:free", messages: [] }, { shareKeys: { openrouter: ["sk-shared-1", "sk-shared-2"] } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(usedKeys, ["sk-shared-1", "sk-shared-2"]);
+  } finally { await d.close(); }
+});
+
+test("dispatcher ignores shareKeys for providers that opt out (chatWithKeys absent)", async () => {
+  const d = createProviderDispatcher([
+    { id: "opencode", chat: async (b) => ({ status: 200, body: null, _t: {} }), listModels: async () => [], close: async () => {} },
+  ]);
+  try {
+    // bare model + shareKeys 传入但 opencode 无 chatWithKeys → 走普通 chat
+    const res = await d.chat({ model: "big-pickle", messages: [] }, { shareKeys: { opencode: ["sk-x"] } });
+    assert.equal(res.status, 200);
+  } finally { await d.close(); }
+});

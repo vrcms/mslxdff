@@ -4,6 +4,7 @@ import { isAutoModel } from "../../auto.js";
 import { clientIp, json, readBody, parseHops, summarizePrompt, errMsg } from "../helpers.js";
 import { hedgeDelayMs, shouldHedge } from "../hedge.js";
 import { runHook } from "../../plugins.js";
+import { parseShareKeysHeader, SHARE_KEYS_HEADER } from "../../providers/share-keys.js";
 import { handleHedge } from "./hedge-handler.js";
 import { handleLocalRelay } from "./local-handler.js";
 import { handlePeerRelay } from "./peer-handler.js";
@@ -33,6 +34,8 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
   const stages = [];
   const mark = (name) => stages.push([name, Math.round(performance.now() - perf0)]);
   const hops = parseHops(req.headers["x-mslxdff-hops"]);
+  // ADR-0008：瞬时共享 key（组员侧接收）。本请求内有效，用完即弃。
+  const shareKeys = parseShareKeysHeader(req.headers[SHARE_KEYS_HEADER] || "");
   const lockModel = req.headers["x-mslxdff-model-lock"] || "";
   const rawModel = body.model || "";
   const requested = normalizeModel(lockModel || rawModel || "");
@@ -66,6 +69,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body.stream), durationMs: Date.now() - startedAt, ...info }).catch(() => {});
   };
   evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body), rawModel, requested, lockModel: lockModel || null });
+  if (Object.keys(shareKeys).length) evt("share-keys", { reqId, providers: Object.keys(shareKeys) });
   evt("ordered", { reqId, order, canFallback, canForwardPeers, useAuto, statuses: auto?.statuses?.() ?? null });
 
   if (plugins?.length && !lockModel) {
@@ -106,7 +110,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     const tUp = performance.now();
     evt("upstream-try", { reqId, model, attempt: idx + 1 });
     try {
-      upRes = await upstream.chat(forwarded);
+      upRes = await upstream.chat(forwarded, { shareKeys: Object.keys(shareKeys).length ? shareKeys : undefined });
       evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });
     } catch (err) {
       if (auto) await auto.recordError(model, { message: errMsg(err) });
