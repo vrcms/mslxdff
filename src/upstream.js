@@ -92,6 +92,74 @@ export function createUpstreamClient({
     return true;
   }
 
+  function isResponsesModel(model) {
+    const m = String(model || "").toLowerCase();
+    return m.startsWith("muse-spark");
+  }
+
+  function chatToResponsesBody(chatBody) {
+    const msgs = Array.isArray(chatBody?.messages) ? chatBody.messages : [];
+    const system = msgs.filter((m) => m.role === "system").map((m) => String(m.content || "")).join("\n");
+    const nonSystem = msgs.filter((m) => m.role !== "system");
+    // 取最后一条 user 内容作为 input，其余拼到 input 前（保留上下文）
+    const inputParts = nonSystem.map((m) => {
+      const c = m.content;
+      if (typeof c === "string") return `${m.role}: ${c}`;
+      if (Array.isArray(c)) return `${m.role}: ${c.map((x) => x.text || "").join("")}`;
+      return `${m.role}: ${String(c || "")}`;
+    });
+    const input = inputParts.join("\n\n") || "hi";
+    const out = {
+      model: chatBody.model,
+      input,
+      stream: false, // muse-spark 的 chat 流式经 responses 的 SSE 格式不同，先以非流式 200 保证可用
+    };
+    if (system) out.instructions = system;
+    if (chatBody.tools) out.tools = chatBody.tools;
+    if (chatBody.tool_choice) out.tool_choice = chatBody.tool_choice;
+    if (chatBody.temperature != null) out.temperature = chatBody.temperature;
+    if (chatBody.max_tokens != null) out.max_output_tokens = chatBody.max_tokens;
+    return out;
+  }
+
+  function responsesToChatJson(respJson) {
+    // responses: {id, model, output:[{type:reasoning},{type:message, content:[{type:output_text,text}]}]}
+    let text = "";
+    for (const item of respJson.output || []) {
+      if (item.type === "message" && item.role === "assistant") {
+        for (const c of item.content || []) {
+          if (c.type === "output_text") text += c.text || "";
+          else if (c.type === "text") text += c.text || "";
+        }
+      }
+    }
+    if (!text) {
+      // 兜底：取 output_text 的第一个
+      for (const item of respJson.output || []) {
+        if (item.type === "message") {
+          const t = item.content?.[0]?.text;
+          if (t) { text = t; break; }
+        }
+      }
+    }
+    if (!text) text = "";
+    const chatJson = {
+      id: respJson.id || `resp_${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor((respJson.created_at || Date.now() / 1000)),
+      model: respJson.model,
+      choices: [
+        {
+          index: 0,
+          finish_reason: respJson.status === "completed" ? "stop" : "length",
+          message: { role: "assistant", content: text },
+        },
+      ],
+      usage: respJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    };
+    return chatJson;
+  }
+
   function freeAnonLogFile() {
     // 按用户要求：放在当前项目目录，方便一眼看到；可用 env 覆盖
     return process.env.MSLXDFF_FREE_ANON_LOG || join(process.cwd(), "free-anon-extra.txt");
@@ -135,13 +203,15 @@ export function createUpstreamClient({
   }
 
   async function chat(body) {
-    const url = `${baseUrl}/zen/v1/chat/completions`;
+    const isResp = isResponsesModel(body?.model);
+    const url = isResp ? `${baseUrl}/zen/v1/responses` : `${baseUrl}/zen/v1/chat/completions`;
+    const reqBody = isResp ? chatToResponsesBody(body) : body;
     const t0 = performance.now();
     const attempts = [];
     let waitMs = 0;
     for (let attempt = 0; ; attempt++) {
       const t = performance.now();
-      const result = await attemptOnce(url, body);
+      const result = await attemptOnce(url, reqBody);
       attempts.push({
         attempt,
         type: result instanceof Error ? "network" : `http${result.status}`,
@@ -178,7 +248,7 @@ export function createUpstreamClient({
           await sleep(anonDelay);
           waitMs += anonDelay;
           const t2 = performance.now();
-          anonResult = await attemptOnce(url, body, { anonymous: true });
+          anonResult = await attemptOnce(url, reqBody, { anonymous: true });
           attempts.push({
             attempt: `anon-${i}`,
             type: anonResult instanceof Error ? "network" : `http${anonResult.status}`,
@@ -186,7 +256,23 @@ export function createUpstreamClient({
           });
           if (anonResult instanceof Error) continue;
           if (anonResult.status !== 429) {
-            anonResult._t = {
+            // responses 模型的 anon 命中也需转回 chat 形状
+            let outAnon = anonResult;
+            if (isResp && anonResult.ok) {
+              try {
+                const txt = await anonResult.text();
+                const j = JSON.parse(txt);
+                if (j && Array.isArray(j.output)) {
+                  const chatJson = responsesToChatJson(j);
+                  const newHeaders = new Headers(anonResult.headers);
+                  newHeaders.set("content-type", "application/json");
+                  outAnon = new Response(JSON.stringify(chatJson), { status: anonResult.status, headers: newHeaders });
+                } else {
+                  outAnon = new Response(txt, { status: anonResult.status, headers: anonResult.headers });
+                }
+              } catch { outAnon = anonResult; }
+            }
+            outAnon._t = {
               attempts,
               waitMs,
               totalMs: Math.round(performance.now() - t0),
@@ -196,7 +282,7 @@ export function createUpstreamClient({
             hit = true;
             hitAt = i + 1;
             consecutiveHits += 1;
-            logFreeAnon({ model: body?.model, publicStatus: 429, anonStatus: anonResult.status, anonAttempts: i + 1, hit: true, totalMs: anonResult._t.totalMs });
+            logFreeAnon({ model: body?.model, publicStatus: 429, anonStatus: anonResult.status, anonAttempts: i + 1, hit: true, totalMs: outAnon._t.totalMs });
             // 额外在 txt 里强调连续命中
             try {
               if (consecutiveHits >= 2) {
@@ -205,7 +291,7 @@ export function createUpstreamClient({
               }
             } catch {}
             if (process.env.MSLXDFF_DEBUG === "1") try { console.log(`[free-anon] ${body?.model} public 429 -> anon ${anonResult.status} after ${i + 1} try HIT`); } catch {}
-            return anonResult;
+            return outAnon;
           }
         }
         // 3 次 anon 仍 429
@@ -221,6 +307,36 @@ export function createUpstreamClient({
           logFreeAnon({ model: body?.model, publicStatus: 429, anonStatus: anonResult.status, anonAttempts: anonRetries, hit: false, totalMs: anonResult._t.totalMs });
           if (process.env.MSLXDFF_DEBUG === "1") try { console.log(`[free-anon] ${body?.model} public 429 -> anon 429 x${anonRetries} MISS`); } catch {}
           return anonResult;
+        }
+      }
+      // Muse Spark 走 /responses，需把 responses 的 JSON 转回 chat.completions 形状，保持上层无感
+      if (isResp && result.ok) {
+        try {
+          const txt = await result.text();
+          const j = JSON.parse(txt);
+          // responses 成功态：{output:[...]}；chat 态：{choices:[...]}。非 responses 形状则原样回
+          if (j && Array.isArray(j.output)) {
+            const chatJson = responsesToChatJson(j);
+            const newBody = JSON.stringify(chatJson);
+            const newHeaders = new Headers(result.headers);
+            newHeaders.set("content-type", "application/json");
+            const transformed = new Response(newBody, { status: result.status, headers: newHeaders });
+            transformed._t = {
+              attempts,
+              waitMs,
+              totalMs: Math.round(performance.now() - t0),
+            };
+            // 保留原始 timing 供日志
+            if (result._t) transformed._t = { ...transformed._t, ...result._t };
+            return transformed;
+          }
+          // 不是 responses 形状，回退：用原文本重建可读 Response
+          const fallback = new Response(txt, { status: result.status, headers: result.headers });
+          fallback._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
+          return fallback;
+        } catch {
+          result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
+          return result;
         }
       }
       result._t = {
