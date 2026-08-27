@@ -19,6 +19,7 @@ import { createEventBus } from "../src/events.js";
 import { createGroupsService, createBansService, refreshGroupMembers, syncPeersFromMembers } from "../src/groups.js";
 import { logDir, recentCalls, lastError, appendCall, appendError, appendEvent, recentEvents, eventsFile, callsFile, errorsFile } from "../src/logs.js";
 import { loadPlugins, runHook, pluginsDir, resolvePluginDirs } from "../src/plugins.js";
+import { createOpenCodeProvider } from "../src/providers/opencode.js";
 
 const logs = { appendCall, appendError, appendEvent };
 
@@ -931,27 +932,54 @@ if (loadedPlugins.length) {
   console.log(`plugins loaded (${loadedPlugins.length}): ${loadedPlugins.map((p) => `${p.name}${p.version ? `@${p.version}` : ""}`).join(", ")}`);
   appendEvent({ ts: Date.now(), type: "plugins-loaded", plugins: loadedPlugins.map((p) => ({ name: p.name, version: p.version })) });
 }
+// 多供应商通道：默认 opencode + 可选 openrouter（MSLXDFF_OPENROUTER_KEY 启用）
+// 插件 createUpstream 仍是"整体替换式"外部 provider（单通道，保留原语义）
 const upstreamHooks = loadedPlugins.length
   ? (name, ctx) => runHook(loadedPlugins, name, ctx)
   : null;
-// 插件可提供 createUpstream(ctx) 整体替换上游（接任意 provider）；取第一个声明者
 const providerPlugin = loadedPlugins.find((p) => typeof p.createUpstream === "function");
 let upstream;
-if (providerPlugin) {
-  try {
-    upstream = await providerPlugin.createUpstream({ baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai", authToken: process.env.UPSTREAM_AUTH_TOKEN || "public", env: process.env });
-    console.log(`upstream provider replaced by plugin: ${providerPlugin.name}`);
-    appendEvent({ ts: Date.now(), type: "plugin-upstream-active", plugin: providerPlugin.name });
-  } catch (err) {
-    console.log(`plugin upstream (${providerPlugin.name}) failed: ${errMsg(err)} — falling back to default`);
-    appendEvent({ ts: Date.now(), type: "plugin-upstream-error", plugin: providerPlugin.name, error: errMsg(err) });
-  }
-}
-if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks });
 const baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
+let providers = [];
+if (providerPlugin) {
+  // 插件整体替换：沿用旧单通道路径
+  if (!upstream) {
+    try {
+      upstream = await providerPlugin.createUpstream({ baseUrl, authToken: process.env.UPSTREAM_AUTH_TOKEN || "public", env: process.env });
+      console.log(`upstream provider replaced by plugin: ${providerPlugin.name}`);
+      appendEvent({ ts: Date.now(), type: "plugin-upstream-active", plugin: providerPlugin.name });
+    } catch (err) {
+      console.log(`plugin upstream (${providerPlugin.name}) failed: ${errMsg(err)} — falling back to default`);
+      appendEvent({ ts: Date.now(), type: "plugin-upstream-error", plugin: providerPlugin.name, error: errMsg(err) });
+    }
+  }
+  if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks });
+} else {
+  // 内置多 Provider：opencode 恒启用，openrouter 有 key 才启用
+  const opencodeClient = createUpstreamClient({ hooks: upstreamHooks });
+  const opencodeModels = createModelsService({
+    baseUrl,
+    headers: opencodeClient.headers,
+    refreshMs: refreshIntervalMs(),
+    cacheFile: join(logDir(), "models.json"),
+  });
+  providers.push(createOpenCodeProvider({ upstream: opencodeClient, modelsService: opencodeModels }));
+  const orKey = process.env.MSLXDFF_OPENROUTER_KEY || "";
+  if (orKey) {
+    const { createOpenRouterProvider } = await import("../src/providers/openrouter.js");
+    providers.push(createOpenRouterProvider({ apiKey: orKey }));
+    console.log("provider enabled: openrouter (MSLXDFF_OPENROUTER_KEY)");
+    appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter" });
+  }
+  const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
+  upstream = createProviderDispatcher(providers);
+  appendEvent({ ts: Date.now(), type: "providers", providers: providers.map((p) => p.id) });
+}
+const opencodeProvider = providers.find((p) => p.id === "opencode");
 const models = createModelsService({
+  providers: providers.length > 1 ? providers : undefined,
   baseUrl,
-  headers: upstream.headers,
+  headers: upstream.headers || opencodeProvider?.upstream?.headers,
   refreshMs: refreshIntervalMs(),
   cacheFile: join(logDir(), "models.json"),
 });

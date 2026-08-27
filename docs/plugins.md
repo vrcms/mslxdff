@@ -2,6 +2,8 @@
 
 mslxdff 内置一个零依赖的插件系统：把符合约定的 `.mjs` 模块放进插件目录，daemon 启动时自动加载，在**请求链路的所有关键节点**（hook 点）调用你的代码——包括替换上游 provider 本身。**插件出错只记日志，绝不影响主链路。**
 
+> **内置多供应商**：0.1.56 起默认走 `src/providers/` 的多 Provider 架构（opencode 恒启用 + openrouter 可选，见 AGENTS.md）。插件 `createUpstream` 仍是"整体替换式"制造商供应，与内置多 Provider 二选一（有 provider 插件时走插件单通道）。
+
 ## 快速开始
 
 ### 1. 插件目录（双目录，都会被加载）
