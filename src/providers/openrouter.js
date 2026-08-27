@@ -1,4 +1,5 @@
 import { joinModelId } from "./model-id.js";
+import { loadProviderKey } from "../state.js";
 
 let UndiciAgent = null;
 let UndiciFetch = null;
@@ -18,7 +19,7 @@ function envInt(name, fallback) {
 // OpenRouter Provider：OpenAI 兼容 `/api/v1`，Bear 鉴权 + HTTP-Referer/X-Title 品牌头。
 // 免费模型 = pricing.prompt/completion 全为 0；模型 id 对外带 `openrouter/` 前缀。
 export function createOpenRouterProvider({
-  apiKey = process.env.MSLXDFF_OPENROUTER_KEY || "",
+  apiKey,
   baseUrl = process.env.MSLXDFF_OPENROUTER_BASE_URL || DEFAULT_BASE_URL,
   connectTimeoutMs = Number(process.env.MSLXDFF_OPENROUTER_TIMEOUT_MS) || 30_000,
   retry = {
@@ -32,6 +33,7 @@ export function createOpenRouterProvider({
   headers: extraHeaders,
 } = {}) {
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  if (!apiKey) apiKey = loadProviderKey("openrouter");
 
   let dispatcher = null;
   let agent = null;
