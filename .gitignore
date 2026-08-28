@@ -15,6 +15,7 @@ free-anon-extra.txt
 # 开发过程文件，不公开到 git
 AGENTS.md
 CLAUDE.md
+CONTEXT.md
 docs/
 .scratch/
 .opencode/
