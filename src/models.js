@@ -27,22 +27,75 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
   if (providers?.length) {
     let aggregate = null;
     let aggFetchedAt = 0;
+    let lastAllowlistKey = "";
+    async function currentAllowlistKey() {
+      try {
+        const { loadProviderAllowedModels } = await import("./state.js");
+        return providers.map((p) => `${p.id}:${loadProviderAllowedModels(p.id).join(",")}`).join("|");
+      } catch {
+        return "";
+      }
+    }
     async function aggLoad() {
       const all = [];
       for (const p of providers) {
         try {
-          const list = (await p.listModels?.()) ?? [];
+          let list = (await p.listModels?.()) ?? [];
+          // 白名单过滤：若该供应商设置了 allowlist，则仅保留名单内模型
+          try {
+            const { loadProviderAllowedModels } = await import("./state.js");
+            const allowed = loadProviderAllowedModels(p.id);
+            if (allowed.length) {
+              const allowedSet = new Set(allowed);
+              const { splitModelId } = await import("./providers/model-id.js");
+              list = list.filter((m) => {
+                if (!m || !m.id) return false;
+                const { raw } = splitModelId(m.id, providers.map((x) => x.id));
+                return allowedSet.has(String(raw || "").trim());
+              });
+            }
+          } catch {}
           all.push(...list);
         } catch {
           // 单供应商取数失败不拖垮整体
         }
       }
       aggregate = { object: "list", data: all };
+      try {
+        lastAllowlistKey = await currentAllowlistKey();
+      } catch {}
+      if (cacheFile) persistModels(aggregate, cacheFile);
       return aggregate;
     }
     async function get() {
       const now = Date.now();
-      if (aggregate && now - aggFetchedAt < ttlMs) return aggregate;
+      if (aggregate && now - aggFetchedAt < ttlMs) {
+        // 热更新白名单：allowlist 变化时，即使命中 TTL 也要重载（否则 clear 后仍返回旧过滤结果）
+        try {
+          const curKey = await currentAllowlistKey();
+          if (curKey !== lastAllowlistKey) {
+            const out = await aggLoad();
+            aggFetchedAt = Date.now();
+            return out;
+          }
+        } catch {}
+        // 否则尝试在缓存上二次过滤（处理 allowlist 从空变非空等未触发重载的场景）
+        try {
+          const { loadProviderAllowedModels } = await import("./state.js");
+          const { splitModelId } = await import("./providers/model-id.js");
+          const filteredData = aggregate.data.filter((m) => {
+            if (!m || !m.id) return false;
+            const { provider, raw } = splitModelId(m.id, providers.map((x) => x.id));
+            const allowed = loadProviderAllowedModels(provider);
+            if (!allowed.length) return true;
+            return allowed.includes(String(raw || "").trim());
+          });
+          if (filteredData.length !== aggregate.data.length) return { ...aggregate, data: filteredData };
+          return aggregate;
+        } catch {
+          return aggregate;
+        }
+      }
       const out = await aggLoad();
       aggFetchedAt = Date.now();
       return out;
@@ -55,7 +108,16 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
   let timer = null;
 
   async function load() {
-    const data = await fetchUpstreamModels({ baseUrl, headers });
+    let data = await fetchUpstreamModels({ baseUrl, headers });
+    // 白名单过滤：opencode 亦支持 allowlist
+    try {
+      const { loadProviderAllowedModels } = await import("./state.js");
+      const allowed = loadProviderAllowedModels("opencode");
+      if (allowed.length) {
+        const allowedSet = new Set(allowed);
+        data = { ...data, data: (data.data || []).filter((m) => m && m.id && allowedSet.has(String(m.id).trim())) };
+      }
+    } catch {}
     cache = data;
     fetchedAt = Date.now();
     if (cacheFile) persistModels(data, cacheFile);

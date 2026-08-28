@@ -21,8 +21,8 @@ export function saveHistory(arr) {
   try {
     const f = histFile();
     mkdirSync(dirname(f), { recursive: true });
-    // 裁到最近 60 条，避免文件爆炸
-    const slim = arr.slice(-60);
+    // 128k 上下文下保留更多历史，配合 400k 阈值
+    const slim = arr.slice(-120);
     writeFileSync(f, JSON.stringify(slim, null, 2));
   } catch {}
 }

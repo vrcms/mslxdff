@@ -39,7 +39,7 @@ if (existsSync(archFile)) {
 // 2. ADR 索引必须与 docs/adr/ 目录一致（索引不能漏登，目录不能有未登记文件）
 if (existsSync(adrDir) && existsSync(archFile)) {
   const arch = readFileSync(archFile, "utf8");
-  const indexed = [...arch.matchAll(/ADR[ -]?000(\d+)|^\|\s*000(\d+)\s*\|/gm)].map((m) => `000${m[1] ?? m[2]}`);
+  const indexed = [...arch.matchAll(/ADR[ -]?(\d{4})|^\|\s*(\d{4})\s*\|/gm)].map((m) => (m[1] ?? m[2]));
   const files = readdirSync(adrDir).filter((f) => f.endsWith(".md"));
   const fileNums = files.map((f) => f.match(/^(\d{4})-/)?.[1]).filter(Boolean);
   const missingInDir = indexed.filter((n) => !fileNums.includes(n));

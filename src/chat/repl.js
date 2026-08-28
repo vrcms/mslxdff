@@ -7,6 +7,7 @@ import { chatWithFallback, summarizeHistory } from "./upstream.js";
 import { loadHistory, saveHistory, clearHistory, histPath, estimateChars, needsCompress } from "./store.js";
 import { CHAT_KEEP_RECENT, CHAT_MAX_TOOL_LOOPS, CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
 import { formatBannerLines, formatStatsDetail, collectStats } from "./stats.js";
+import { createSpinner } from "./spinner.js";
 
 const SLASH_HELP = `自然语言直接说，斜杠快捷：
   /help     本帮助
@@ -23,18 +24,30 @@ function printBanner() {
   console.log(`\x1b[90m历史：${histPath()} · 仅拦截 -uninstall · 数据来自网关 -d，非本会话计数\x1b[0m`);
 }
 
+function trace(line) {
+  if (process.env.MSLXDFF_CHAT_TRACE === "0") return;
+  console.log(`\x1b[90m· ${line}\x1b[0m`);
+}
+
 async function maybeCompress(messages) {
   if (!needsCompress(messages)) return [...messages];
   const sys = messages[0];
   const rest = messages.slice(1);
   if (rest.length <= CHAT_KEEP_RECENT + 2) return [...messages];
+  const t0 = performance.now();
   const toSummarize = rest.slice(0, -CHAT_KEEP_RECENT);
   const keep = rest.slice(-CHAT_KEEP_RECENT);
+  const chars = estimateChars(messages);
+  trace(`[压缩] 触发 ${chars}字 > ${400000}阈值 · 待压 ${toSummarize.length}条 保留 ${keep.length}条`);
   const summary = await summarizeHistory(toSummarize);
-  if (!summary) return [sys, ...keep];
+  const dt = Math.round(performance.now() - t0);
+  if (!summary) {
+    trace(`[压缩] 失败/空 · ${dt}ms → 截断`);
+    return [sys, ...keep];
+  }
   const summaryMsg = { role: "system", content: summary };
   const next = [sys, summaryMsg, ...keep];
-  console.log(`\x1b[90m[压缩] 历史过长，已将 ${toSummarize.length} 条压缩为摘要（${summary.length} 字）\x1b[0m`);
+  trace(`[压缩] 完成 ${toSummarize.length}条→${summary.length}字 · ${dt}ms · 新总量约 ${estimateChars(next)}字`);
   return next;
 }
 
@@ -47,13 +60,30 @@ async function runAgentTurn(userText, messages) {
   let lastFallback = false;
   let lastLatency = 0;
   const t0 = performance.now();
+  const turnStart = performance.now();
+  trace(`[turn] 开始 "${userText.slice(0, 60)}${userText.length > 60 ? "…" : ""}" · 历史 ${messages.length}条 约 ${estimateChars(messages)}字`);
   while (loops < CHAT_MAX_TOOL_LOOPS) {
+    const tLoop = performance.now();
+    const tComp = performance.now();
     const cur = await maybeCompress(messages);
+    const compressMs = Math.round(performance.now() - tComp);
+    if (compressMs > 50) trace(`[loop ${loops}] 压缩耗时 ${compressMs}ms`);
     messages.length = 0;
     for (const m of cur) messages.push(m);
     const tCall = performance.now();
-    const res = await chatWithFallback({ messages, tools });
-    lastLatency = Math.round(performance.now() - tCall);
+    const spinnerLabel = loops === 0 ? "已发送给 AI，等待回复中" : "AI 正在整理回复中";
+    const spinner = createSpinner(spinnerLabel);
+    spinner.start();
+    let res;
+    try {
+      res = await chatWithFallback({ messages, tools });
+    } finally {
+      const ms = Math.round(performance.now() - tCall);
+      spinner.stop(`\x1b[90m✓ AI 已回复 · ${ms}ms\x1b[0m`);
+    }
+    const llmMs = Math.round(performance.now() - tCall);
+    trace(`[loop ${loops}] LLM ${llmMs}ms${compressMs > 50 ? ` (含压缩 ${compressMs}ms)` : ""} · ${estimateChars(messages)}字上下文`);
+    lastLatency = llmMs;
     if (!res.ok) {
       const err = `大模型暂不可用：${res.error}`;
       messages.push({ role: "assistant", content: err });
@@ -74,36 +104,50 @@ async function runAgentTurn(userText, messages) {
       messages.push({ role: "assistant", content: text });
       const totalMs = Math.round(performance.now() - t0);
       const note = lastFallback ? "\n\x1b[90m[注：mimo 不可用，已用 big-pickle]\x1b[0m" : "";
+      trace(`[turn] 完成 总计 ${totalMs}ms · LLM ${lastLatency}ms · 0 工具`);
       return { text: text + note, model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
     }
     const calls = toolCalls.length ? toolCalls : [{ id: "fallback-1", function: { name: "run_command", arguments: JSON.stringify({ command: fallbackCmd }) } }];
     messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: c.function })) });
-    for (const c of calls) {
+    trace(`[tools] 本轮 ${calls.length} 个调用 ${calls.map((c) => c.function?.name).join(",")} · 并发执行`);
+    const tTools = performance.now();
+    const toolResults = await Promise.all(calls.map(async (c) => {
       const name = c.function?.name;
       let args = {};
       try { args = JSON.parse(c.function?.arguments || "{}"); } catch {}
+      const t1 = performance.now();
       let result;
       if (name === "run_command") {
         const cmd = String(args.command || "").trim();
         console.log(`\x1b[90m→ 执行: mslxdff ${cmd}\x1b[0m`);
         const r = await execCommand(cmd);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output}`;
+        const dt = Math.round(performance.now() - t1);
+        trace(`[tool] run_command "${cmd.slice(0, 40)}" · ${dt}ms · ${r.ok ? "OK" : "FAIL"} ${r.output.length}字`);
         console.log(r.ok ? `\x1b[32m${r.output.slice(0, 800)}\x1b[0m` : `\x1b[31m${r.output.slice(0, 800)}\x1b[0m`);
       } else if (name === "read_file") {
         const r = await readFileTool(args);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output.slice(0, 6000)}`;
+        const dt = Math.round(performance.now() - t1);
+        trace(`[tool] read_file ${args.path} · ${dt}ms · ${r.ok ? "OK" : "FAIL"} ${r.output.length}字`);
         console.log(`\x1b[90m→ 读取: ${args.path} ${r.ok ? "OK" : "FAIL"}\x1b[0m`);
       } else if (name === "curl") {
         const u = String(args.url || "").trim();
         console.log(`\x1b[90m→ 探活: ${u} ${args.method || "GET"}\x1b[0m`);
         const r = await curlTool(args);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output.slice(0, 6000)}`;
+        const dt = Math.round(performance.now() - t1);
+        trace(`[tool] curl ${u} · ${dt}ms`);
         console.log(r.ok ? `\x1b[32m${r.output.slice(0, 800)}\x1b[0m` : `\x1b[31m${r.output.slice(0, 800)}\x1b[0m`);
       } else {
         result = `unknown tool ${name}`;
       }
-      messages.push({ role: "tool", tool_call_id: c.id, content: result });
-    }
+      return { id: c.id, content: result };
+    }));
+    for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.id, content: tr.content });
+    const toolsMs = Math.round(performance.now() - tTools);
+    const loopMs = Math.round(performance.now() - tLoop);
+    trace(`[loop ${loops}] 工具 ${toolsMs}ms · 本轮总 ${loopMs}ms · 累计 ${Math.round(performance.now() - turnStart)}ms`);
     loops++;
   }
   return { text: "（工具调用次数已达上限，已停止）", model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: false };

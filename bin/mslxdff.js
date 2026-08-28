@@ -381,6 +381,81 @@ if (args.includes("-setto") || args.includes("--setto")) {
   process.exit(0);
 }
 
+// -providers list : list all deployed upstream providers (opencode + openrouter + generic)
+if (args.includes("-providers") || args.includes("--providers")) {
+  const idx = args.findIndex((x) => x === "-providers" || x === "--providers");
+  const sub = args[idx + 1];
+  if (!sub || sub === "list" || sub === "status") {
+    const { loadProviderConfigs, loadProviderKeys, loadProviderShareKeys, loadProviderBaseUrl, loadProviderAllowedModels } = await import("../src/state.js");
+    const configs = loadProviderConfigs();
+    const opencodeEnabled = true;
+    const opencodeBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
+    const orKeys = loadProviderKeys("openrouter");
+    const orBase = "https://openrouter.ai/api/v1";
+    const orShare = loadProviderShareKeys("openrouter");
+    const orAllowed = loadProviderAllowedModels("openrouter");
+    // collect generic ids from configs + legacy providerKeys
+    const genericIds = new Set(Object.keys(configs).filter((id) => id !== "opencode" && id !== "openrouter"));
+    try {
+      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
+      const pk = raw.providerKeys || {};
+      for (const id of Object.keys(pk)) if (id !== "opencode" && id !== "openrouter") genericIds.add(id);
+      const cfgRaw = raw.providerConfigs || {};
+      for (const id of Object.keys(cfgRaw)) if (id !== "opencode" && id !== "openrouter") genericIds.add(id);
+    } catch {}
+    // also include env-only generic ids (scan env for MSLXDFF_*_KEY)
+    for (const k of Object.keys(process.env)) {
+      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
+      if (m) {
+        const id = m[1].toLowerCase().replace(/__/g, "-");
+        if (id !== "openrouter" && id !== "opencode") genericIds.add(id);
+      }
+    }
+    // include providers that only have allowlist (no keys yet) — exclude built-ins already listed
+    try {
+      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
+      const cfgs = raw.providerConfigs || {};
+      for (const id of Object.keys(cfgs)) {
+        if (id === "opencode" || id === "openrouter") continue;
+        const am = cfgs[id]?.allowedModels;
+        if (Array.isArray(am) && am.length) genericIds.add(id);
+      }
+    } catch {}
+    const list = [];
+    const opAllowed = loadProviderAllowedModels("opencode");
+    list.push({ id: "opencode", enabled: opencodeEnabled, baseUrl: opencodeBase, keys: [], share: false, allowed: opAllowed, note: "built-in, no key, cannot share" });
+    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, allowed: orAllowed, note: orKeys.length ? "" : "no keys" });
+    for (const gid of [...genericIds].sort()) {
+      const cfg = configs[gid];
+      const keys = loadProviderKeys(gid);
+      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || "";
+      const share = loadProviderShareKeys(gid);
+      const allowed = loadProviderAllowedModels(gid);
+      const enabled = Boolean(baseUrl && keys.length);
+      let note = "";
+      if (!baseUrl && !keys.length && !allowed.length) note = "no baseUrl, no keys";
+      else if (!baseUrl && !allowed.length) note = "missing baseUrl";
+      else if (!keys.length && !allowed.length) note = "no keys";
+      else if (!baseUrl) note = "missing baseUrl";
+      else if (!keys.length) note = "no keys";
+      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, allowed, note });
+    }
+    console.log(`providers (${list.length}):`);
+    for (const p of list) {
+      const state = p.enabled ? "enabled " : "disabled";
+      const keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}` : "0 keys";
+      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
+      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 3).join(",")}${p.allowed.length > 3 ? "..." : ""})` : "allow=all";
+      const note = p.note ? `  (${p.note})` : "";
+      console.log(`  ${p.id.padEnd(12)} ${state}  ${keysInfo.padEnd(28)}  ${allowInfo.padEnd(22)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
+    }
+    console.log(`\nuse: mslxdff -provider <id> list  to inspect one,  mslxdff -provider <id> allowlist set <model...>  to restrict`);
+    process.exit(0);
+  }
+  console.error("usage: mslxdff -providers list");
+  process.exit(1);
+}
+
 // -provider <id> [key...|add|remove|list|clear]: 配置需鉴权的供应商 API key（如 openrouter）。
 // 行为：无参数且 TTY → 交互式隐藏输入（多行直到空行，逐一追加）；非 TTY → 打印用法。key 持久化到 state。
 if (args.includes("-provider") || args.includes("--provider")) {
@@ -389,50 +464,106 @@ if (args.includes("-provider") || args.includes("--provider")) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url|allowlist]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
     console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
     console.error("            mslxdff -provider openrouter set-url https://api.example.com/v1");
+    console.error("            mslxdff -provider openrouter allowlist set gpt-4 gpt-3.5  manage allowed models (empty=allow all)");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx   add generic OpenAI-compatible provider");
+    console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4  add with allowlist");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
-  // 通用供应商快捷添加：mslxdff -provider add <id> <baseUrl> <key>
+  // alias: mslxdff -provider list  (same as -providers list) — list all providers
+  if (id === "list" || id === "status") {
+    const { loadProviderConfigs, loadProviderKeys, loadProviderShareKeys, loadProviderBaseUrl } = await import("../src/state.js");
+    const configs = loadProviderConfigs();
+    const opencodeBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
+    const orKeys = loadProviderKeys("openrouter");
+    const orBase = "https://openrouter.ai/api/v1";
+    const orShare = loadProviderShareKeys("openrouter");
+    const genericIds = new Set(Object.keys(configs).filter((x) => x !== "opencode" && x !== "openrouter"));
+    try {
+      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
+      const pk = raw.providerKeys || {};
+      for (const k of Object.keys(pk)) if (k !== "opencode" && k !== "openrouter") genericIds.add(k);
+    } catch {}
+    for (const k of Object.keys(process.env)) {
+      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
+      if (m) {
+        const gid = m[1].toLowerCase().replace(/__/g, "-");
+        if (gid !== "openrouter" && gid !== "opencode") genericIds.add(gid);
+      }
+    }
+    const list = [];
+    list.push({ id: "opencode", enabled: true, baseUrl: opencodeBase, keys: [], share: false, note: "built-in, no key, cannot share" });
+    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, note: orKeys.length ? "" : "no keys" });
+    for (const gid of [...genericIds].sort()) {
+      const cfg = configs[gid];
+      const keys = loadProviderKeys(gid);
+      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || "";
+      const share = loadProviderShareKeys(gid);
+      const enabled = Boolean(baseUrl && keys.length);
+      let note = "";
+      if (!baseUrl && !keys.length) note = "no baseUrl, no keys";
+      else if (!baseUrl) note = "missing baseUrl";
+      else if (!keys.length) note = "no keys";
+      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, note });
+    }
+    console.log(`providers (${list.length}):`);
+    for (const p of list) {
+      const state = p.enabled ? "enabled " : "disabled";
+      const keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}` : "0 keys";
+      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
+      const note = p.note ? `  (${p.note})` : "";
+      console.log(`  ${p.id.padEnd(12)} ${state}  ${keysInfo.padEnd(28)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
+    }
+    console.log(`\nuse: mslxdff -provider <id> list  to inspect one,  mslxdff -provider add <id> <baseUrl> <key>  to add generic`);
+    process.exit(0);
+  }
+  // 通用供应商快捷添加：mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]
   if (id === "add") {
     const gid = sub;
     const gBase = rest[1];
     const gKey = rest[2];
     if (!gid || !gBase || !gKey) {
-      console.error("usage: mslxdff -provider add <id> <baseUrl> <key>");
+      console.error("usage: mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]");
       console.error("       e.g. mslxdff -provider add myapi https://api.example.com/v1 sk-xxx");
+      console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4 gpt-3.5");
       process.exit(1);
     }
     if (gid === "opencode" || gid === "oc" || gid === "openrouter") {
       console.error(`provider "${gid}" is built-in — use: mslxdff -provider ${gid} add <key>  or  mslxdff -provider ${gid} set-url <url>`);
       process.exit(1);
     }
-    const { saveProviderConfig, loadProviderConfig, loadProviderShareKeys } = await import("../src/state.js");
+    const { saveProviderConfig, loadProviderConfig, loadProviderShareKeys, loadProviderAllowedModels } = await import("../src/state.js");
     const { normalizeProviderId } = await import("../src/providers/model-id.js");
     const nid = normalizeProviderId(gid);
     if (!nid) { console.error(`invalid provider id: ${gid}`); process.exit(1); }
     if (!/^https?:\/\/.+/.test(String(gBase).trim())) { console.error(`invalid baseUrl: ${gBase} (must start with http:// or https://)`); process.exit(1); }
-    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [] };
+    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [], allowedModels: [] };
     const keys = [...new Set([...(cur.keys || []), String(gKey).trim()].filter(Boolean))];
-    saveProviderConfig(nid, { baseUrl: String(gBase).trim(), keys });
+    // 剩余参数视为白名单模型（可选）：mslxdff -provider add myapi <url> <key> m1 m2 ...
+    const extraModels = rest.slice(3).filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
+    const allowedModels = extraModels.length ? [...new Set([...(cur.allowedModels || []), ...extraModels])] : (cur.allowedModels || []);
+    saveProviderConfig(nid, { baseUrl: String(gBase).trim(), keys, allowedModels });
     console.log(`added generic provider: ${nid}`);
     console.log(`  baseUrl: ${String(gBase).trim().replace(/\/+$/, "")}`);
     console.log(`  keys: ${keys.length} (${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")})`);
+    if (allowedModels.length) console.log(`  allowedModels: ${allowedModels.length} (${allowedModels.join(", ")})`);
+    else console.log(`  allowedModels: (none — allow all, set via: mslxdff -provider ${nid} allowlist set <model...>)`);
     console.log(`  share: ${loadProviderShareKeys(nid) ? "ON" : "off"}   (mslxdff -provider ${nid} share on|off)`);
     console.log(`  use as: ${nid}/<model-id>  — restart daemon to activate`);
     process.exit(0);
   }
-  if (id === "opencode" || id === "oc") {
+  if ((id === "opencode" || id === "oc") && sub !== "allowlist" && sub !== "allow" && sub !== "allowed" && sub !== "whitelist" && sub !== "list" && sub !== "status") {
     console.log("opencode is the default (bare) provider — it needs no API key and can never be shared with peers");
     console.log("(its IP-based rate limit is spread by peer forwarding itself)");
+    console.log(`  allowlist: mslxdff -provider opencode allowlist [list|set|add|remove|clear]  — restrict models (empty=allow all)`);
     process.exit(0);
   }
   const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys, loadProviderShareKeys, saveProviderShareKeys, loadProviderConfig, saveProviderConfig, saveProviderBaseUrl, loadProviderConfigs } = await import("../src/state.js");
@@ -476,9 +607,81 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.log(`share keys to peers: ${state ? "ON" : "off"} — restart daemon to activate`);
     process.exit(0);
   }
+  // allowlist 管理：白名单为空 = 不限；非空 = 仅名单内可用（防昂贵模型）
+  if (sub === "allowlist" || sub === "allow" || sub === "allowed" || sub === "whitelist") {
+    const { loadProviderAllowedModels, saveProviderAllowedModels, loadProviderConfig } = await import("../src/state.js");
+    const action = rest[1];
+    const rawTargets = rest.slice(2);
+    // 兼容：mslxdff -provider <id> allowlist  （无 action）→ list
+    if (!action || action === "list" || action === "status") {
+      const list = loadProviderAllowedModels(id);
+      const cfg = loadProviderConfig(id);
+      const baseUrl = cfg?.baseUrl || "";
+      console.log(`provider: ${id}${baseUrl ? `  baseUrl: ${baseUrl}` : ""}`);
+      if (!list.length) {
+        console.log(`  allowedModels: (none — allow all)`);
+        console.log(`  set via: mslxdff -provider ${id} allowlist set <model1> <model2> ...`);
+        console.log(`  add:     mslxdff -provider ${id} allowlist add <model>`);
+      } else {
+        console.log(`  allowedModels: ${list.length} model${list.length > 1 ? "s" : ""} (only these can be used)`);
+        list.forEach((m, i) => console.log(`  [${i + 1}]  ${m}`));
+        console.log(`  manage: mslxdff -provider ${id} allowlist add <model> | remove <model> | set <m1> <m2> ... | clear`);
+      }
+      console.log(`  NOTE: empty allowlist = allow all (hot-reloaded, no restart needed)`);
+      process.exit(0);
+    }
+    if (action === "clear") {
+      saveProviderAllowedModels(id, []);
+      console.log(`cleared ${id} allowlist (now allow all) — takes effect immediately (hot-reloaded)`);
+      process.exit(0);
+    }
+    if (action === "set") {
+      const models = rawTargets.filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
+      // 支持逗号分隔的一串：model1,model2
+      const flat = models.flatMap((m) => String(m).split(",")).map((m) => m.trim()).filter(Boolean);
+      if (!flat.length) {
+        console.error(`usage: mslxdff -provider ${id} allowlist set <model1> <model2> ...`);
+        process.exit(1);
+      }
+      const saved = saveProviderAllowedModels(id, flat);
+      console.log(`set ${id} allowlist: ${saved.length} model${saved.length > 1 ? "s" : ""} (${saved.join(", ")}) — takes effect immediately (hot-reloaded)`);
+      process.exit(0);
+    }
+    if (action === "add") {
+      const models = rawTargets.filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
+      const flat = models.flatMap((m) => String(m).split(",")).map((m) => m.trim()).filter(Boolean);
+      if (!flat.length) {
+        console.error(`usage: mslxdff -provider ${id} allowlist add <model> [model2 ...]`);
+        process.exit(1);
+      }
+      const cur = loadProviderAllowedModels(id);
+      const next = [...new Set([...cur, ...flat])];
+      saveProviderAllowedModels(id, next);
+      console.log(`added ${flat.length} model${flat.length > 1 ? "s" : ""} to ${id} allowlist (now ${next.length}: ${next.join(", ")}) — takes effect immediately (hot-reloaded)`);
+      process.exit(0);
+    }
+    if (action === "remove" || action === "rm" || action === "del") {
+      const models = rawTargets.filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
+      const flat = models.flatMap((m) => String(m).split(",")).map((m) => m.trim()).filter(Boolean);
+      if (!flat.length) {
+        console.error(`usage: mslxdff -provider ${id} allowlist remove <model> [model2 ...]`);
+        process.exit(1);
+      }
+      const cur = loadProviderAllowedModels(id);
+      const set = new Set(flat);
+      const next = cur.filter((m) => !set.has(m));
+      saveProviderAllowedModels(id, next);
+      console.log(`removed ${cur.length - next.length} model${cur.length - next.length !== 1 ? "s" : ""} from ${id} allowlist (now ${next.length ? next.join(", ") : "(allow all)"}) — takes effect immediately (hot-reloaded)`);
+      process.exit(0);
+    }
+    console.error(`usage: mslxdff -provider ${id} allowlist [list|set|add|remove|clear] [models...]`);
+    process.exit(1);
+  }
   if (sub === "list" || sub === "status") {
     const keys = loadProviderKeys(id);
     const cfg = loadProviderConfig(id);
+    const { loadProviderAllowedModels } = await import("../src/state.js");
+    const allowed = loadProviderAllowedModels(id);
     const baseUrl = cfg?.baseUrl || "";
     if (baseUrl) console.log(`provider: ${id}  baseUrl: ${baseUrl}`);
     else console.log(`provider: ${id}${id === "openrouter" ? " (built-in baseUrl: https://openrouter.ai/api/v1)" : ""}`);
@@ -490,6 +693,8 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.log(`  keys: (no keys configured)`);
     }
     console.log(`  share keys to peers:   ${loadProviderShareKeys(id) ? "ON" : "off"}   (mslxdff -provider ${id} share on|off)`);
+    if (allowed.length) console.log(`  allowedModels: ${allowed.length} (${allowed.join(", ")})  — only these can be used`);
+    else console.log(`  allowedModels: (none — allow all)  (mslxdff -provider ${id} allowlist set <model...>)`);
     if (baseUrl) console.log(`  set url: mslxdff -provider ${id} set-url <baseUrl>`);
     console.log(`  NOTE: opencode is the default provider and can never be shared`);
     process.exit(0);
@@ -1628,8 +1833,10 @@ Usage:
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
-  mslxdff -provider add <id> <baseUrl> <key>  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1)
+  mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1; extra models = allowlist)
   mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]  configure provider API keys/URL (multiple keys = rotating, set-url for generic)
+  mslxdff -provider <id> allowlist [list|set|add|remove|clear]  manage allowed models (empty=allow all, non-empty=only listed) 
+  mslxdff -providers list          list all configured upstream providers (opencode, openrouter, generic)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups

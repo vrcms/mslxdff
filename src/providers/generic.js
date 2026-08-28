@@ -160,7 +160,10 @@ export function createGenericProvider({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`${id} models timed out`)), 15_000);
     try {
-      const opts = { headers: { Accept: "application/json" }, signal: controller.signal };
+      const headers = { Accept: "application/json" };
+      const key = ring.next();
+      if (key) headers["Authorization"] = `Bearer ${key}`;
+      const opts = { headers, signal: controller.signal };
       if (dispatcher) opts.dispatcher = dispatcher;
       const res = await fetchImpl(url, opts);
       if (!res.ok) return [];
@@ -181,7 +184,10 @@ export function createGenericProvider({
     const url = `${resolvedBase}/models`;
     const t0 = performance.now();
     try {
-      const opts = { headers: { Accept: "application/json" } };
+      const headers = { Accept: "application/json" };
+      const key = loadProviderKeys(id)[0] || ring.next();
+      if (key) headers["Authorization"] = `Bearer ${key}`;
+      const opts = { headers };
       if (dispatcher) opts.dispatcher = dispatcher;
       const res = await fetchImpl(url, opts);
       try { if (res.body) await res.text().catch(() => {}); } catch {}
