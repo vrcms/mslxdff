@@ -34,7 +34,7 @@
 | 模型去勾 | `-model unpick <id>` | 从 picks 移除 |
 | 模型查勾 | `-model picks` | 列 picks |
 | 模型清空 | `-model pick clear` | 清空 picks |
-| 供应商新增 | `-provider add <id> <baseUrl> <key>` | 一键添加通用 OpenAI 兼容供应商 |
+| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单） |
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
@@ -42,6 +42,8 @@
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
 | 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
+| 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=不限，非空仅名单内可用（防昂贵模型） |
+| 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
 | 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
@@ -56,15 +58,16 @@
 
 ## 模型说明
 
-- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `openrouter/google/gemma-3-27b-it:free` 走指定供应商。
-- 实时可用模型由 `可用模型` 列表给出，必须照列表精确输出。
+- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free` 走指定供应商。
+- 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
+- 查“某供应商有哪些模型”：直接过滤可用模型列表按前缀回答（如 `bai/` 开头的 1 个即 `glm-5.3-flash`），无需调工具；需实时刷新时用 `curl local/models`（GET，自动带本机 token）看网关聚合，或 `curl https://api.b.ai/v1/models`（自动带 bai key）看上游全量。严禁为此调用 `-showtoken`。
 
 ## 工具调用规范
 
 - 时机：用户意图明确需执行命令时，调用 `run_command`；需查看文件时调用 `read_file`；需探活网络/服务时调用 `curl`。
-- `run_command` 参数：`command: "-model set hy3-free"`（不含 mslxdff 前缀）
+- `run_command` 参数：`command: "-model set hy3-free"`（不含 mslxdff 前缀）；`-showtoken` 仅用户明确要求看 token 时才用，查模型/供应商禁止用。
 - `read_file` 参数：`path: "src/logs.js"` 或 `path: "~/.config/mslxdff/events.log"`（项目内或日志目录）
-- `curl` 参数：`url: "upstream"` / `"local/health"` / `"https://opencode.ai/zen/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头、本机 /v1/* 自动带 token
+- `curl` 参数：`url: "upstream"` / `"local/health"` / `"local/models"` / `"bai/models"` / `"https://api.b.ai/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头、本机 /v1/* 自动带 token、已配置供应商（bai/openrouter 等）自动带对应 key
 - 一次一工具，执行后看结果再决定下一步。
 
 ## 示例

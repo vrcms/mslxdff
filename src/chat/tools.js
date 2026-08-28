@@ -2,9 +2,10 @@ import { execFile } from "node:child_process";
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import { FORBIDDEN } from "./config.js";
 import { logDir } from "../logs.js";
-import { defaultStateFile } from "../state.js";
+import { defaultStateFile, loadProviderKeys, loadProviderConfigs } from "../state.js";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const allowedRoots = [
@@ -106,18 +107,21 @@ export async function execCommand(command) {
   if (err) return { ok: false, output: err };
   const args = parseCommand(String(command).trim());
   if (!args.length) return { ok: false, output: "empty command" };
+  // 关键路径打点：exec 本身耗时（fork+加载）是 -chat 最大的本地开销，后续可改直调以省 300-500ms
   const bin = join(pkgRoot, "bin/mslxdff.js");
-  return new Promise((resolve) => {
+  const t0 = performance.now();
+  const res = await new Promise((resolve) => {
     execFile(process.execPath, [bin, ...args], { timeout: 15000, maxBuffer: 1024 * 500 }, (e, stdout, stderr) => {
       const out = String(stdout || "") + (stderr ? `\n${stderr}` : "");
       if (e) {
-        // 命令自身 exit 1 也算“执行过”，把输出返回给模型判断
         resolve({ ok: false, output: out.slice(0, 8000) || String(e.message).slice(0, 2000) });
       } else {
         resolve({ ok: true, output: out.slice(0, 8000) || "(no output)" });
       }
     });
   });
+  res._ms = Math.round(performance.now() - t0);
+  return res;
 }
 
 export async function readFileTool({ path, limit }) {
@@ -186,6 +190,16 @@ function expandCurlUrl(raw) {
   if (low === "local" || low === "local/health" || low === "health") return `${localBase}/health`;
   if (low === "local/models" || low === "models" || low === "v1/models") return `${localBase}/v1/models`;
   if (low === "local/chat" || low === "v1/chat/completions") return `${localBase}/v1/chat/completions`;
+  // 供应商简写：bai/models、openrouter/models 等 → 该供应商 baseUrl + /models
+  const provMatch = low.match(/^([a-z0-9_-]+)\/models\/?$/);
+  if (provMatch) {
+    try {
+      const pid = provMatch[1];
+      const cfgs = loadProviderConfigs();
+      const cfg = cfgs[pid];
+      if (cfg?.baseUrl) return `${cfg.baseUrl.replace(/\/+$/, "")}/models`;
+    } catch {}
+  }
   // 裸路径视作本机相对
   if (s.startsWith("/")) return `${localBase}${s}`;
   return s;
@@ -197,7 +211,7 @@ export async function curlTool({ url, method, headers, body, timeoutMs }) {
   let target = expandCurlUrl(raw);
   // 仅允许 http(s)
   if (!/^https?:\/\//i.test(target)) return { ok: false, output: `only http(s) allowed: ${raw} -> ${target}` };
-  const m = String(method || "GET").toUpperCase();
+  let m = String(method || "GET").toUpperCase();
   if (!["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"].includes(m)) return { ok: false, output: `unsupported method: ${m}` };
   const timeout = Math.min(Math.max(Number(timeoutMs) || 8000, 500), 15000);
   // 组装头
@@ -212,13 +226,33 @@ export async function curlTool({ url, method, headers, body, timeoutMs }) {
     if (!h["Accept"]) h["Accept"] = m === "GET" ? "*/*" : "application/json";
     if (!h["Content-Type"] && m !== "GET" && m !== "HEAD") h["Content-Type"] = "application/json";
   }
-  // 本机自动带 token（/v1/* 需要鉴权）
+  // 本机自动带 token（/v1/* 需要鉴权）；/v1/models 必须是 GET，模型常误用 POST 直接纠正
   if (/127\.0\.0\.1|localhost/i.test(target) && /\/v1\//i.test(target)) {
     const hasAuth = !!(h["Authorization"] || h["authorization"]);
     if (!hasAuth) {
       const tok = resolveLocalToken();
       if (tok) h["Authorization"] = `Bearer ${tok}`;
     }
+    if (/\/v1\/models/i.test(target) && m === "POST") m = "GET";
+  }
+  // 已配置供应商自动带 key（curl 直连供应商时免手动传头）
+  if (!h["Authorization"] && !h["authorization"]) {
+    try {
+      const cfgs = loadProviderConfigs();
+      for (const [pid, cfg] of Object.entries(cfgs)) {
+        const base = String(cfg?.baseUrl || "").replace(/\/+$/, "");
+        if (!base) continue;
+        if (target.toLowerCase().startsWith(base.toLowerCase())) {
+          const keys = loadProviderKeys(pid);
+          if (keys.length) { h["Authorization"] = `Bearer ${keys[0]}`; break; }
+        }
+      }
+      // 兜底：api.b.ai 即 bai 供应商（env 或 state）
+      if (!h["Authorization"] && /api\.b\.ai/i.test(target)) {
+        const k = loadProviderKeys("bai")[0];
+        if (k) h["Authorization"] = `Bearer ${k}`;
+      }
+    } catch {}
   }
   // fetch 实现优先 undici，其次全局
   let fetchImpl = globalThis.fetch;

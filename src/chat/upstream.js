@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { CHAT_PREFERRED, CHAT_FALLBACK, CHAT_TIMEOUT_MS } from "./config.js";
 import { createUpstreamClient } from "../upstream.js";
 
@@ -57,18 +58,30 @@ async function chatOnceNoTools({ messages, model }) {
 
 // 带自动降级：仅 mimo-v2.5-free → big-pickle，不引入其他模型
 export async function chatWithFallback(opts) {
+  const TRACE = process.env.MSLXDFF_CHAT_TRACE !== "0";
+  const t0 = TRACE ? performance.now() : 0;
   const first = await chatOnce({ ...opts, model: CHAT_PREFERRED });
+  if (TRACE) {
+    const dt = Math.round(performance.now() - t0);
+    console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} ${first.ok ? "OK" : "FAIL"} · ${dt}ms${first.ok ? "" : ` · ${String(first.error).slice(0, 80)}`}\x1b[0m`);
+  }
   if (first.ok) return { ...first, model: CHAT_PREFERRED };
+  const t1 = TRACE ? performance.now() : 0;
   const second = await chatOnce({ ...opts, model: CHAT_FALLBACK });
+  if (TRACE) {
+    const dt = Math.round(performance.now() - t1);
+    const total = Math.round(performance.now() - t0);
+    console.log(`\x1b[90m· [LLM] ${CHAT_FALLBACK} ${second.ok ? "OK" : "FAIL"} · ${dt}ms · 总 ${total}ms (fallback)\x1b[0m`);
+  }
   if (second.ok) return { ...second, model: CHAT_FALLBACK, fallback: true, firstError: first.error };
   return { ok: false, error: `${CHAT_PREFERRED} failed: ${first.error}; ${CHAT_FALLBACK} failed: ${second.error}`, status: second.status || first.status };
 }
 
-// 压缩用：简短摘要请求（不带 tools）
+// 压缩用：简短摘要请求（不带 tools），128k 上下文下仅 95% 触发，需完整摘要
 export async function summarizeHistory(messages) {
   const prompt = [
-    { role: "system", content: "你是对话压缩助手，把以下历史对话压缩成 300 字以内的中文摘要，保留关键操作与结果、用户的偏好与待办，不要遗漏模型设置与群组操作。" },
-    { role: "user", content: messages.map((m) => `${m.role}: ${m.content || JSON.stringify(m.tool_calls || "")}`).join("\n").slice(0, 12000) },
+    { role: "system", content: "你是对话压缩助手，把以下历史对话压缩成 800 字以内的中文摘要，保留关键操作与结果、用户的偏好与待办、模型设置与群组操作及时间线，不要遗漏重要细节。" },
+    { role: "user", content: messages.map((m) => `${m.role}: ${m.content || JSON.stringify(m.tool_calls || "")}`).join("\n").slice(0, 90000) },
   ];
   const r = await chatWithFallback({ messages: prompt });
   if (!r.ok) return null;

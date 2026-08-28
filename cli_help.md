@@ -62,6 +62,8 @@
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
 | `mslxdff -provider add <id> <baseUrl> <key>` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
+| `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=不限，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
+| `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用）及启用状态（含 allowlist 摘要） | 否 | 否 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
@@ -457,6 +459,61 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider myapi set-url https://api.new.com/v1
   ```
 
+#### `mslxdff -providers list` / `mslxdff -provider list`（列出所有已部署供应商）
+
+- **语法**：`mslxdff -providers list` / `mslxdff -providers status` / `mslxdff --providers list` / `mslxdff -provider list`（单数 `list` 为同义别名，无参 `mslxdff -providers` 亦视为 `list`）
+- **作用**：聚合展示当前已部署的所有上游供应商及其启用状态，不启动 daemon。
+- **判定**：
+  - `opencode` 恒 `enabled`（`https://opencode.ai`，无 key，`cannot share`）
+  - `openrouter` 当 `keys.length>0` 为 `enabled`（`https://openrouter.ai/api/v1`）
+  - 通用：`providerConfigs.<id>={baseUrl,keys}` 中 `baseUrl && keys.length>0` 为 `enabled`，否则 `disabled` 并标注 `missing baseUrl / no keys`
+- **输出**：
+  ```
+  providers (3):
+    opencode     enabled   0 keys                        allow=all               baseUrl=https://opencode.ai  cannot share  (built-in, no key, cannot share)
+    openrouter   disabled  0 keys                        allow=all               baseUrl=https://openrouter.ai/api/v1  share=off  (no keys)
+    bai          enabled   1 key sk-t…93hc               allow=2(glm-5.3-flash,minimax-m3)  baseUrl=https://api.b.ai/v1  share=off
+  ```
+  每行含 `keys` 脱敏（首尾 4 字符）、`baseUrl`、`share=ON/off`、`allow` 摘要与 `note`。
+- **示例**：
+  ```bash
+  mslxdff -providers list
+  mslxdff -provider list   # 同义
+  mslxdff -provider bai list  # 单供应商详情（非聚合，含 allowlist）
+  ```
+
+#### `mslxdff -provider <id> allowlist [list|set|add|remove|clear]`（供应商模型白名单，防昂贵/奇怪模型）
+
+- **语法**：
+  ```bash
+  mslxdff -provider <id> allowlist list                        # 查看
+  mslxdff -provider <id> allowlist set <m1> <m2> ...           # 覆盖
+  mslxdff -provider <id> allowlist add <m> [m2 ...]            # 追加（去重）
+  mslxdff -provider <id> allowlist remove <m> [m2 ...]         # 移除
+  mslxdff -provider <id> allowlist clear                       # 清空（=不限）
+  # 别名：allow / allowed / whitelist 均等价于 allowlist
+  # 接入时直接带白名单：
+  mslxdff -provider add <id> <baseUrl> <key> [m1 m2 ...]
+  ```
+- **语义**：
+  - `allowlist` 为空（默认）→ **不限**，该供应商全部模型可用（向后兼容）。
+  - 非空 → **仅名单内可用**，`chat` 时 `rawModel` 不在名单则立即 `403`（`{"error":"model not allowed for provider \"...\""}`），不计入冷却、不触发 fallback；`GET /v1/models` 亦仅返回白名单内的模型（按 `raw` 精确匹配，支持 `bai/glm-...` 或 `glm-...` 两种写法，存储时自动归一为 raw）。
+- **存储**：`state.json providerConfigs.<id>.allowedModels: string[]`（`saveProviderAllowedModels` 去重、trim、支持逗号分隔的一串如 `m1,m2`）。`providerConfigs.<id>.baseUrl/keys` 为空但 `allowedModels` 非空时仍保留条目（便于先定白名单后补 key）。
+- **生效**：热更新立即生效（`chat` 与 `listModels` 均无需重启；`provider add` 的白名单亦同）；`opencode` 亦支持（`mslxdff -provider opencode allowlist set big-pickle mimo-v2.5-free`）。
+- **示例**：
+  ```bash
+  mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4 gpt-3.5  # 接入即定白名单
+  mslxdff -provider myapi allowlist list
+  # → provider: myapi  baseUrl: https://api.example.com/v1
+  #     allowedModels: 2 models (only these can be used)
+  #     [1]  gpt-4
+  #     [2]  gpt-3.5
+  mslxdff -provider myapi allowlist add gpt-4o
+  mslxdff -provider myapi allowlist remove gpt-3.5
+  mslxdff -provider myapi allowlist clear   # 回到不限
+  mslxdff -providers list   # 聚合视图亦显示 allow=2(...) 摘要
+  ```
+
 #### 存储与生效
 
 - **优先级**：`MSLXDFF_<ID>_KEY` env（单值）> `state.json providerConfigs.<id>.keys` / `providerKeys.<id>`（数组）；`MSLXDFF_<ID>_BASE_URL` env 覆盖 `providerConfigs.<id>.baseUrl`。`opencode` 无视 key，恒为 `public`。
@@ -640,8 +697,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   - `curl`：网络/HTTP 探活，检测上游或本机可用性。支持 `url` 简写（`upstream`=`https://opencode.ai/zen/v1/models`、`local/health`=`http://127.0.0.1:<port>/health`、`local/models`），也支持完整 `http(s)` URL；可选 `method`/`headers`/`body`/`timeoutMs`，上游自动补 `x-opencode-client/desktop` 与 `Authorization: Bearer public`，本机 `/v1/*` 自动带 state token。返回状态码、耗时、响应头与前 6KB body，便于自检“上游是否活着/本地是否监听”。
   - 纯回答：闲聊或解释时不调工具，直接中文回复。
 - **历史与压缩**：
-  - 持久化：`~/.config/mslxdff/chat-history.json`（`MSLXDFF_CHAT_HISTORY` 可覆盖），存最近 60 条，`daemon` 重启不影响（chat 是前台独立进程，与 daemon 无父子关系）。
-  - 压缩原理：当总字符 > `18000`（`CHAT_HISTORY_MAX_CHARS`）时触发——**保留 system + 最近 8 条**，将其余旧消息打包让**大模型自己做摘要**（`summarizeHistory` 发一次 `mimo`/`big-pickle` 调用，提示“压缩成 300 字内中文摘要，保留关键操作与偏好”），成功则用 `【历史摘要】…` 替代旧段，失败则直接截断。这样长期对话不爆上下文，又不丢关键信息。
+  - 持久化：`~/.config/mslxdff/chat-history.json`（`MSLXDFF_CHAT_HISTORY` 可覆盖），存最近 120 条，`daemon` 重启不影响（chat 是前台独立进程，与 daemon 无父子关系）。
+  - 压缩原理：当总字符 > `400000`（`CHAT_HISTORY_MAX_CHARS`≈128k*95%≈400k 字符）时触发——**保留 system + 最近 40 条**，将其余旧消息打包让**大模型自己做摘要**（`summarizeHistory` 发一次 `mimo`/`big-pickle` 调用，提示“压缩成 800 字内中文摘要，保留关键操作与偏好及时间线”），成功则用 `【历史摘要】…` 替代旧段，失败则直接截断。这样大模型 128k 上下文下接近 95% 才压缩，避免频繁压缩。
 - **独立进程保证**：`mslxdff -chat` 就是用户终端的前台进程，`bin` 中直接 `await startChat()`，不经 `startDaemon`，`daemon` 的 `stopDaemonIfOutdated`/`-port` 重启完全走另一条链路。
 - **示例**：
   ```bash
@@ -748,7 +805,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
     "preferredModel": "big-pickle",
     "modelPicks": ["big-pickle", "openrouter/..."],
     "providerKeys": { "openrouter": ["sk-...","sk-..."] },
-    "providerConfigs": { "myapi": { "baseUrl": "https://api.example.com/v1", "keys": ["sk-..."] } },
+    "providerConfigs": { "myapi": { "baseUrl": "https://api.example.com/v1", "keys": ["sk-..."], "allowedModels": ["gpt-4", "gpt-3.5"] } },
     "providerShareKeys": { "openrouter": true },
     "peers": [],
     "groups": { "my@mslxd": { "members": { "leader": {...}, "http://...": {...} } } },
@@ -758,6 +815,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
     "modelLatencies": { "big-pickle": 123 }
   }
   ```
+  `allowedModels` 空数组或缺失 = 不限；非空仅名单内可用（`403` 拦截，`/v1/models` 过滤）。
 - **.gitignore**：`**/*state*.json`、`**/*key*.json` 等已加固，key 类 state 绝不进 repo。
 
 ---

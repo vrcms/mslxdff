@@ -41,15 +41,31 @@ function loadFromDisk(file) {
 
 function readState(file) {
   const e = getEntry(file);
-  // 脏数据直接从内存拿，不碰磁盘
-  if (e.data !== null && e.dirty) return e.data;
-  // 已有干净缓存且文件未变，直接命中
+  // 即使脏数据，也要检查 mtime 是否被外部（CLI）改过；若改过则合并，避免 CLI 的 providerConfigs 白名单等被 daemon 的 modelErrors 刷盘覆盖
   if (e.data !== null) {
     try {
       const st = statSync(file);
       if (st.mtimeMs === e.mtimeMs) return e.data;
+      // mtime 变了，说明外部改过文件
+      if (e.dirty) {
+        const disk = loadFromDisk(file);
+        const diskObj = typeof disk === "object" && disk !== null ? disk : {};
+        // 合并：disk 为新基准，e.data 的热数据（modelErrors/modelLatencies/peerStats 等）覆盖回去，但 providerConfigs 等配置以 disk 为准
+        const merged = { ...diskObj, ...e.data };
+        // 配置类字段以 disk 为准（CLI 改的白名单、keys、port、token 等）
+        if (diskObj.providerConfigs !== undefined) merged.providerConfigs = diskObj.providerConfigs;
+        if (diskObj.providerKeys !== undefined) merged.providerKeys = diskObj.providerKeys;
+        if (diskObj.providerShareKeys !== undefined) merged.providerShareKeys = diskObj.providerShareKeys;
+        if (diskObj.port !== undefined) merged.port = diskObj.port;
+        if (diskObj.token !== undefined) merged.token = diskObj.token;
+        if (diskObj.preferredModel !== undefined) merged.preferredModel = diskObj.preferredModel;
+        if (diskObj.modelPicks !== undefined) merged.modelPicks = diskObj.modelPicks;
+        e.data = merged;
+        e.mtimeMs = st.mtimeMs;
+        // 保持 dirty，让热数据下次刷盘时带上合并后的配置
+        return e.data;
+      }
     } catch {
-      // 文件不存在等，沿用内存
       if (e.data) return e.data;
     }
   }
@@ -277,11 +293,23 @@ export function saveProviderShareKeys(id, on, { file = defaultStateFile() } = {}
   return !!on;
 }
 
-// ---- 通用 OpenAI 兼容供应商配置：providerConfigs: { [id]: { baseUrl, keys } } ----
+// ---- 通用 OpenAI 兼容供应商配置：providerConfigs: { [id]: { baseUrl, keys, allowedModels } } ----
 function normalizeBaseUrl(url) {
   const s = String(url || "").trim();
   if (!s) return "";
   return s.replace(/\/+$/, "");
+}
+
+function normalizeAllowedModel(model, providerId) {
+  let s = String(model || "").trim();
+  if (!s) return "";
+  // 支持带前缀的输入：bai/glm-5.3-flash -> glm-5.3-flash（仅当 provider 匹配时剥前缀）
+  const idx = s.indexOf("/");
+  if (idx > 0) {
+    const head = s.slice(0, idx).toLowerCase();
+    if (head === String(providerId || "").toLowerCase()) s = s.slice(idx + 1);
+  }
+  return s;
 }
 
 export function loadProviderConfigs({ file = defaultStateFile() } = {}) {
@@ -296,17 +324,23 @@ export function loadProviderConfig(id, { file = defaultStateFile() } = {}) {
   // env 覆盖时以 env 为准
   if (envUrl || (process.env[providerKeyEnv(id)] || "").trim()) {
     const baseUrl = envUrl || loadProviderConfigs({ file })[id]?.baseUrl || "";
-    if (baseUrl || envKeys.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys };
+    const cfg = loadProviderConfigs({ file })[id];
+    const allowedModels = cfg && Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
+    if (baseUrl || envKeys.length || allowedModels.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys, allowedModels };
     return null;
   }
   const configs = loadProviderConfigs({ file });
   const cfg = configs[id];
   if (cfg && typeof cfg === "object") {
-    return { baseUrl: normalizeBaseUrl(cfg.baseUrl || ""), keys: Array.isArray(cfg.keys) ? [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))] : [] };
+    return {
+      baseUrl: normalizeBaseUrl(cfg.baseUrl || ""),
+      keys: Array.isArray(cfg.keys) ? [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))] : [],
+      allowedModels: Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [],
+    };
   }
   // 兼容旧 providerKeys 形态：有 key 但无 configs 时视为通用供应商（baseUrl 为空，需后补）
   const keys = loadProviderKeys(id, { file });
-  if (keys.length) return { baseUrl: "", keys };
+  if (keys.length) return { baseUrl: "", keys, allowedModels: [] };
   return null;
 }
 
@@ -322,23 +356,30 @@ export function saveProviderBaseUrl(id, baseUrl, { file = defaultStateFile() } =
   const configs = { ...loadProviderConfigs({ file }) };
   const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
   const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
-  if (!clean && !keys.length) {
+  const allowedModels = Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
+  if (!clean && !keys.length && !allowedModels.length) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: clean, keys };
+    if (allowedModels.length) configs[id].allowedModels = allowedModels;
   }
   writeStateImmediate(file, { providerConfigs: configs });
   return clean;
 }
 
-export function saveProviderConfig(id, { baseUrl, keys }, { file = defaultStateFile() } = {}) {
+export function saveProviderConfig(id, { baseUrl, keys, allowedModels }, { file = defaultStateFile() } = {}) {
   const cleanUrl = normalizeBaseUrl(baseUrl);
   const cleanKeys = [...new Set((Array.isArray(keys) ? keys : []).map((k) => String(k || "").trim()).filter(Boolean))];
+  const cleanAllowed = [...new Set((Array.isArray(allowedModels) ? allowedModels : []).map((m) => normalizeAllowedModel(m, id)).filter(Boolean))];
   const configs = { ...loadProviderConfigs({ file }) };
-  if (!cleanUrl && !cleanKeys.length) {
+  const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
+  // 保留已有的 allowedModels 若本次未传入
+  const finalAllowed = allowedModels === undefined ? (Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : []) : cleanAllowed;
+  if (!cleanUrl && !cleanKeys.length && !finalAllowed.length) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: cleanUrl, keys: cleanKeys };
+    if (finalAllowed.length) configs[id].allowedModels = finalAllowed;
   }
   // 同步清理旧 providerKeys 中同 id 的残留，避免双写
   const oldKeys = readState(file).providerKeys;
@@ -346,10 +387,62 @@ export function saveProviderConfig(id, { baseUrl, keys }, { file = defaultStateF
     const nextKeys = { ...oldKeys };
     delete nextKeys[id];
     writeStateImmediate(file, { providerKeys: nextKeys, providerConfigs: configs });
-    return { baseUrl: cleanUrl, keys: cleanKeys };
+    return { baseUrl: cleanUrl, keys: cleanKeys, allowedModels: finalAllowed };
   }
   writeStateImmediate(file, { providerConfigs: configs });
-  return { baseUrl: cleanUrl, keys: cleanKeys };
+  return { baseUrl: cleanUrl, keys: cleanKeys, allowedModels: finalAllowed };
+}
+
+// ---- 供应商模型白名单：providerConfigs.<id>.allowedModels（空 = 不限） ----
+export function loadProviderAllowedModels(id, { file = defaultStateFile() } = {}) {
+  const cfg = loadProviderConfig(id, { file });
+  if (cfg && Array.isArray(cfg.allowedModels)) return [...cfg.allowedModels];
+  const raw = readState(file).providerConfigs?.[id];
+  if (raw && Array.isArray(raw.allowedModels)) return [...new Set(raw.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))];
+  return [];
+}
+
+export function saveProviderAllowedModels(id, list, { file = defaultStateFile() } = {}) {
+  const clean = [...new Set((Array.isArray(list) ? list : []).map((m) => normalizeAllowedModel(m, id)).filter(Boolean))];
+  const configs = { ...loadProviderConfigs({ file }) };
+  const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
+  const baseUrl = normalizeBaseUrl(cur.baseUrl || loadProviderBaseUrl(id, { file }) || "");
+  const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
+  if (!baseUrl && !keys.length && !clean.length) {
+    delete configs[id];
+  } else {
+    configs[id] = { baseUrl, keys };
+    if (clean.length) configs[id].allowedModels = clean;
+  }
+  writeStateImmediate(file, { providerConfigs: configs });
+  return clean;
+}
+
+export function addProviderAllowedModel(id, model, opts = {}) {
+  const cur = loadProviderAllowedModels(id, opts);
+  const norm = normalizeAllowedModel(model, id);
+  if (!norm || cur.includes(norm)) return cur;
+  return saveProviderAllowedModels(id, [...cur, norm], opts);
+}
+
+export function removeProviderAllowedModel(id, model, opts = {}) {
+  return removeProviderAllowedModels(id, [model], opts);
+}
+
+export function removeProviderAllowedModels(id, targets = [], opts = {}) {
+  const set = new Set((Array.isArray(targets) ? targets : [targets]).map((m) => normalizeAllowedModel(m, id)).filter(Boolean));
+  const cur = loadProviderAllowedModels(id, opts);
+  const next = cur.filter((m) => !set.has(m));
+  return saveProviderAllowedModels(id, next, opts);
+}
+
+export function isModelAllowed(id, rawModel, { file = defaultStateFile() } = {}) {
+  const raw = String(rawModel || "").trim();
+  if (!raw) return true;
+  const allowed = loadProviderAllowedModels(id, { file });
+  if (!allowed.length) return true;
+  const norm = normalizeAllowedModel(raw, id);
+  return allowed.includes(norm);
 }
 
 // 常用模型勾选集（auto 候选池白名单）：空数组 = 不启用筛选（全量 auto）

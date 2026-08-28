@@ -129,6 +129,17 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     }
     mark(`up-${model}`);
     if (upRes && upRes.status >= 400) {
+      // 白名单 403 直通，不计冷却、不 fallback
+      const isAllowlistBlock = upRes.status === 403 && (upRes.headers?.get?.("x-mslxdff-allowlist") === "1");
+      if (isAllowlistBlock) {
+        let bodyText = null;
+        try { bodyText = await upRes.clone().text(); } catch {}
+        let errBody = { error: `model not allowed for provider` };
+        try { errBody = bodyText ? JSON.parse(bodyText) : errBody; } catch { errBody = { error: bodyText || "model not allowed" }; }
+        logError(model, 403, errBody.error || "model not allowed");
+        evt("upstream-error", { reqId, model, status: 403, message: errBody.error, timing: upRes._t ?? null });
+        return json(res, 403, errBody);
+      }
       if (auto) await auto.recordError(model, { status: upRes.status });
       lastErr = { model, upstream: upRes, status: upRes.status, message: null };
       logError(model, upRes.status, `upstream ${upRes.status}`);
