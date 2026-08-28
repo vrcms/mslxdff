@@ -205,10 +205,18 @@ export function loadPreferredModel({ file = defaultStateFile() } = {}) {
 // 兼容旧版单字符串 `openrouter: "sk-1"`（读到自动转数组）。
 // env `MSLXDFF_<ID>_KEY`（大写）优先，state 兜底；key 为空视为未配置
 export const providerKeyEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_KEY`;
+export const providerBaseUrlEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_BASE_URL`;
 
 export function loadProviderKeys(id, { file = defaultStateFile() } = {}) {
   const env = (process.env[providerKeyEnv(id)] || "").trim();
   if (env) return [env];
+  // 通用供应商的 keys 优先从 providerConfigs 读取
+  const configs = readState(file).providerConfigs;
+  const cfg = configs && typeof configs === "object" ? configs[id] : undefined;
+  if (cfg && typeof cfg === "object" && Array.isArray(cfg.keys)) {
+    const list = [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))];
+    if (list.length) return list;
+  }
   const keys = readState(file).providerKeys;
   const v = keys && typeof keys === "object" ? keys[id] : undefined;
   if (typeof v === "string") return v.trim() ? [v.trim()] : [];
@@ -267,6 +275,81 @@ export function saveProviderShareKeys(id, on, { file = defaultStateFile() } = {}
   else delete map[id];
   writeStateImmediate(file, { providerShareKeys: map });
   return !!on;
+}
+
+// ---- 通用 OpenAI 兼容供应商配置：providerConfigs: { [id]: { baseUrl, keys } } ----
+function normalizeBaseUrl(url) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+  return s.replace(/\/+$/, "");
+}
+
+export function loadProviderConfigs({ file = defaultStateFile() } = {}) {
+  const v = readState(file).providerConfigs;
+  if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  return {};
+}
+
+export function loadProviderConfig(id, { file = defaultStateFile() } = {}) {
+  const envUrl = (process.env[providerBaseUrlEnv(id)] || "").trim();
+  const envKeys = loadProviderKeys(id, { file });
+  // env 覆盖时以 env 为准
+  if (envUrl || (process.env[providerKeyEnv(id)] || "").trim()) {
+    const baseUrl = envUrl || loadProviderConfigs({ file })[id]?.baseUrl || "";
+    if (baseUrl || envKeys.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys };
+    return null;
+  }
+  const configs = loadProviderConfigs({ file });
+  const cfg = configs[id];
+  if (cfg && typeof cfg === "object") {
+    return { baseUrl: normalizeBaseUrl(cfg.baseUrl || ""), keys: Array.isArray(cfg.keys) ? [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))] : [] };
+  }
+  // 兼容旧 providerKeys 形态：有 key 但无 configs 时视为通用供应商（baseUrl 为空，需后补）
+  const keys = loadProviderKeys(id, { file });
+  if (keys.length) return { baseUrl: "", keys };
+  return null;
+}
+
+export function loadProviderBaseUrl(id, opts = {}) {
+  const env = (process.env[providerBaseUrlEnv(id)] || "").trim();
+  if (env) return normalizeBaseUrl(env);
+  const cfg = loadProviderConfigs(opts)[id];
+  return cfg && typeof cfg.baseUrl === "string" ? normalizeBaseUrl(cfg.baseUrl) : "";
+}
+
+export function saveProviderBaseUrl(id, baseUrl, { file = defaultStateFile() } = {}) {
+  const clean = normalizeBaseUrl(baseUrl);
+  const configs = { ...loadProviderConfigs({ file }) };
+  const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
+  const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
+  if (!clean && !keys.length) {
+    delete configs[id];
+  } else {
+    configs[id] = { baseUrl: clean, keys };
+  }
+  writeStateImmediate(file, { providerConfigs: configs });
+  return clean;
+}
+
+export function saveProviderConfig(id, { baseUrl, keys }, { file = defaultStateFile() } = {}) {
+  const cleanUrl = normalizeBaseUrl(baseUrl);
+  const cleanKeys = [...new Set((Array.isArray(keys) ? keys : []).map((k) => String(k || "").trim()).filter(Boolean))];
+  const configs = { ...loadProviderConfigs({ file }) };
+  if (!cleanUrl && !cleanKeys.length) {
+    delete configs[id];
+  } else {
+    configs[id] = { baseUrl: cleanUrl, keys: cleanKeys };
+  }
+  // 同步清理旧 providerKeys 中同 id 的残留，避免双写
+  const oldKeys = readState(file).providerKeys;
+  if (oldKeys && typeof oldKeys === "object" && oldKeys[id] !== undefined) {
+    const nextKeys = { ...oldKeys };
+    delete nextKeys[id];
+    writeStateImmediate(file, { providerKeys: nextKeys, providerConfigs: configs });
+    return { baseUrl: cleanUrl, keys: cleanKeys };
+  }
+  writeStateImmediate(file, { providerConfigs: configs });
+  return { baseUrl: cleanUrl, keys: cleanKeys };
 }
 
 // 常用模型勾选集（auto 候选池白名单）：空数组 = 不启用筛选（全量 auto）

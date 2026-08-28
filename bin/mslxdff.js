@@ -389,25 +389,76 @@ if (args.includes("-provider") || args.includes("--provider")) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
     console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
+    console.error("            mslxdff -provider openrouter set-url https://api.example.com/v1");
+    console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx   add generic OpenAI-compatible provider");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
+  }
+  // 通用供应商快捷添加：mslxdff -provider add <id> <baseUrl> <key>
+  if (id === "add") {
+    const gid = sub;
+    const gBase = rest[1];
+    const gKey = rest[2];
+    if (!gid || !gBase || !gKey) {
+      console.error("usage: mslxdff -provider add <id> <baseUrl> <key>");
+      console.error("       e.g. mslxdff -provider add myapi https://api.example.com/v1 sk-xxx");
+      process.exit(1);
+    }
+    if (gid === "opencode" || gid === "oc" || gid === "openrouter") {
+      console.error(`provider "${gid}" is built-in — use: mslxdff -provider ${gid} add <key>  or  mslxdff -provider ${gid} set-url <url>`);
+      process.exit(1);
+    }
+    const { saveProviderConfig, loadProviderConfig, loadProviderShareKeys } = await import("../src/state.js");
+    const { normalizeProviderId } = await import("../src/providers/model-id.js");
+    const nid = normalizeProviderId(gid);
+    if (!nid) { console.error(`invalid provider id: ${gid}`); process.exit(1); }
+    if (!/^https?:\/\/.+/.test(String(gBase).trim())) { console.error(`invalid baseUrl: ${gBase} (must start with http:// or https://)`); process.exit(1); }
+    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [] };
+    const keys = [...new Set([...(cur.keys || []), String(gKey).trim()].filter(Boolean))];
+    saveProviderConfig(nid, { baseUrl: String(gBase).trim(), keys });
+    console.log(`added generic provider: ${nid}`);
+    console.log(`  baseUrl: ${String(gBase).trim().replace(/\/+$/, "")}`);
+    console.log(`  keys: ${keys.length} (${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")})`);
+    console.log(`  share: ${loadProviderShareKeys(nid) ? "ON" : "off"}   (mslxdff -provider ${nid} share on|off)`);
+    console.log(`  use as: ${nid}/<model-id>  — restart daemon to activate`);
+    process.exit(0);
   }
   if (id === "opencode" || id === "oc") {
     console.log("opencode is the default (bare) provider — it needs no API key and can never be shared with peers");
     console.log("(its IP-based rate limit is spread by peer forwarding itself)");
     process.exit(0);
   }
-  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys, loadProviderShareKeys, saveProviderShareKeys } = await import("../src/state.js");
+  const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys, loadProviderShareKeys, saveProviderShareKeys, loadProviderConfig, saveProviderConfig, saveProviderBaseUrl, loadProviderConfigs } = await import("../src/state.js");
   if (sub === "clear") {
-    saveProviderKeys(id, []);
+    const configs = loadProviderConfigs();
+    if (configs[id]) {
+      saveProviderConfig(id, { baseUrl: "", keys: [] });
+    } else {
+      saveProviderKeys(id, []);
+    }
     console.log(`cleared ${id} API keys (provider disabled on next daemon start)`);
+    process.exit(0);
+  }
+  if (sub === "set-url" || sub === "setUrl" || sub === "url") {
+    const url = rest[1];
+    if (!url) {
+      console.error(`usage: mslxdff -provider ${id} set-url <baseUrl>`);
+      process.exit(1);
+    }
+    if (!/^https?:\/\/.+/.test(String(url).trim())) {
+      console.error(`invalid baseUrl: ${url} (must start with http:// or https://)`);
+      process.exit(1);
+    }
+    const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+    saveProviderConfig(id, { baseUrl: String(url).trim(), keys: cur.keys || [] });
+    console.log(`set ${id} baseUrl: ${String(url).trim().replace(/\/+$/, "")} — restart daemon to activate`);
     process.exit(0);
   }
   if (sub === "share") {
@@ -427,14 +478,19 @@ if (args.includes("-provider") || args.includes("--provider")) {
   }
   if (sub === "list" || sub === "status") {
     const keys = loadProviderKeys(id);
+    const cfg = loadProviderConfig(id);
+    const baseUrl = cfg?.baseUrl || "";
+    if (baseUrl) console.log(`provider: ${id}  baseUrl: ${baseUrl}`);
+    else console.log(`provider: ${id}${id === "openrouter" ? " (built-in baseUrl: https://openrouter.ai/api/v1)" : ""}`);
     if (keys.length) {
-      console.log(`provider: ${id} (${keys.length} key${keys.length > 1 ? "s" : ""})`);
+      console.log(`  keys: ${keys.length} key${keys.length > 1 ? "s" : ""}`);
       keys.forEach((k, i) => console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
       console.log(`  remove by: mslxdff -provider ${id} remove <seq> [seq...] | <key-value>`);
     } else {
-      console.log(`provider: ${id} (no keys configured)`);
+      console.log(`  keys: (no keys configured)`);
     }
     console.log(`  share keys to peers:   ${loadProviderShareKeys(id) ? "ON" : "off"}   (mslxdff -provider ${id} share on|off)`);
+    if (baseUrl) console.log(`  set url: mslxdff -provider ${id} set-url <baseUrl>`);
     console.log(`  NOTE: opencode is the default provider and can never be shared`);
     process.exit(0);
   }
@@ -444,8 +500,17 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.error("usage: mslxdff -provider openrouter add <key>");
       process.exit(1);
     }
-    const added = addProviderKey(id, key);
-    console.log(`added ${id} API key (now ${added.length} total) — restart daemon to activate`);
+    // 通用供应商：keys 存 providerConfigs，需保留 baseUrl
+    const configs = loadProviderConfigs();
+    if (configs[id]) {
+      const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+      const keys = [...new Set([...(cur.keys || []), String(key).trim()].filter(Boolean))];
+      saveProviderConfig(id, { baseUrl: cur.baseUrl || "", keys });
+      console.log(`added ${id} API key (now ${keys.length} total) — restart daemon to activate`);
+    } else {
+      const added = addProviderKey(id, key);
+      console.log(`added ${id} API key (now ${added.length} total) — restart daemon to activate`);
+    }
     process.exit(0);
   }
   if (sub === "remove") {
@@ -472,7 +537,17 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.log("nothing to remove");
       process.exit(0);
     }
-    const remaining = removeProviderKeys(id, [...new Set(toRemove)]);
+    const configs = loadProviderConfigs();
+    let remaining;
+    if (configs[id]) {
+      const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+      const set = new Set([...new Set(toRemove)].map((k) => String(k).trim()));
+      const keys = (cur.keys || []).filter((k) => !set.has(k));
+      saveProviderConfig(id, { baseUrl: cur.baseUrl || "", keys });
+      remaining = keys;
+    } else {
+      remaining = removeProviderKeys(id, [...new Set(toRemove)]);
+    }
     console.log(`removed ${current.length - remaining.length} ${id} API key(s) (now ${remaining.length} total) — restart daemon to activate`);
     process.exit(0);
   }
@@ -482,8 +557,16 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.error("no key given");
       process.exit(1);
     }
-    saveProviderKeys(id, keys);
-    console.log(`set ${id} API keys (${keys.length}: ${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}) — restart daemon to activate`);
+    const configs = loadProviderConfigs();
+    if (configs[id]) {
+      const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+      const clean = [...new Set(keys.map((k) => String(k).trim()).filter(Boolean))];
+      saveProviderConfig(id, { baseUrl: cur.baseUrl || "", keys: clean });
+      console.log(`set ${id} API keys (${clean.length}: ${clean.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}) — restart daemon to activate`);
+    } else {
+      saveProviderKeys(id, keys);
+      console.log(`set ${id} API keys (${keys.length}: ${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}) — restart daemon to activate`);
+    }
     process.exit(0);
   }
   // 交互式隐藏输入：多行直到空行，逐一追加到现有 keys
@@ -1113,6 +1196,24 @@ if (providerPlugin) {
     console.log(`provider enabled: openrouter (${orKeys.length} key${orKeys.length > 1 ? "s" : ""})`);
     appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter", keys: orKeys.length });
   }
+  // 通用 OpenAI 兼容供应商：读 providerConfigs，逐个创建 generic provider
+  const { loadProviderConfigs } = await import("../src/state.js");
+  const genericConfigs = loadProviderConfigs();
+  for (const [gid, cfg] of Object.entries(genericConfigs)) {
+    if (gid === "opencode" || gid === "openrouter") continue;
+    const base = String(cfg?.baseUrl || "").trim();
+    const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
+    if (!base || !keys.length) continue;
+    try {
+      const { createGenericProvider } = await import("../src/providers/generic.js");
+      providers.push(createGenericProvider({ id: gid, baseUrl: base, apiKeys: keys }));
+      console.log(`provider enabled: ${gid} (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base}`);
+      appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base });
+    } catch (err) {
+      console.log(`provider ${gid} failed: ${err?.message || err}`);
+      appendEvent({ ts: Date.now(), type: "provider-error", provider: gid, error: String(err?.message || err) });
+    }
+  }
   const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
   upstream = createProviderDispatcher(providers);
   appendEvent({ ts: Date.now(), type: "providers", providers: providers.map((p) => p.id) });
@@ -1527,7 +1628,8 @@ Usage:
   mslxdff -showtoken               print the current auth token
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
-  mslxdff -provider openrouter [key...|add|remove|list|clear]  configure provider API keys (multiple keys = rotating accounts; interactive hidden append on empty input)
+  mslxdff -provider add <id> <baseUrl> <key>  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1)
+  mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]  configure provider API keys/URL (multiple keys = rotating, set-url for generic)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups

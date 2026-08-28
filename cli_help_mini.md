@@ -34,10 +34,12 @@
 | 模型去勾 | `-model unpick <id>` | 从 picks 移除 |
 | 模型查勾 | `-model picks` | 列 picks |
 | 模型清空 | `-model pick clear` | 清空 picks |
+| 供应商新增 | `-provider add <id> <baseUrl> <key>` | 一键添加通用 OpenAI 兼容供应商 |
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
-| 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share 状态 |
+| 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
+| 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
 | 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy |

@@ -29,34 +29,35 @@
 
 mslxdff 是把 opencode.ai 的免费模型池（以及可选的 OpenRouter 免费模型）包装成**本地 OpenAI 兼容代理**的零依赖 Node 服务：客户端（OpenCode / Claude Code / WorkBuddy 等）把请求打到 `http://127.0.0.1:8989/v1/*`，mslxdff 负责模型排序、自动选择、慢模型降权、多账户轮转、群组接力，最后转发到上游。
 
-## 3. 多供应商架构（0.1.56）
+## 3. 多供应商架构（0.1.56 + 通用 OpenAI 兼容 0.1.59）
 
 ```
 ┌─ 客户端 ─────────────────────────────┐
 │  model = "big-pickle"                 │  ← 裸 id：默认供应商（opencode）
 │  model = "openrouter/google/gemma:free"│  ← 带前缀：路由到指定供应商
+│  model = "myapi/gpt-4"               │  ← 通用 OpenAI 兼容供应商
 └──────────────┬───────────────────────┘
-               ▼
-  POST /v1/chat/completions
-               ▼
-   ┌─ src/providers/dispatcher.js ──────────┐
-   │  splitModelId(): 按 '<provider>/<raw>' │
-   │  拆前缀；转发前剥掉前缀只发原始 id      │
-   └────────┬──────────────┬───────────────┘
-            ▼              ▼
-   ┌─ opencode.js ──┐  ┌─ openrouter.js ──┐
-   │ createUpstream │  │ createOpenRouter  │
-   │ (upstream.js)  │  │  Provider        │
-   └────────────────┘  └──────────────────┘
-                        │  apiKeys: [...]  多 key 轮转
-                        │  keyring.js:     冷却隔离(30s)
-                        └──────────────────
-                            ▼
-                 openrouter.ai/api/v1
+                ▼
+   POST /v1/chat/completions
+                ▼
+    ┌─ src/providers/dispatcher.js ──────────┐
+    │  splitModelId(): 按 '<provider>/<raw>' │
+    │  拆前缀；转发前剥掉前缀只发原始 id      │
+    └────────┬──────────────┬───────────────┬───────────────┘
+             ▼              ▼               ▼
+    ┌─ opencode.js ──┐  ┌─ openrouter.js ──┐ ┌─ generic.js ──┐
+    │ createUpstream │  │ createOpenRouter  │ │ createGeneric │
+    │ (upstream.js)  │  │  Provider        │ │  Provider     │
+    └────────────────┘  └──────────────────┘ └───────────────┘
+                         │  apiKeys: [...]    │  baseUrl + keys
+                         │  keyring.js:       │  keyring.js
+                         └──────────────────  └──────────────
+                             ▼                    ▼
+                  openrouter.ai/api/v1    <custom baseUrl>/v1
 ```
 
 - **前缀规则**：`<provider>/<raw-id>`。裸 id 恒指默认供应商（opencode），向后兼容。模型对外 id 由各 provider 用 `joinModelId` 前缀化，客户端看到的就是带前缀的完整 id；转发时 dispatcher 剥前缀。（ADR-0007）
-- **默认供应商 opencode 恒启用**；`openrouter` 在配了任一 key 时自动启用（env `MSLXDFF_OPENROUTER_KEY` 或 state `providerKeys.openrouter`）。
+- **默认供应商 opencode 恒启用**；`openrouter` 在配了任一 key 时自动启用（env `MSLXDFF_OPENROUTER_KEY` 或 state `providerKeys.openrouter`）；**通用供应商**在 `state.json providerConfigs.<id> = { baseUrl, keys }` 均非空时启用（`mslxdff -provider add <id> <baseUrl> <key>`），`baseUrl` 为 OpenAI 兼容根（如 `https://api.example.com/v1`），`model` 形如 `myapi/gpt-4`。
 - **未识别前缀**回退：整体当裸 id 交给默认供应商处理（例如用户传 `claude/sonnet` 想走 opencode，兼容）。
 - **瞬时 key 共享（ADR-0008）**：供应商可配置 `shareKeysToPeers`（默认关）。开启后，本节点在 outgoing 转发（peer/组员接力）时把该供应商 key 列表放 `x-mslxdff-share-keys` 头附带；组员仅本次请求借用，用完即弃不落盘。**opencode 恒被排除**（无 key、限流以 IP 为主，IP 分散由 peer 转发天然实现）。
 
@@ -99,6 +100,7 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | 群组接力 | 组员/组长网格，赶 IP 级限流，宽带成员经 Leader 中继 | `src/routes/chat/peer*` | `-creategroup/-addtogroup/-group…` |
 | 免费额度匿名兜底 | `public` 429 且 free 模型 → 空 `Authorization` 重试（hermes 通道） | `src/upstream.js` | `MSLXDFF_FREE_ANON_DELAY_MS`(1000)/`_RETRIES`(3)/`MSLXDFF_FREE_ANON=0` 关 |
 | Keep-Alive + 预热 | undici keepAlive 30/60s，`srv.ready` 预拉模型 | `src/upstream.js` | `MSLXDFF_UPSTREAM_KEEPALIVE_*`、`MSLXDFF_PREHEAT=0` |
+| 通用 OpenAI 兼容供应商 | `providerConfigs.<id>={baseUrl,keys}`，`mslxdff -provider add <id> <baseUrl> <key>` 一键添加，`set-url` 改地址，`list` 看 `baseUrl+keys`，`generic.js` 复用 keyring/retry，前缀路由 `myapi/gpt-4` | `src/providers/generic.js`, `src/state.js`, `bin/mslxdff.js` | `-provider add/set-url/list/share`, `MSLXDFF_<ID>_BASE_URL/_KEY` |
 | 插件系统 | 可替换上游/.mjs hook，失败仅记日志 | `src/plugins.js` + `docs/plugins.md` | `MSLXDFF_PLUGINS_DIR` |
 | WorkBuddy 同步 | `-setto workbuddy` 原子写 `~/.workbuddy/models.json` | `src/sync-workbuddy.js` | 仅认 127.0.0.1/v1 |
 | Daemon | 后台守护，pid/日志/事件流，auto-update | `src/daemon.js`, `bin/mslxdff.js` | `-d/-status/-debug/-log/-update` |
@@ -118,7 +120,8 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | `-port N` | 持久化端口（写 state，重启 daemon） |
 | `-model list/set/status/refresh/pick/unpick/…` | 模型查看/默认/健康/勾选集管理 |
 | `-models` | 交互式模型多选 |
-| `-provider <id> [key...|add|remove|list|clear|share]` | 配置供应商 key（多 key 轮转，remove 支持序号；list 1 起编；share on\|off 开关键瞬时共享，ADR-0008） |
+| `-provider add <id> <baseUrl> <key>` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，`myapi/gpt-4` 前缀路由） |
+| `-provider <id> [key...|add|remove|list|clear|share|set-url]` | 配置供应商 key/地址（多 key 轮转，remove 支持序号；list 1 起编；share on\|off 开关键瞬时共享，ADR-0008；set-url 改 baseUrl） |
 | `-setto workbuddy [modelId]` | 同步默认模型到 WorkBuddy |
 | `-creategroup` / `-addtogroup` / `-group …` / `-leavegroup` / `-delgroup` | 群组生命周期（组员用 `-group leave`，组长用 `-delgroup`，ADR-0005/0006） |
 | `-showtoken` / `-refresh-token` | 读 / 轮换 auth token |
@@ -130,9 +133,10 @@ SSE 流式转发逐 chunk / 非流式透传 JSON
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MSLXDFF_PORT` | 8989 | 监听端口（裸 `PORT` 忽略，见 AGENTS.md） |
-| `MSLXDFF_STATE_FILE` | `~/.config/mslxdff/state.json` | token/port/modelPicks/providerKeys 等持久化 |
+| `MSLXDFF_STATE_FILE` | `~/.config/mslxdff/state.json` | token/port/modelPicks/providerKeys/providerConfigs 等持久化 |
 | `MSLXDFF_DAEMON_DIR` | 随 state 派生 | daemon pid/log/models 目录 |
 | `MSLXDFF_OPENROUTER_KEY` / `_COOLDOWN_MS` / `_BASE_URL` / `_TIMEOUT_MS` | — / 30000 / 官方 / 30000 | openrouter 供应商 key 与行为 |
+| `MSLXDFF_<ID>_BASE_URL` / `MSLXDFF_<ID>_KEY` | — | 通用供应商 env 覆盖（`providerConfigs.<id>.baseUrl/keys`） |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | 默认供应商上游 |
 | `UPSTREAM_AUTH_TOKEN` | `public` | 上游鉴权值 |
 | `MODELS_REFRESH_MS` | 7200000 | 模型后台刷新间隔 |
@@ -166,7 +170,7 @@ mslxdff/
 │   ├── auto.js                自动模型：排序、冷却自愈、勾选集
 │   ├── reasoning.js           思考模式 reasoning_content 注入
 │   ├── time.js                上海时间格式化（Asia/Shanghai，fmtShanghai/YMDHM/HMS，用于所有展示）
-│   ├── state.js               state 持久化（缓存层 + token/port/modelPicks/providerKeys）
+│   ├── state.js               state 持久化（缓存层 + token/port/modelPicks/providerKeys/providerConfigs）
 │   ├── daemon.js              后台守护
 │   ├── plugins.js             插件加载/执行，失败隔离
 │   ├── sync-workbuddy.js      WorkBuddy models.json 同步
@@ -184,6 +188,7 @@ mslxdff/
 │       ├── model-id.js        splitModelId/joinModelId/normalizeProviderId
 │       ├── opencode.js        opencode 上游 provider
 │       ├── openrouter.js      OpenRouter provider（keyring + 品牌头 + 免费 filter + chatWithKeys 瞬时共享）
+│       ├── generic.js         通用 OpenAI 兼容 provider（baseUrl + keyring + 前缀化，不过滤 pricing）
 │       ├── keyring.js         多 key 轮转 + 冷却隔离
 │       ├── share-keys.js      ADR-0008 瞬时共享：header 组装/解析、opencode 恒排除
 │       └── index.js           导出

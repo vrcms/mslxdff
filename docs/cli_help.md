@@ -60,7 +60,8 @@
 | `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除 | 是 | — |
 | `mslxdff -model picks` | — | 列出当前勾选集 | 否 | — |
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
-| `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys（多 key 轮转）及共享开关 | 是 | 重启生效 |
+| `mslxdff -provider add <id> <baseUrl> <key>` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`） | 是 | 重启生效 |
+| `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
@@ -334,14 +335,15 @@
 
 ## 6. 供应商 Provider
 
-> 多供应商架构（ADR-0007）：`opencode` 为默认供应商（裸 id，向后兼容，恒启用，无 key）；其他供应商带 `<provider>/` 前缀（如 `openrouter/google/gemma:free`），按前缀路由并在转发前剥回原始 id。当前已实现 `openrouter`（OpenRouter 免费模型 20 个，匿名可拉 `GET /api/v1/models`，chat 必须有 key）。
+> 多供应商架构（ADR-0007 + 通用 0.1.59）：`opencode` 为默认供应商（裸 id，向后兼容，恒启用，无 key）；其他供应商带 `<provider>/` 前缀（如 `openrouter/google/gemma:free` / `myapi/gpt-4`），按前缀路由并在转发前剥回原始 id。已实现 `openrouter`（匿名可拉 `GET /api/v1/models`，chat 必须有 key）与通用 OpenAI 兼容供应商（`providerConfigs.<id>={baseUrl,keys}`，`mslxdff -provider add <id> <baseUrl> <key>` 一键添加）。
 
-### `-provider <id> [key...|add|remove|list|clear|share]`
+### `-provider add <id> <baseUrl> <key>` / `-provider <id> [key...|add|remove|list|clear|share|set-url]`
 
 #### 通用语法
 
 ```bash
-mslxdff -provider <id> [key...|add|remove|list|clear|share]
+mslxdff -provider add <id> <baseUrl> <key>          # 一键添加通用 OpenAI 兼容供应商
+mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 # 别名：--provider
 # id 归一化：toLowerCase + 非字母数字转 _
 # 特殊：opencode / oc 恒提示“无需 key、永不共享”并直接退出
@@ -421,7 +423,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
   - 可被环境变量覆盖：`MSLXDFF_<ID>_SHARE_KEYS`（见附录 A）。
 - **安全与排除**：
   - `opencode`/`oc` 恒被排除：`mslxdff -provider opencode ...` 直接提示 `needs no API key and can never be shared`；`share-keys` 三层过滤（白名单/组装/解析）均跳过 `DEFAULT_PROVIDER`。
-  - 瞬时借用：转发侧在 `POST /v1/chat/completions` 命中可共享供应商时，把 key 列表放私有头 `x-mslxdff-share-keys: provider=k1,k2` 附带；组员侧 `parseShareKeysHeader` 解析后 `dispatcher.chat(body, {shareKeys})` → `openrouter.chatWithKeys` 用临时 `keyring` 调上游，**用完即弃，不落盘**。
+  - 瞬时借用：转发侧在 `POST /v1/chat/completions` 命中可共享供应商时，把 key 列表放私有头 `x-mslxdff-share-keys: provider=k1,k2` 附带；组员侧 `parseShareKeysHeader` 解析后 `dispatcher.chat(body, {shareKeys})` → `provider.chatWithKeys` 用临时 `keyring` 调上游，**用完即弃，不落盘**。
 - **示例**：
   ```bash
   mslxdff -provider openrouter share          # 查看
@@ -430,12 +432,37 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
   mslxdff -provider openrouter list          # 一并显示 share 状态
   ```
 
+#### `mslxdff -provider add <id> <baseUrl> <key>`（通用 OpenAI 兼容供应商一键添加）
+
+- **语法**：`mslxdff -provider add <id> <baseUrl> <key>`
+- **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl>/chat/completions`，`GET <baseUrl>/models` 拉模型列表（不过滤，全量前缀化）。
+- **行为**：`saveProviderConfig(id, {baseUrl, keys:[key]})`，若 `id` 已存在则更新 `baseUrl` 并追加 key（去重）；`opencode/openrouter` 保留走原分支，误用 `add openrouter ...` 会提示改用 `add <key>` / `set-url`。
+- **校验**：`id` 经 `normalizeProviderId`，`baseUrl` 必须 `http(s)://` 前缀。
+- **输出**：`added generic provider: myapi / baseUrl: ... / keys: 1 (...) / use as: myapi/<model-id> — restart daemon to activate`
+- **示例**：
+  ```bash
+  mslxdff -provider add myapi https://api.example.com/v1 sk-xxx
+  mslxdff -provider myapi list        # 看 baseUrl + keys
+  # 调用
+  curl -H "Authorization: Bearer $(mslxdff -showtoken)" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"myapi/gpt-4","messages":[{"role":"user","content":"hi"}]}'
+  ```
+
+#### `mslxdff -provider <id> set-url <baseUrl>`（改通用供应商地址）
+
+- **语法**：`mslxdff -provider <id> set-url <baseUrl>`（别名 `setUrl`/`url`）
+- **作用**：仅改已注册通用供应商的 `baseUrl`，保留 `keys`；`openrouter` 的地址仍由 `MSLXDFF_OPENROUTER_BASE_URL` 控制，不建议用此改。
+- **输出**：`set <id> baseUrl: https://... — restart daemon to activate`
+- **示例**：
+  ```bash
+  mslxdff -provider myapi set-url https://api.new.com/v1
+  ```
+
 #### 存储与生效
 
-- **优先级**：`MSLXDFF_<ID>_KEY` env（单值）> `state.json providerKeys.<id>`（数组）。`opencode` 无视 key，恒为 `public`。
-- **文件**：`~/.config/mslxdff/state.json` 的 `providerKeys: { openrouter: ["sk-..."] }`（兼容旧版单字符串）与 `providerShareKeys: { openrouter: true }`。
+- **优先级**：`MSLXDFF_<ID>_KEY` env（单值）> `state.json providerConfigs.<id>.keys` / `providerKeys.<id>`（数组）；`MSLXDFF_<ID>_BASE_URL` env 覆盖 `providerConfigs.<id>.baseUrl`。`opencode` 无视 key，恒为 `public`。
+- **文件**：`~/.config/mslxdff/state.json` 的 `providerConfigs: { myapi: { baseUrl: "https://api.example.com/v1", keys: ["sk-..."] } }`（新）与 `providerKeys: { openrouter: ["sk-..."] }`（兼容旧版单字符串）与 `providerShareKeys: { openrouter: true }`。
 - **生效时机**：修改后需重启 daemon（`stop` + `start` 或 ` -port` 触发的重启）。
-- **多 key 调度**：`src/providers/keyring.js` round-robin，`401/403/429/5xx` 冷却 30s（`MSLXDFF_OPENROUTER_COOLDOWN_MS`），全冷却则抛 `provider temporarily unavailable`。
+- **多 key 调度**：`src/providers/keyring.js` round-robin，`401/403/429/5xx` 冷却 30s（`MSLXDFF_GENERIC_COOLDOWN_MS` / `MSLXDFF_OPENROUTER_COOLDOWN_MS`），全冷却则抛 `provider temporarily unavailable`。
 
 ---
 
@@ -610,7 +637,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
 - **工具**（3 类 + 纯回答）：
   - `run_command`：执行 `cli_help.md` 所列任意命令（不含 `mslxdff` 前缀），**仅拦截 `-uninstall`**，`-stop`/`-port` 等可执行；模糊匹配与精确性由大模型负责，进程侧不做二次归一。
   - `read_file`：读取**项目内**文件（`src/` `docs/` `package.json`）或日志目录（`~/.config/mslxdff/*`），用于“看看日志/配置”，超出项目根或超 20KB 截断，目录则列文件名。
-  - `curl`：网络/HTTP 探活，检测上游或本机可用性。支持 `url` 简写（`upstream`=`https://opencode.ai/zen/v1/models`、`local/health`=`http://127.0.0.1:<port>/health`、`local/models`），也支持完整 `http(s)` URL；可选 `method`/`headers`/`body`/`timeoutMs`，上游自动补头、本机 `/v1/*` 自动带 token。返回状态码、耗时、响应头与前 6KB body，便于自检。
+  - `curl`：网络/HTTP 探活，检测上游或本机可用性。支持 `url` 简写（`upstream`=`https://opencode.ai/zen/v1/models`、`local/health`=`http://127.0.0.1:<port>/health`、`local/models`），也支持完整 `http(s)` URL；可选 `method`/`headers`/`body`/`timeoutMs`，上游自动补 `x-opencode-client/desktop` 与 `Authorization: Bearer public`，本机 `/v1/*` 自动带 state token。返回状态码、耗时、响应头与前 6KB body，便于自检“上游是否活着/本地是否监听”。
   - 纯回答：闲聊或解释时不调工具，直接中文回复。
 - **历史与压缩**：
   - 持久化：`~/.config/mslxdff/chat-history.json`（`MSLXDFF_CHAT_HISTORY` 可覆盖），存最近 60 条，`daemon` 重启不影响（chat 是前台独立进程，与 daemon 无父子关系）。
@@ -664,7 +691,13 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
 | `MSLXDFF_OPENROUTER_REFERER` | `https://github.com/mslxdff` | OpenRouter 必需 `HTTP-Referer` |
 | `MSLXDFF_OPENROUTER_TITLE` | `mslxdff` | OpenRouter 必需 `X-Title` |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
+| `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |
+| `MSLXDFF_GENERIC_TIMEOUT_MS` | `30000` | 通用供应商单次 fetch 超时 |
+| `MSLXDFF_GENERIC_COOLDOWN_MS` | `30000` | 通用供应商多 key 冷却 |
+| `MSLXDFF_GENERIC_KEEPALIVE_TIMEOUT` | `30000` | 通用 keepAlive 超时 |
+| `MSLXDFF_GENERIC_KEEPALIVE_MAX_TIMEOUT` | `60000` | 通用 keepAlive 最大超时 |
+| `MSLXDFF_GENERIC_KEEPALIVE_CONNECTIONS` | `20` | 通用 keepAlive 连接数 |
 | `MSLXDFF_SHARE_PROVIDERS` | — | 高级：显式共享白名单，逗号分隔（如 `openrouter`）；出现则覆盖自动判定，且 `opencode` 恒被过滤 |
 | `MODELS_REFRESH_MS` | `7200000` (2h) | 模型列表后台刷新间隔 |
 | `MSLXDFF_PREFERRED_MODEL` | `big-pickle` | 覆盖出厂首选模型（`src/auto.js`） |
@@ -715,6 +748,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
     "preferredModel": "big-pickle",
     "modelPicks": ["big-pickle", "openrouter/..."],
     "providerKeys": { "openrouter": ["sk-...","sk-..."] },
+    "providerConfigs": { "myapi": { "baseUrl": "https://api.example.com/v1", "keys": ["sk-..."] } },
     "providerShareKeys": { "openrouter": true },
     "peers": [],
     "groups": { "my@mslxd": { "members": { "leader": {...}, "http://...": {...} } } },
@@ -733,7 +767,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share]
 - `0`：成功（`--help`/`--status`/`--log`/`--plugins`/`-model list` 等正常结束也为 0）。
 - `1`：参数错误或业务失败（`invalid port`、`usage: ...`、`could not refresh models`、`join failed`、`remove failed`、`group remove requires being the leader` 等）。
 - 常见 `console.error` 提示：
-  - `usage: mslxdff -provider <id> [key...|add|remove|list|clear|share]` — `-provider` 缺 id。
+  - `usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]` — `-provider` 缺 id。
+  - `usage: mslxdff -provider add <id> <baseUrl> <key>` — 通用供应商缺参。
   - `opencode is the default (bare) provider — it needs no API key and can never be shared` — 对 `opencode` 执行 provider 操作。
   - `group remove requires being the leader — this node leads no group` — 非 leader 尝试踢人。
   - `member #N not found — group "name" has M member(s)` — 序号越界。
