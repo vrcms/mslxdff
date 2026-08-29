@@ -13,7 +13,7 @@
 - [4. 认证与端口](#4-认证与端口)
 - [5. 模型管理](#5-模型管理)
 - [6. 供应商 Provider](#6-供应商-provider)
-- [7. WorkBuddy 同步](#7-workbuddy-同步)
+- [7. 外部同步（WorkBuddy / opencode）](#7-外部同步workbuddy--opencode)
 - [8. 群组网络](#8-群组网络)
 - [9. 帮助](#9-帮助)
 - [附录 A 环境变量](#附录-a-环境变量)
@@ -70,6 +70,7 @@
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
+| `mslxdff -setto opencode [modelId]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
@@ -562,7 +563,34 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 
 ---
 
-## 7. WorkBuddy 同步
+## 7. 外部同步（WorkBuddy / opencode）
+
+### `-setto opencode [modelId]` / `--setto opencode [modelId]`
+
+- **语法**：`mslxdff -setto opencode [modelId]`（`--setto` 等价）
+- **作用**：把本地网关 `http://127.0.0.1:<port>/v1` 以 `provider.mslxdff` 写入 `~/.config/opencode/opencode.json`，使 opencode 把 mslxdff 当供应商（`mslxdff/mslxdff-<id>`）。默认写 **alias** `mslxdff-<id>` 防重名（如 `deepseek`→`mslxdff-deepseek`，避免与 `workbuddy/deepseek` 混乱），**原名仍兼容**（旧裸 `deepseek` 键视为同一逻辑模型，不强制迁移；网关对 `mslxdff-deepseek` 与 `deepseek` 双兼容，重复添加幂等）。
+- **参数**：
+  - 无 `modelId`：取 `loadPreferredModel() || getPreferredModel()`（`big-pickle` 兜底），归一后转 alias。
+  - 有 `modelId`：`normalizeModel(raw)` 归一后 `toInternalId`→`toExternalAlias`（`mslxdff-deepseek` 不会双前缀），`savePreferredModel`，`modelId` 不能为 `auto` 或空。
+- **流程**：
+  1. 4s 超时尝试刷新模型列表，若 `internal` 与 `alias` 均不在 free 列表则 `warn` 但仍继续。
+  2. `loadToken()` 取 token，`getPort() || MSLXDFF_PORT || 8989` 取端口，`opencodeConfigPath()` 取文件（`OPENCODE_CONFIG` 可覆盖）。
+  3. `syncToOpencode({ id: alias, token, port, file })`：不存在则 `inserted`，已存在（`alias` 或原名 `internal` 任一存在即视为已存在）则 `updated`（不新增双键，保留原键，仅覆盖 `options.baseURL/apiKey`），原子写 `tmp→rename`，损坏备份 `.bak`。
+- **输出**：
+  ```
+  default model set to: deepseek (daemon hot-reloads on next request)
+  synced to opencode: inserted "mslxdff-deepseek" (alias for "deepseek", 原名仍兼容) @ C:\Users\you\.config\opencode\opencode.json
+    url: http://127.0.0.1:8989/v1
+    alias: mslxdff-deepseek -> deepseek (opencode 选 mslxdff/mslxdff-deepseek 直达本地 deepseek)
+  ```
+- **入站兼容**：网关对 `POST /v1/chat/completions` 的 `model` 做 alias 还原：`mslxdff-deepseek`→`deepseek`、`mslxdff/mslxdff-deepseek`→`deepseek`、`deepseek` 原样，`x-mslxdff-alias` 头回显。
+- **示例**：
+  ```bash
+  mslxdff -setto opencode deepseek
+  mslxdff -setto opencode mslxdff-deepseek   # 已带前缀不双写，去重
+  mslxdff -setto opencode big-pickle
+  mslxdff -setto opencode   # 用当前首选
+  ```
 
 ### `-setto workbuddy [modelId]` / `--setto workbuddy [modelId]`
 
