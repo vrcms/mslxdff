@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { injectReasoningContent, normalizeModel } from "../../reasoning.js";
 import { isAutoModel } from "../../auto.js";
+import { toInternalId as aliasToInternal } from "../../sync-opencode.js";
 import { clientIp, json, readBody, parseHops, summarizePrompt, errMsg } from "../helpers.js";
 import { hedgeDelayMs, shouldHedge } from "../hedge.js";
 import { runHook } from "../../plugins.js";
@@ -39,9 +40,42 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
   const workbuddyUid = (req.headers["x-mslxdff-workbuddy-uid"] || req.headers["x-workbuddy-uid"] || "").toString().trim();
   const lockModel = req.headers["x-mslxdff-model-lock"] || "";
   const rawModel = body.model || "";
-  const requested = normalizeModel(lockModel || rawModel || "");
+  const normalizedRequested = normalizeModel(lockModel || rawModel || "");
+  // alias 还原：mslxdff-deepseek -> deepseek（原名仍兼容，双向支持 mslxdff/mslxdff-deepseek 与裸 mslxdff-deepseek/裸 deepseek）
+  let requested = normalizedRequested;
+  let aliasInfo = null;
+  if (requested.startsWith("mslxdff-")) {
+    const internal = aliasToInternal(requested);
+    if (internal) {
+      aliasInfo = `${requested} -> ${internal}`;
+      requested = internal;
+    }
+  } else if (requested.includes("/")) {
+    const slashIdx = requested.indexOf("/");
+    const rawPart = requested.slice(slashIdx + 1);
+    const providerPart = requested.slice(0, slashIdx);
+    if (rawPart.startsWith("mslxdff-")) {
+      const internal = aliasToInternal(rawPart);
+      if (internal) {
+        aliasInfo = `${requested} -> ${providerPart}/${internal} (alias stripped)`;
+        requested = `${providerPart}/${internal}`;
+        if (providerPart === "mslxdff") {
+          requested = internal;
+          aliasInfo = `${rawModel} -> ${internal} (mslxdff alias stripped)`;
+        }
+      }
+    } else if (providerPart === "mslxdff") {
+      // mslxdff/deepseek 原名直用 -> deepseek（原名兼容，provider 前缀剥离）
+      aliasInfo = `${requested} -> ${rawPart} (mslxdff provider stripped, 原名兼容)`;
+      requested = rawPart;
+    }
+  }
   const useAuto = isAutoModel(requested);
   mark("parsed");
+  if (aliasInfo) {
+    // 供日志与 header 透传
+    try { res.setHeader("x-mslxdff-alias", aliasInfo); } catch {}
+  }
 
   let order;
   if (lockModel) {
@@ -70,6 +104,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body.stream), durationMs: Date.now() - startedAt, ...info }).catch(() => {});
   };
   evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(body.stream), prompt: summarizePrompt(body), rawModel, requested, lockModel: lockModel || null });
+  if (aliasInfo) evt("alias", { reqId, alias: aliasInfo, rawModel, requested });
   if (Object.keys(shareKeys).length) evt("share-keys", { reqId, providers: Object.keys(shareKeys) });
   evt("ordered", { reqId, order, canFallback, canForwardPeers, useAuto, statuses: auto?.statuses?.() ?? null });
 
