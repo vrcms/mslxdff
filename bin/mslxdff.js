@@ -543,6 +543,36 @@ if (args.includes("-workbuddy") || args.includes("--workbuddy") || args.includes
   }
 }
 
+// -free / -free-check / --free / -free-watch : V2EX 限免白嫖雷达（仅 V2EX 单源）
+if (args.includes("-free") || args.includes("--free") || args.includes("-free-check") || args.includes("--free-check") || args.includes("-free-watch") || args.includes("--free-watch")) {
+  const isWatch = args.includes("-free-watch") || args.includes("--free-watch");
+  const { fetchV2exFree } = await import("../src/free-watcher.js");
+  const show = async () => {
+    const hits = await fetchV2exFree({ timeoutMs: 6000 });
+    const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+    console.log(`[V2EX] free check @ ${ts} — ${hits.length} hit(s)`);
+    if (!hits.length) {
+      console.log("(暂无命中 — 关键词：白嫖|限免|免费额度|注册送|羊毛，来源：/api/topics/latest.json + hot.json)");
+    } else {
+      for (const h of hits) console.log(`  ${h.title} | ${h.url} | ${h.node} ${h.replies}回复`);
+    }
+  };
+  if (!isWatch) {
+    try { await show(); } catch (err) { console.error(`V2EX 拉取失败: ${err?.message || err}`); process.exit(1); }
+    process.exit(0);
+  }
+  console.log("V2EX 白嫖雷达 watch 模式 — 每 5 分钟拉一次 Ctrl+C 退出");
+  const run = async () => {
+    try { await show(); } catch (err) { console.error(`[${new Date().toISOString().slice(11,19)}] 拉取失败: ${err?.message || err}`); }
+    console.log("---");
+  };
+  await run();
+  const timer = setInterval(run, 5 * 60 * 1000);
+  timer.unref?.();
+  // 保持前台常驻
+  await new Promise(() => {});
+}
+
 // -providers list : list all deployed upstream providers (opencode + openrouter + generic)
 if (args.includes("-providers") || args.includes("--providers")) {
   const idx = args.findIndex((x) => x === "-providers" || x === "--providers");
@@ -2080,6 +2110,8 @@ Usage:
   mslxdff -group remove <seq>      leader only: kick a member by its list sequence number
   mslxdff -leavegroup              leave every joined group as a member (leaders: use -delgroup)
   mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
+  mslxdff -free                    V2EX 白嫖雷达（仅 V2EX 单源：latest+hot 按 白嫖|限免|免费额度|注册送|羊毛 过滤）
+  mslxdff -free-watch              V2EX 白嫖雷达 watch 模式（每 5 分钟轮询）
   mslxdff -chat ["prompt"]       chat REPL（mimo-v2.5-free 优先/big-pickle 兜底，自然语言转命令，模糊匹配由模型完成，历史持久化，超长自动压缩，仅拦 -uninstall，daemon 重启不影响）
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -help                    show this help

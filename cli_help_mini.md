@@ -62,6 +62,8 @@
 | 全部离开 | `-leavegroup` / `--leavegroup` | 离开所有成员组 |
 | 解散组 | `-delgroup <name>` / `--delgroup` | 仅 leader 解散 |
 | 解封禁 | `-resetban [ip]` / `--resetban [ip]` | 清加组封禁 |
+| 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
+| 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
 | 帮助 | `-help` / `--help` / `-h` | 打印帮助 |
 
 ## 模型说明
