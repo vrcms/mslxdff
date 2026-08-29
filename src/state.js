@@ -293,11 +293,28 @@ export function saveProviderShareKeys(id, on, { file = defaultStateFile() } = {}
   return !!on;
 }
 
-// ---- 通用 OpenAI 兼容供应商配置：providerConfigs: { [id]: { baseUrl, keys, allowedModels } } ----
+// ---- 通用 OpenAI 兼容供应商配置：providerConfigs: { [id]: { baseUrl, keys, auths, allowedModels } } ----
+export const WORKBUDDY_DEFAULT_BASE_URL = "https://copilot.tencent.com";
 function normalizeBaseUrl(url) {
   const s = String(url || "").trim();
   if (!s) return "";
   return s.replace(/\/+$/, "");
+}
+function normalizeAuths(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const a of list) {
+    if (!a || typeof a !== "object") continue;
+    const uid = String(a.uid || a.userId || "").trim();
+    if (!uid) continue;
+    out.push({
+      uid,
+      domain: String(a.domain || "www.codebuddy.cn").trim() || "www.codebuddy.cn",
+      enterpriseId: String(a.enterpriseId || a.enterprise_id || "").trim(),
+      refreshToken: String(a.refreshToken || a.refresh_token || "").trim(),
+    });
+  }
+  return out;
 }
 
 function normalizeAllowedModel(model, providerId) {
@@ -323,24 +340,26 @@ export function loadProviderConfig(id, { file = defaultStateFile() } = {}) {
   const envKeys = loadProviderKeys(id, { file });
   // env 覆盖时以 env 为准
   if (envUrl || (process.env[providerKeyEnv(id)] || "").trim()) {
-    const baseUrl = envUrl || loadProviderConfigs({ file })[id]?.baseUrl || "";
+    const baseUrl = envUrl || loadProviderConfigs({ file })[id]?.baseUrl || (String(id).toLowerCase() === "workbuddy" ? WORKBUDDY_DEFAULT_BASE_URL : "");
     const cfg = loadProviderConfigs({ file })[id];
     const allowedModels = cfg && Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
-    if (baseUrl || envKeys.length || allowedModels.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys, allowedModels };
+    const auths = cfg && Array.isArray(cfg.auths) ? normalizeAuths(cfg.auths) : [];
+    if (baseUrl || envKeys.length || allowedModels.length || auths.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys, auths, allowedModels };
     return null;
   }
   const configs = loadProviderConfigs({ file });
   const cfg = configs[id];
   if (cfg && typeof cfg === "object") {
     return {
-      baseUrl: normalizeBaseUrl(cfg.baseUrl || ""),
+      baseUrl: normalizeBaseUrl(cfg.baseUrl || (String(id).toLowerCase() === "workbuddy" ? WORKBUDDY_DEFAULT_BASE_URL : "")),
       keys: Array.isArray(cfg.keys) ? [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))] : [],
+      auths: normalizeAuths(cfg.auths),
       allowedModels: Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [],
     };
   }
   // 兼容旧 providerKeys 形态：有 key 但无 configs 时视为通用供应商（baseUrl 为空，需后补）
   const keys = loadProviderKeys(id, { file });
-  if (keys.length) return { baseUrl: "", keys, allowedModels: [] };
+  if (keys.length) return { baseUrl: String(id).toLowerCase() === "workbuddy" ? WORKBUDDY_DEFAULT_BASE_URL : "", keys, auths: [], allowedModels: [] };
   return null;
 }
 
@@ -348,7 +367,32 @@ export function loadProviderBaseUrl(id, opts = {}) {
   const env = (process.env[providerBaseUrlEnv(id)] || "").trim();
   if (env) return normalizeBaseUrl(env);
   const cfg = loadProviderConfigs(opts)[id];
-  return cfg && typeof cfg.baseUrl === "string" ? normalizeBaseUrl(cfg.baseUrl) : "";
+  if (cfg && typeof cfg.baseUrl === "string" && normalizeBaseUrl(cfg.baseUrl)) return normalizeBaseUrl(cfg.baseUrl);
+  if (String(id || "").toLowerCase() === "workbuddy") return WORKBUDDY_DEFAULT_BASE_URL;
+  return "";
+}
+
+export function loadProviderAuths(id, { file = defaultStateFile() } = {}) {
+  const cfg = loadProviderConfigs({ file })[id];
+  if (cfg && Array.isArray(cfg.auths)) return normalizeAuths(cfg.auths);
+  return [];
+}
+export function saveProviderAuths(id, list, { file = defaultStateFile() } = {}) {
+  const clean = normalizeAuths(list);
+  const configs = { ...loadProviderConfigs({ file }) };
+  const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
+  const baseUrl = normalizeBaseUrl(cur.baseUrl || loadProviderBaseUrl(id, { file }) || "");
+  const keys = Array.isArray(cur.keys) ? [...new Set(cur.keys.filter((x) => typeof x === "string" && x.trim().length))] : loadProviderKeys(id, { file });
+  const allowedModels = Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
+  if (!baseUrl && !keys.length && !clean.length && !allowedModels.length) {
+    delete configs[id];
+  } else {
+    configs[id] = { baseUrl, keys };
+    if (clean.length) configs[id].auths = clean;
+    if (allowedModels.length) configs[id].allowedModels = allowedModels;
+  }
+  writeStateImmediate(file, { providerConfigs: configs });
+  return clean;
 }
 
 export function saveProviderBaseUrl(id, baseUrl, { file = defaultStateFile() } = {}) {
@@ -356,29 +400,34 @@ export function saveProviderBaseUrl(id, baseUrl, { file = defaultStateFile() } =
   const configs = { ...loadProviderConfigs({ file }) };
   const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
   const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
+  const auths = normalizeAuths(cur.auths);
   const allowedModels = Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
-  if (!clean && !keys.length && !allowedModels.length) {
+  if (!clean && !keys.length && !auths.length && !allowedModels.length) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: clean, keys };
+    if (auths.length) configs[id].auths = auths;
     if (allowedModels.length) configs[id].allowedModels = allowedModels;
   }
   writeStateImmediate(file, { providerConfigs: configs });
   return clean;
 }
 
-export function saveProviderConfig(id, { baseUrl, keys, allowedModels }, { file = defaultStateFile() } = {}) {
+export function saveProviderConfig(id, { baseUrl, keys, auths, allowedModels }, { file = defaultStateFile() } = {}) {
   const cleanUrl = normalizeBaseUrl(baseUrl);
   const cleanKeys = [...new Set((Array.isArray(keys) ? keys : []).map((k) => String(k || "").trim()).filter(Boolean))];
+  const cleanAuths = auths === undefined ? undefined : normalizeAuths(auths);
   const cleanAllowed = [...new Set((Array.isArray(allowedModels) ? allowedModels : []).map((m) => normalizeAllowedModel(m, id)).filter(Boolean))];
   const configs = { ...loadProviderConfigs({ file }) };
   const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
-  // 保留已有的 allowedModels 若本次未传入
+  // 保留已有的 allowedModels / auths 若本次未传入
   const finalAllowed = allowedModels === undefined ? (Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : []) : cleanAllowed;
-  if (!cleanUrl && !cleanKeys.length && !finalAllowed.length) {
+  const finalAuths = cleanAuths === undefined ? normalizeAuths(cur.auths) : cleanAuths;
+  if (!cleanUrl && !cleanKeys.length && !finalAllowed.length && !finalAuths.length) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: cleanUrl, keys: cleanKeys };
+    if (finalAuths.length) configs[id].auths = finalAuths;
     if (finalAllowed.length) configs[id].allowedModels = finalAllowed;
   }
   // 同步清理旧 providerKeys 中同 id 的残留，避免双写
@@ -387,10 +436,10 @@ export function saveProviderConfig(id, { baseUrl, keys, allowedModels }, { file 
     const nextKeys = { ...oldKeys };
     delete nextKeys[id];
     writeStateImmediate(file, { providerKeys: nextKeys, providerConfigs: configs });
-    return { baseUrl: cleanUrl, keys: cleanKeys, allowedModels: finalAllowed };
+    return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed };
   }
   writeStateImmediate(file, { providerConfigs: configs });
-  return { baseUrl: cleanUrl, keys: cleanKeys, allowedModels: finalAllowed };
+  return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed };
 }
 
 // ---- 供应商模型白名单：providerConfigs.<id>.allowedModels（空 = 不限） ----
@@ -408,10 +457,12 @@ export function saveProviderAllowedModels(id, list, { file = defaultStateFile() 
   const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
   const baseUrl = normalizeBaseUrl(cur.baseUrl || loadProviderBaseUrl(id, { file }) || "");
   const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
-  if (!baseUrl && !keys.length && !clean.length) {
+  const auths = normalizeAuths(cur.auths);
+  if (!baseUrl && !keys.length && !auths.length && !clean.length) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl, keys };
+    if (auths.length) configs[id].auths = auths;
     if (clean.length) configs[id].allowedModels = clean;
   }
   writeStateImmediate(file, { providerConfigs: configs });

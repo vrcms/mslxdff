@@ -36,6 +36,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
   const hops = parseHops(req.headers["x-mslxdff-hops"]);
   // ADR-0008：瞬时共享 key（组员侧接收）。本请求内有效，用完即弃。
   const shareKeys = parseShareKeysHeader(req.headers[SHARE_KEYS_HEADER] || "");
+  const workbuddyUid = (req.headers["x-mslxdff-workbuddy-uid"] || req.headers["x-workbuddy-uid"] || "").toString().trim();
   const lockModel = req.headers["x-mslxdff-model-lock"] || "";
   const rawModel = body.model || "";
   const requested = normalizeModel(lockModel || rawModel || "");
@@ -110,7 +111,10 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     const tUp = performance.now();
     evt("upstream-try", { reqId, model, attempt: idx + 1 });
     try {
-      upRes = await upstream.chat(forwarded, { shareKeys: Object.keys(shareKeys).length ? shareKeys : undefined });
+      const chatOpts = {};
+      if (Object.keys(shareKeys).length) chatOpts.shareKeys = shareKeys;
+      if (workbuddyUid) chatOpts.workbuddyUid = workbuddyUid;
+      upRes = await upstream.chat(forwarded, Object.keys(chatOpts).length ? chatOpts : undefined);
       evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });
     } catch (err) {
       if (auto) await auto.recordError(model, { message: errMsg(err) });

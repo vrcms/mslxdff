@@ -8,7 +8,7 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey, loadProviderKeys } from "../src/state.js";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey, loadProviderKeys, loadProviderAuths, loadProviderConfigs as loadProviderConfigsState } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
 import { normalizeModel } from "../src/reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
@@ -381,6 +381,96 @@ if (args.includes("-setto") || args.includes("--setto")) {
   process.exit(0);
 }
 
+// -workbuddy checkin/balance/list/remove : WorkBuddy 多号管理
+if (args.includes("-workbuddy") || args.includes("--workbuddy") || args.includes("-wb")) {
+  const idx = args.findIndex((x) => x === "-workbuddy" || x === "--workbuddy" || x === "-wb");
+  const sub = args[idx + 1];
+  if (!sub || sub === "checkin" || sub === "daily-checkin" || sub === "check-in") {
+    const { spawn } = await import("node:child_process");
+    const script = join(dirname(fileURLToPath(import.meta.url)), "..", "workbuddy-checkin.js");
+    const child = spawn(process.execPath, [script, ...args.slice(idx + 2)], { stdio: "inherit" });
+    child.on("close", (code) => process.exit(code ?? 0));
+    child.on("error", (err) => { console.error(`workbuddy checkin failed: ${err.message}`); process.exit(1); });
+    await new Promise(() => {});
+  } else if (sub === "balance" || sub === "balances" || sub === "credit" || sub === "credits") {
+    const asJson = args.includes("--json") || args.includes("-json");
+    const { loadProviderConfigs } = await import("../src/state.js");
+    const { fetchBalance } = await import("../src/providers/workbuddy-balance.js");
+    const cfg = loadProviderConfigs().workbuddy || {};
+    const auths = Array.isArray(cfg.auths) ? cfg.auths : [];
+    const keys = Array.isArray(cfg.keys) ? cfg.keys : [];
+    // fallback scan auths dir if state empty
+    let items = auths.map((a,i)=> ({ uid:a.uid, domain:a.domain, key: keys[i]||"" , auth:a }));
+    if (!items.length) {
+      try {
+        const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const dir = process.env.WORKBUDDY_AUTH_DIR || join(process.cwd(), "auths");
+        if (existsSync(dir)) {
+          for (const f of readdirSync(dir).filter(x=>x.startsWith("workbuddy-")&&x.endsWith(".json"))) {
+            try { const j=JSON.parse(readFileSync(join(dir,f),"utf8")); if(j?.account?.uid) items.push({uid:j.account.uid, domain:j.auth.domain||"www.codebuddy.cn", key:j.auth.accessToken, auth:{uid:j.account.uid, domain:j.auth.domain||"www.codebuddy.cn", enterpriseId:j.account.enterpriseId||""}}); } catch {}
+          }
+        }
+      } catch {}
+    }
+    if (!items.length) { console.log("no workbuddy accounts — run node workbuddy-token-auto.js"); process.exit(0); }
+    const results=[];
+    for (const it of items) {
+      const b = await fetchBalance({ uid: it.uid, key: it.key, auth: it.auth }).catch(()=>null);
+      results.push({ uid: it.uid, domain: it.domain, balance: b });
+    }
+    if (asJson) { console.log(JSON.stringify({ results }, null, 2)); process.exit(0); }
+    console.log(`workbuddy balances (${results.length}):`);
+    for (const r of results) {
+      const b=r.balance;
+      if (!b) console.log(`  ${r.uid}  (balance unavailable)  domain=${r.domain}`);
+      else console.log(`  ${r.uid}  total=${b.totalStr||b.total}  dailyPacks=${b.dailyPacks}  active=${b.activeCount}  nextExpire=${b.nextExpire||"-"}  domain=${r.domain}`);
+    }
+    process.exit(0);
+  } else if (sub === "list" || sub === "ls" || sub === "status") {
+    const { loadProviderConfigs } = await import("../src/state.js");
+    const cfg = loadProviderConfigs().workbuddy || {};
+    const auths = Array.isArray(cfg.auths) ? cfg.auths : [];
+    const keys = Array.isArray(cfg.keys) ? cfg.keys : [];
+    if (!auths.length) { console.log("no workbuddy accounts in state — check auths/workbuddy-*.json"); process.exit(0); }
+    console.log(`workbuddy accounts (${auths.length}):`);
+    auths.forEach((a,i)=> {
+      const k=(keys[i]||"").slice(0,4);
+      console.log(`  [${i+1}] uid=${a.uid} domain=${a.domain||"www.codebuddy.cn"} enterprise=${a.enterpriseId||"-"} key=${k?k+"…":"(none)"} refresh=${a.refreshToken?"yes":"no"}`);
+    });
+    process.exit(0);
+  } else if (sub === "remove" || sub === "rm" || sub === "del" || sub === "delete") {
+    const target = args[idx+2];
+    if (!target) { console.error("usage: mslxdff -workbuddy remove <uid> [--keep-file]"); process.exit(1); }
+    const keep = args.includes("--keep-file");
+    const { loadProviderConfigs, saveProviderConfig } = await import("../src/state.js");
+    const cfg = loadProviderConfigs().workbuddy || {};
+    let auths = Array.isArray(cfg.auths)? [...cfg.auths]:[];
+    let keys = Array.isArray(cfg.keys)? [...cfg.keys]:[];
+    // support prefix match 6 chars
+    let rmIdx = auths.findIndex(a=> a.uid===target || a.uid.startsWith(target));
+    if (rmIdx<0) { console.error(`uid not found: ${target}`); process.exit(1); }
+    const uid = auths[rmIdx].uid;
+    auths.splice(rmIdx,1); keys.splice(rmIdx,1);
+    saveProviderConfig("workbuddy", { baseUrl: cfg.baseUrl||"https://copilot.tencent.com", keys, auths });
+    if (!keep) {
+      try {
+        const { existsSync, unlinkSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const dir = process.env.WORKBUDDY_AUTH_DIR || join(process.cwd(), "auths");
+        const fp = join(dir, `workbuddy-${uid}.json`);
+        if (existsSync(fp)) { unlinkSync(fp); console.log(`removed file ${fp}`); }
+      } catch {}
+    }
+    try { const { getBalanceCache } = await import("../src/providers/workbuddy-balance.js"); getBalanceCache().delete(uid); } catch {}
+    console.log(`removed workbuddy ${uid} (now ${auths.length} account(s))`);
+    process.exit(0);
+  } else {
+    console.error("usage: mslxdff -workbuddy checkin | balance [--json] | list | remove <uid>");
+    process.exit(1);
+  }
+}
+
 // -providers list : list all deployed upstream providers (opencode + openrouter + generic)
 if (args.includes("-providers") || args.includes("--providers")) {
   const idx = args.findIndex((x) => x === "-providers" || x === "--providers");
@@ -545,12 +635,52 @@ if (args.includes("-provider") || args.includes("--provider")) {
     const nid = normalizeProviderId(gid);
     if (!nid) { console.error(`invalid provider id: ${gid}`); process.exit(1); }
     if (!/^https?:\/\/.+/.test(String(gBase).trim())) { console.error(`invalid baseUrl: ${gBase} (must start with http:// or https://)`); process.exit(1); }
-    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [], allowedModels: [] };
-    const keys = [...new Set([...(cur.keys || []), String(gKey).trim()].filter(Boolean))];
-    // 剩余参数视为白名单模型（可选）：mslxdff -provider add myapi <url> <key> m1 m2 ...
+    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [], allowedModels: [], auths: [] };
+    let keys, auths, baseUrl;
+    baseUrl = String(gBase).trim();
     const extraModels = rest.slice(3).filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
     const allowedModels = extraModels.length ? [...new Set([...(cur.allowedModels || []), ...extraModels])] : (cur.allowedModels || []);
-    saveProviderConfig(nid, { baseUrl: String(gBase).trim(), keys, allowedModels });
+    if (nid === "workbuddy") {
+      // workbuddy: keys/auths 一一对应，需解析 uid
+      const token = String(gKey).trim();
+      let uid = "";
+      try { const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64").toString()); uid = payload.uid || payload.sub || payload.userId || payload.user_id || ""; } catch {}
+      if (!uid) uid = "manual-" + token.slice(-8);
+      const curKeys = Array.isArray(cur.keys) ? [...cur.keys] : [];
+      const curAuths = Array.isArray(cur.auths) ? [...cur.auths] : [];
+      let idx = curAuths.findIndex(a => a.uid === uid);
+      if (idx < 0) idx = curKeys.findIndex(k => k === token);
+      let newKeys, newAuths;
+      if (idx >= 0) {
+        newKeys = [...curKeys]; newKeys[idx] = token;
+        newAuths = [...curAuths]; newAuths[idx] = { uid, domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" };
+        // if auths shorter than keys, pad
+        while (newAuths.length < newKeys.length) newAuths.push({ uid: `manual-${newKeys[newAuths.length].slice(-8)}`, domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" });
+      } else {
+        newKeys = [...new Set([...curKeys, token].filter(Boolean))];
+        newAuths = [...curAuths, { uid, domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" }];
+        // align lengths
+        while (newAuths.length < newKeys.length) newAuths.push({ uid: `manual-${newKeys[newAuths.length].slice(-8)}`, domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" });
+        while (newKeys.length < newAuths.length) newKeys.push(token);
+      }
+      keys = newKeys; auths = newAuths;
+      saveProviderConfig(nid, { baseUrl, keys, auths, allowedModels });
+      // 同步写 auths/workbuddy-<uid>.json 供 checkin 使用
+      try {
+        const { writeFileSync, mkdirSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const dir = process.env.WORKBUDDY_AUTH_DIR || join(process.cwd(), "auths");
+        mkdirSync(dir, { recursive: true });
+        const fp = join(dir, `workbuddy-${uid}.json`);
+        const doc = { account: { uid, enterpriseId: "", nickname: "" }, auth: { accessToken: token, refreshToken: "", expiresAt: Math.floor(Date.now()/1000)+3600, domain: "www.codebuddy.cn" } };
+        writeFileSync(fp + ".tmp", JSON.stringify(doc, null, 2), { mode: 0o600 });
+        try { const { renameSync, unlinkSync, existsSync } = await import("node:fs"); if (existsSync(fp)) unlinkSync(fp); renameSync(fp + ".tmp", fp); } catch { writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 }); }
+      } catch {}
+    } else {
+      keys = [...new Set([...(cur.keys || []), String(gKey).trim()].filter(Boolean))];
+      auths = undefined;
+      saveProviderConfig(nid, { baseUrl, keys, allowedModels });
+    }
     console.log(`added generic provider: ${nid}`);
     console.log(`  baseUrl: ${String(gBase).trim().replace(/\/+$/, "")}`);
     console.log(`  keys: ${keys.length} (${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")})`);
@@ -1406,6 +1536,22 @@ if (providerPlugin) {
   const genericConfigs = loadProviderConfigs();
   for (const [gid, cfg] of Object.entries(genericConfigs)) {
     if (gid === "opencode" || gid === "openrouter") continue;
+    if (gid === "workbuddy") {
+      const base = String(cfg?.baseUrl || "").trim() || "https://copilot.tencent.com";
+      const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
+      const auths = Array.isArray(cfg?.auths) ? cfg.auths : [];
+      if (!keys.length) continue;
+      try {
+        const { createWorkbuddyProvider } = await import("../src/providers/workbuddy.js");
+        providers.push(createWorkbuddyProvider({ baseUrl: base, apiKeys: keys, auths }));
+        console.log(`provider enabled: workbuddy (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base}`);
+        appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base });
+      } catch (err) {
+        console.log(`provider ${gid} failed: ${err?.message || err}`);
+        appendEvent({ ts: Date.now(), type: "provider-error", provider: gid, error: String(err?.message || err) });
+      }
+      continue;
+    }
     const base = String(cfg?.baseUrl || "").trim();
     const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
     if (!base || !keys.length) continue;
@@ -1417,6 +1563,21 @@ if (providerPlugin) {
     } catch (err) {
       console.log(`provider ${gid} failed: ${err?.message || err}`);
       appendEvent({ ts: Date.now(), type: "provider-error", provider: gid, error: String(err?.message || err) });
+    }
+  }
+  // workbuddy via env-only (no providerConfigs entry but MSLXDFF_WORKBUDDY_KEY set)
+  if (!genericConfigs["workbuddy"]) {
+    const wbKeys = loadProviderKeys("workbuddy");
+    if (wbKeys.length) {
+      try {
+        const { createWorkbuddyProvider } = await import("../src/providers/workbuddy.js");
+        const wbAuths = loadProviderAuths("workbuddy");
+        providers.push(createWorkbuddyProvider({ apiKeys: wbKeys, auths: wbAuths }));
+        console.log(`provider enabled: workbuddy (${wbKeys.length} key${wbKeys.length > 1 ? "s" : ""}) baseUrl=https://copilot.tencent.com (env)`);
+        appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "workbuddy", keys: wbKeys.length, baseUrl: "https://copilot.tencent.com" });
+      } catch (err) {
+        console.log(`provider workbuddy failed: ${err?.message || err}`);
+      }
     }
   }
   const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
@@ -1834,9 +1995,11 @@ Usage:
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
   mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1; extra models = allowlist)
+  mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]  add WorkBuddy专用供应商（workbuddy/hy3 前缀路由，auths 与 keys 一一对应）
   mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]  configure provider API keys/URL (multiple keys = rotating, set-url for generic)
   mslxdff -provider <id> allowlist [list|set|add|remove|clear]  manage allowed models (empty=allow all, non-empty=only listed) 
-  mslxdff -providers list          list all configured upstream providers (opencode, openrouter, generic)
+  mslxdff -workbuddy checkin        daily 100 credits（双域幂等，已签 code 10001 视为成功）
+  mslxdff -providers list          list all configured upstream providers (opencode, openrouter, generic, workbuddy)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
   mslxdff -group sync              pull the freshest member list for all joined groups

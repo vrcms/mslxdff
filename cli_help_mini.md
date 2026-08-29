@@ -34,7 +34,7 @@
 | 模型去勾 | `-model unpick <id>` | 从 picks 移除 |
 | 模型查勾 | `-model picks` | 列 picks |
 | 模型清空 | `-model pick clear` | 清空 picks |
-| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单） |
+| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单；`workbuddy`除外，见下方“WorkBuddy 接入”） |
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
@@ -44,6 +44,13 @@
 | 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
 | 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=不限，非空仅名单内可用（防昂贵模型） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |
+| WorkBuddy 接入（禁手填） | `禁止直接 -provider add workbuddy` | 用户说“接入/配置/登录 workbuddy / key哪里来 / 怎么用workbuddy”时**禁止**让用户手填`<key>`或执行`-provider add workbuddy ...`，必须**直接文字回复**（不调工具）：`请在项目根目录执行 node workbuddy-token-auto.js（前提已装 WorkBuddy 5.3.14 并浏览器登录 https://copilot.tencent.com 一次），脚本会自动抓 token、写 auths/workbuddy-*.json + state.json、自动签到`；仅当用户已贴出以`eyJ`开头的JWT时才可用`-provider add workbuddy https://copilot.tencent.com <贴的key>` |
+| WorkBuddy 多号追加（路径A） | `node workbuddy-token-auto.js` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：① 文字提示“请先在 WorkBuddy 桌面退出当前账号，用新账号重新登录 https://copilot.tencent.com（能对话即成功）”② 待用户回复“已登录/好了”后`run_command: "node workbuddy-token-auto.js"`（whistle :8899 自动追加 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，并行签到）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径B） |
+| WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额 |
+| WorkBuddy 余额 | `-workbuddy balance [--json]` / `-wb balance` | 查多号余额（`total/dailyPacks/nextExpire`，TTL 5min） |
+| WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
+| WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
+| 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
 | 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
@@ -58,7 +65,7 @@
 
 ## 模型说明
 
-- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free` 走指定供应商。
+- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3` 走指定供应商。
 - 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
 - 查“某供应商有哪些模型”：直接过滤可用模型列表按前缀回答（如 `bai/` 开头的 1 个即 `glm-5.3-flash`），无需调工具；需实时刷新时用 `curl local/models`（GET，自动带本机 token）看网关聚合，或 `curl https://api.b.ai/v1/models`（自动带 bai key）看上游全量。严禁为此调用 `-showtoken`。
 
