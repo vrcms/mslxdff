@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.57`（含多供应商、瞬时 key 共享 ADR-0008）。最后更新：2026-08-27。
+> 适用版本：`>=0.1.60`（含 WorkBuddy 供应商 + 每日 100 credits 签到）。最后更新：2026-08-28。
 
 ## 目录
 
@@ -61,9 +61,14 @@
 | `mslxdff -model picks` | — | 列出当前勾选集 | 否 | — |
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
 | `mslxdff -provider add <id> <baseUrl> <key>` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`） | 是 | 重启生效 |
+| `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
 | `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=不限，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
-| `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用）及启用状态（含 allowlist 摘要） | 否 | 否 |
+| `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用/workbuddy）及启用状态（含 allowlist 摘要） | 否 | 否 |
+| `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发） | 否 | 否 |
+| `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
+| `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
+| `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
@@ -514,12 +519,46 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -providers list   # 聚合视图亦显示 allow=2(...) 摘要
   ```
 
+#### WorkBuddy 专用供应商（`workbuddy/hy3` 等 16 CLI 模型）
+
+- **语法**：
+  ```bash
+  # 单号接入（禁手填，必须自动化）
+  mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow1 allow2 ...]  # 仅当用户贴 eyJ 时可用，否则禁手填
+
+  # 多号追加（路径A，推荐，自动化）
+  # 1) WorkBuddy 桌面退出当前账号 → 用新账号重新登录 https://copilot.tencent.com（能对话即成功）
+  # 2) 项目根执行（whistle :8899 自动追加新号，不覆旧号）
+  node workbuddy-token-auto.js
+  mslxdff -workbuddy list                                 # 验证 2 行 uid
+  mslxdff -workbuddy balance --json                       # 看 total/dailyPacks/nextExpire
+
+  # 运维
+  mslxdff -provider workbuddy list                        # 看 baseUrl/keys/share/allowlist
+  mslxdff -provider workbuddy allowlist set hy3 hy4-preview glm-5.3-flash  # 仅低耗
+  mslxdff -workbuddy checkin                              # 每日签到 100 credits（多号并行 3，幂等，--json 聚合）
+  mslxdff -workbuddy balance [--json]                     # 多号余额总览（total/dailyPacks/nextExpire，TTL 5min）
+  mslxdff -workbuddy list                                 # 列出账号（uid/domain/enterpriseId）
+  mslxdff -workbuddy remove <uid> [--keep-file]           # 按 uid 摘除（删 keys/auths 与 auths/workbuddy-<uid>.json）
+  ```
+- **存储**：`state.json providerConfigs.workbuddy={ baseUrl:"https://copilot.tencent.com", keys:["k1",...], auths:[{uid,domain,enterpriseId,refreshToken}], allowedModels:["hy3",...] }`，`auths` 与 `keys` 一一对应（多号同索引），由 `node workbuddy-token-auto.js` 自动落盘（`auths/workbuddy-<uid>.json` + `state.json`，`0600`）或 `-provider add workbuddy` 解析 JWT `uid` 自动追加。`baseUrl` 默认 `https://copilot.tencent.com`（`MSLXDFF_WORKBUDDY_BASE_URL` 可覆盖）。
+- **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。
+- **白名单**：同通用供应商（空=不限，非空仅名单内可用，`403 + x-mslxdff-allowlist:1` 直通，`/v1/models` 过滤）。
+- **共享**：`workbuddy` 默认 `share=off`（`opencode` 同理恒排除），需 `mslxdff -provider workbuddy share on` 或 `MSLXDFF_WORKBUDDY_SHARE_KEYS=1` 显式开启才随 `x-mslxdff-share-keys` 外借。
+- **签到**：`POST https://www.codebuddy.cn/v2/billing/meter/daily-checkin` + `https://copilot.tencent.com/v2/billing/meter/daily-checkin` 双域，`code 0` 新增 100 credits/30d 裂变包，`code 10001 已签到` 视为成功；并行 3，`--json` 聚合 `results[].balance`；`workbuddy-token-auto.js` 已在 `refresh` 后自动 `spawn workbuddy-checkin.js`，可另加 `schtasks /create /tn WorkBuddyCheckin /tr "node .../workbuddy-checkin.js" /sc daily /st 09:00`。
+- **调用**：
+  ```bash
+  curl -H "Authorization: Bearer $(mslxdff -showtoken)" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"workbuddy/hy3","messages":[{"role":"user","content":"hi"}]}'
+  curl -H "Authorization: Bearer $(mslxdff -showtoken)" -H "x-mslxdff-workbuddy-uid: a06ef5f8" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"workbuddy/hy3","messages":[]}'  # 钉死 C
+  curl -H "Authorization: Bearer $(mslxdff -showtoken)" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"workbuddy/a06ef:hy3","messages":[]}'  # 前缀亦可
+  ```
+
 #### 存储与生效
 
-- **优先级**：`MSLXDFF_<ID>_KEY` env（单值）> `state.json providerConfigs.<id>.keys` / `providerKeys.<id>`（数组）；`MSLXDFF_<ID>_BASE_URL` env 覆盖 `providerConfigs.<id>.baseUrl`。`opencode` 无视 key，恒为 `public`。
-- **文件**：`~/.config/mslxdff/state.json` 的 `providerConfigs: { myapi: { baseUrl: "https://api.example.com/v1", keys: ["sk-..."] } }`（新）与 `providerKeys: { openrouter: ["sk-..."] }`（兼容旧版单字符串）与 `providerShareKeys: { openrouter: true }`。
-- **生效时机**：修改后需重启 daemon（`stop` + `start` 或 ` -port` 触发的重启）。
-- **多 key 调度**：`src/providers/keyring.js` round-robin，`401/403/429/5xx` 冷却 30s（`MSLXDFF_GENERIC_COOLDOWN_MS` / `MSLXDFF_OPENROUTER_COOLDOWN_MS`），全冷却则抛 `provider temporarily unavailable`。
+- **优先级**：`MSLXDFF_<ID>_KEY` env（单值）> `state.json providerConfigs.<id>.keys` / `providerKeys.<id>`（数组）；`MSLXDFF_<ID>_BASE_URL` env 覆盖 `providerConfigs.<id>.baseUrl`。`opencode` 无视 key，恒为 `public`；`workbuddy` 额外支持 `MSLXDFF_WORKBUDDY_*`（见附录 A）。
+- **文件**：`~/.config/mslxdff/state.json` 的 `providerConfigs: { myapi: { baseUrl: "https://api.example.com/v1", keys: ["sk-..."] }, workbuddy: { baseUrl:"https://copilot.tencent.com", keys:["k1"], auths:[{uid,refreshToken}], allowedModels:["hy3"] } }`（新）与 `providerKeys: { openrouter: ["sk-..."] }`（兼容旧版单字符串）与 `providerShareKeys: { openrouter: true }`。
+- **生效时机**：修改后需重启 daemon（`stop` + `start` 或 ` -port` 触发的重启）；`allowlist` 热更新立即生效。
+- **多 key 调度**：`src/providers/keyring.js` round-robin，`401/403/429/5xx` 冷却 30s（`MSLXDFF_GENERIC_COOLDOWN_MS` / `MSLXDFF_OPENROUTER_COOLDOWN_MS` / `MSLXDFF_WORKBUDDY_COOLDOWN_MS`），全冷却则抛 `provider temporarily unavailable`。
 
 ---
 
@@ -747,6 +786,12 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_OA_KEEPALIVE_CONNECTIONS` | `20` | keepAlive 连接数 |
 | `MSLXDFF_OPENROUTER_REFERER` | `https://github.com/mslxdff` | OpenRouter 必需 `HTTP-Referer` |
 | `MSLXDFF_OPENROUTER_TITLE` | `mslxdff` | OpenRouter 必需 `X-Title` |
+| `MSLXDFF_WORKBUDDY_KEY` | — | WorkBuddy 单 key（env 优先；多 key 用 `-provider workbuddy ...`） |
+| `MSLXDFF_WORKBUDDY_BASE_URL` | `https://copilot.tencent.com` | WorkBuddy 上游（`POST /v2/chat/completions` + `GET /console/.../models`） |
+| `MSLXDFF_WORKBUDDY_TIMEOUT_MS` | `30000` | WorkBuddy 单次 fetch 超时 |
+| `MSLXDFF_WORKBUDDY_COOLDOWN_MS` | `30000` | WorkBuddy 多 key 冷却（401/403/429/5xx） |
+| `MSLXDFF_WORKBUDDY_SHARE_KEYS` | `off` | WorkBuddy 共享开关（`1/on/true` 显式开，默认关） |
+| `WORKBUDDY_AUTH_DIR` | `./auths` | WorkBuddy 落盘目录（`workbuddy-*.json`，`0600`） |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |

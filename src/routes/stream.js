@@ -33,6 +33,15 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const contentType = upRes.headers.get("content-type") || "";
   const isStream = Boolean(body?.stream) || contentType.includes("text/event-stream");
   res.statusCode = upRes.status;
+  // propagate workbuddy uid / allowlist headers
+  try {
+    const uid = upRes.headers.get("x-mslxdff-workbuddy-uid");
+    if (uid) res.setHeader("x-mslxdff-workbuddy-uid", uid);
+    const reason = upRes.headers.get("x-mslxdff-workbuddy-reason");
+    if (reason) res.setHeader("x-mslxdff-workbuddy-reason", reason);
+    const allow = upRes.headers.get("x-mslxdff-allowlist");
+    if (allow) res.setHeader("x-mslxdff-allowlist", allow);
+  } catch {}
   if (fallback) applyFallbackHeaders(res, fallback);
 
   let ttf = null;
