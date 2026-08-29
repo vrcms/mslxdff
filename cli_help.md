@@ -70,6 +70,8 @@
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
+| `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
+| `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
 | `mslxdff -setto opencode [modelId]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
