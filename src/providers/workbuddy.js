@@ -1,6 +1,6 @@
 import { joinModelId } from "./model-id.js";
 import { createKeyRing } from "./keyring.js";
-import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, saveProviderConfig, WORKBUDDY_DEFAULT_BASE_URL } from "../state.js";
+import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, saveProviderConfig, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../state.js";
 import { writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync, appendFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,6 +14,13 @@ try {
   UndiciFetch = mod.fetch;
 } catch {}
 
+function joinUrl(base, path) {
+  const b = String(base || "").trim().replace(/\/+$/, "");
+  const p = String(path || "").trim();
+  if (!p) return b;
+  const pp = p.startsWith("/") ? p : `/${p}`;
+  return `${b}${pp}`;
+}
 function envInt(name, fallback) {
   const v = Number(process.env[name]);
   return Number.isInteger(v) && v > 0 ? v : fallback;
@@ -120,6 +127,8 @@ export function createWorkbuddyProvider({
   apiKeys,
   apiKey,
   auths,
+  modelsPath,
+  chatPath,
   connectTimeoutMs = Number(process.env.MSLXDFF_WORKBUDDY_TIMEOUT_MS) || 30_000,
   cooldownMs = envInt("MSLXDFF_WORKBUDDY_COOLDOWN_MS", 30_000),
   retry = {
@@ -134,6 +143,8 @@ export function createWorkbuddyProvider({
 } = {}) {
   const id = "workbuddy";
   const resolvedBase = resolveBaseUrl(baseUrl);
+  const resolvedModelsPath = modelsPath || loadProviderModelsPath(id, file ? { file } : {});
+  const resolvedChatPath = chatPath || loadProviderChatPath(id, file ? { file } : {});
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
 
   // keys 优先显式传入，其次 state
@@ -201,7 +212,7 @@ export function createWorkbuddyProvider({
     const rt = auth?.refreshToken;
     const uid = auth?.uid;
     if (!rt || !uid) return null;
-    const url = `${resolvedBase}/v2/plugin/auth/token/refresh`;
+    const url = joinUrl(resolvedBase, "/v2/plugin/auth/token/refresh");
     const headers = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
@@ -268,7 +279,7 @@ export function createWorkbuddyProvider({
   }
 
   async function runChat(body, activeRing, opts = {}) {
-    const url = `${resolvedBase}/v2/chat/completions`;
+    const url = joinUrl(resolvedBase, resolvedChatPath);
     const t0 = performance.now();
     const preferredUid = opts?.workbuddyUid ? String(opts.workbuddyUid).trim() : "";
     const modelForLog = body?.model || "";
@@ -488,7 +499,7 @@ export function createWorkbuddyProvider({
   async function listModels() {
     const now = Date.now();
     if (cache && now - fetchedAt < CACHE_TTL_MS) return cache;
-    const url = `${resolvedBase}/console/enterprises/personal/models`;
+    const url = joinUrl(resolvedBase, resolvedModelsPath);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`${id} models timed out`)), 15_000);
     try {
@@ -523,7 +534,7 @@ export function createWorkbuddyProvider({
   }
 
   async function preheat() {
-    const url = `${resolvedBase}/console/enterprises/personal/models`;
+    const url = joinUrl(resolvedBase, resolvedModelsPath);
     const t0 = performance.now();
     try {
       const key = ring.next() || keys[0] || "";

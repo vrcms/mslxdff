@@ -232,8 +232,25 @@ if (args.includes("-model") || args.includes("-models")) {
     for (const id of picks) console.log(`  ${id}`);
     process.exit(0);
   }
+  // -model list supports optional provider filter: -model list --provider <id> | -model list <id> | --json
+  let modelListProvider = null;
+  let modelListJson = false;
+  if (sub === "list") {
+    const restArgs = args.slice(idx + 2);
+    for (let i = 0; i < restArgs.length; i++) {
+      const a = String(restArgs[i] || "");
+      if (a === "--json" || a === "-json") modelListJson = true;
+      else if (a === "--provider" || a === "-provider" || a === "--providerId") { modelListProvider = String(restArgs[i + 1] || "").trim() || null; i++; }
+      else if (!a.startsWith("-") && !modelListProvider) modelListProvider = a;
+    }
+    if (modelListProvider) {
+      const { normalizeProviderId } = await import("../src/providers/model-id.js");
+      const nid = normalizeProviderId(modelListProvider);
+      modelListProvider = nid || modelListProvider.toLowerCase();
+    }
+  }
   if (sub !== undefined && sub !== "list") {
-    console.error("usage: mslxdff -models (interactive multi-pick) | mslxdff -model list | mslxdff -model set <id> | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear | mslxdff -model picks | mslxdff -model status | mslxdff -model refresh");
+    console.error("usage: mslxdff -models (interactive multi-pick) | mslxdff -model list [--provider <id>] [--json] | mslxdff -model set <id> | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear | mslxdff -model picks | mslxdff -model status | mslxdff -model refresh");
     process.exit(1);
   }
   const cacheFile = join(logDir(), "models.json");
@@ -275,12 +292,32 @@ if (args.includes("-model") || args.includes("-models")) {
         throw new Error("no cached models and refresh failed");
       }
     }
+    // provider filter: bare ids are opencode, prefixed are <provider>/...
+    if (modelListProvider) {
+      const prov = String(modelListProvider).toLowerCase();
+      ids = ids.filter((id) => {
+        const slash = String(id).indexOf("/");
+        const p = slash > 0 ? String(id).slice(0, slash).toLowerCase() : "opencode";
+        return p === prov;
+      });
+      if (modelListJson) {
+        console.log(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }, null, 2));
+        process.exit(0);
+      }
+      if (!ids.length) {
+        console.log(`no models for provider "${prov}" — try: mslxdff -provider ${prov} models  or  mslxdff -model refresh`);
+        process.exit(0);
+      }
+    } else if (modelListJson) {
+      console.log(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }, null, 2));
+      process.exit(0);
+    }
     if (!ids.length) {
       console.log("no models available — try: mslxdff -model refresh");
       process.exit(0);
     }
     // TTY：交互式多选勾选常用模型（空格勾选，Enter 保存）；非 TTY（管道/脚本）：保持纯列表并标注勾选
-    if (process.stdin.isTTY && process.stdout.isTTY) {
+    if (process.stdin.isTTY && process.stdout.isTTY && !modelListProvider) {
       const statuses = loadModelErrors();
       const current = getPreferredModel();
       const pickedIds = loadModelPicks();
@@ -809,10 +846,24 @@ if (args.includes("-provider") || args.includes("--provider")) {
     const nid = normalizeProviderId(gid);
     if (!nid) { console.error(`invalid provider id: ${gid}`); process.exit(1); }
     if (!/^https?:\/\/.+/.test(String(gBase).trim())) { console.error(`invalid baseUrl: ${gBase} (must start with http:// or https://)`); process.exit(1); }
-    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [], allowedModels: [], auths: [] };
+    const cur = loadProviderConfig(nid) || { baseUrl: "", keys: [], allowedModels: [], auths: [], modelsPath: "", chatPath: "" };
     let keys, auths, baseUrl;
     baseUrl = String(gBase).trim();
-    const extraModels = rest.slice(3).filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
+    // parse --models-path / --chat-path from tail
+    let parsedModelsPath = null;
+    let parsedChatPath = null;
+    const extraTokens = [];
+    for (let _i = 3; _i < rest.length; _i++) {
+      const tok = String(rest[_i] || "");
+      if (tok === "--models-path" || tok === "--modelsPath" || tok === "--models_path") { parsedModelsPath = String(rest[_i + 1] || "").trim() || null; _i++; }
+      else if (tok.startsWith("--models-path=")) { parsedModelsPath = tok.slice("--models-path=".length).trim() || null; }
+      else if (tok === "--chat-path" || tok === "--chatPath" || tok === "--chat_path") { parsedChatPath = String(rest[_i + 1] || "").trim() || null; _i++; }
+      else if (tok.startsWith("--chat-path=")) { parsedChatPath = tok.slice("--chat-path=".length).trim() || null; }
+      else extraTokens.push(tok);
+    }
+    if (parsedModelsPath && !String(parsedModelsPath).startsWith("/")) { console.error(`invalid --models-path: ${parsedModelsPath} (must start with /)`); process.exit(1); }
+    if (parsedChatPath && !String(parsedChatPath).startsWith("/")) { console.error(`invalid --chat-path: ${parsedChatPath} (must start with /)`); process.exit(1); }
+    const extraModels = extraTokens.filter((x) => x && !String(x).startsWith("-")).map((m) => String(m).trim()).filter(Boolean);
     const allowedModels = extraModels.length ? [...new Set([...(cur.allowedModels || []), ...extraModels])] : (cur.allowedModels || []);
     if (nid === "workbuddy") {
       // workbuddy: keys/auths 一一对应，需解析 uid
@@ -838,7 +889,12 @@ if (args.includes("-provider") || args.includes("--provider")) {
         while (newKeys.length < newAuths.length) newKeys.push(token);
       }
       keys = newKeys; auths = newAuths;
-      saveProviderConfig(nid, { baseUrl, keys, auths, allowedModels });
+      const cfgToSave = { baseUrl, keys, auths, allowedModels };
+      if (parsedModelsPath) cfgToSave.modelsPath = parsedModelsPath;
+      else if (cur.modelsPath) cfgToSave.modelsPath = cur.modelsPath;
+      if (parsedChatPath) cfgToSave.chatPath = parsedChatPath;
+      else if (cur.chatPath) cfgToSave.chatPath = cur.chatPath;
+      saveProviderConfig(nid, cfgToSave);
       // 同步写 auths/workbuddy-<uid>.json 供 checkin 使用
       try {
         const { writeFileSync, mkdirSync } = await import("node:fs");
@@ -860,7 +916,12 @@ if (args.includes("-provider") || args.includes("--provider")) {
       }
       keys = [...new Set([...(cur.keys || []), trimmed].filter(Boolean))];
       auths = undefined;
-      saveProviderConfig(nid, { baseUrl, keys, allowedModels });
+      const cfgToSave2 = { baseUrl, keys, allowedModels };
+      if (parsedModelsPath) cfgToSave2.modelsPath = parsedModelsPath;
+      else if (cur.modelsPath) cfgToSave2.modelsPath = cur.modelsPath;
+      if (parsedChatPath) cfgToSave2.chatPath = parsedChatPath;
+      else if (cur.chatPath) cfgToSave2.chatPath = cur.chatPath;
+      saveProviderConfig(nid, cfgToSave2);
     }
     console.log(`added generic provider: ${nid}`);
     console.log(`  baseUrl: ${String(gBase).trim().replace(/\/+$/, "")}`);
@@ -880,6 +941,40 @@ if (args.includes("-provider") || args.includes("--provider")) {
     process.exit(0);
   }
   const { loadProviderKeys, saveProviderKeys, addProviderKey, removeProviderKeys, loadProviderShareKeys, saveProviderShareKeys, loadProviderConfig, saveProviderConfig, saveProviderBaseUrl, loadProviderConfigs } = await import("../src/state.js");
+  if (sub === "set-models-path" || sub === "setModelsPath" || sub === "models-path") {
+    const p = rest[1];
+    if (!p) {
+      console.error(`usage: mslxdff -provider ${id} set-models-path <path>  (e.g. /v1/models)`);
+      process.exit(1);
+    }
+    if (!String(p).trim().startsWith("/")) {
+      console.error(`invalid modelsPath: ${p} (must start with /)`);
+      process.exit(1);
+    }
+    const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+    const { normalizeProviderId } = await import("../src/providers/model-id.js");
+    const nid = normalizeProviderId(id);
+    saveProviderConfig(nid || id, { baseUrl: cur.baseUrl || "", keys: cur.keys || [], modelsPath: String(p).trim() });
+    console.log(`set ${nid || id} modelsPath: ${String(p).trim()} — restart daemon to activate`);
+    process.exit(0);
+  }
+  if (sub === "set-chat-path" || sub === "setChatPath" || sub === "chat-path") {
+    const p = rest[1];
+    if (!p) {
+      console.error(`usage: mslxdff -provider ${id} set-chat-path <path>  (e.g. /v1/chat/completions)`);
+      process.exit(1);
+    }
+    if (!String(p).trim().startsWith("/")) {
+      console.error(`invalid chatPath: ${p} (must start with /)`);
+      process.exit(1);
+    }
+    const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
+    const { normalizeProviderId } = await import("../src/providers/model-id.js");
+    const nid = normalizeProviderId(id);
+    saveProviderConfig(nid || id, { baseUrl: cur.baseUrl || "", keys: cur.keys || [], chatPath: String(p).trim() });
+    console.log(`set ${nid || id} chatPath: ${String(p).trim()} — restart daemon to activate`);
+    process.exit(0);
+  }
   if (sub === "clear") {
     const configs = loadProviderConfigs();
     if (configs[id]) {
@@ -1019,6 +1114,69 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.error(`usage: mslxdff -provider ${id} allowlist [list|set|add|remove|clear] [models...]`);
     console.error(`       mslxdff -provider ${id} allowAny on|off   (empty allowlist = block or allow all)`);
     process.exit(1);
+  }
+  if (sub === "models" || sub === "list-models" || sub === "ls") {
+    const wantsJson = args.includes("--json") || args.includes("-json");
+    const cfg = loadProviderConfig(id);
+    // opencode: use aggregated cache + provider-specific? For opencode, show bare ids from cache
+    if (id === "opencode" || id === "oc") {
+      try {
+        const cacheFile = join(logDir(), "models.json");
+        const { readFileSync } = await import("node:fs");
+        const raw = JSON.parse(readFileSync(cacheFile, "utf8"));
+        const ids = (raw.data || []).map((m) => m.id).filter((x) => !String(x).includes("/"));
+        if (wantsJson) {
+          console.log(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }, null, 2));
+        } else {
+          console.log(`opencode models (${ids.length}):`);
+          for (const mid of ids) console.log(`  ${mid}`);
+        }
+      } catch (e) {
+        console.error(`could not read models cache: ${String(e?.message || e)}`);
+        process.exit(1);
+      }
+      process.exit(0);
+    }
+    // generic/workbuddy: live fetch via provider listModels
+    try {
+      const { createGenericProvider } = await import("../src/providers/generic.js");
+      const { createWorkbuddyProvider } = await import("../src/providers/workbuddy.js");
+      const { isModelAllowed } = await import("../src/state.js");
+      const baseUrl = cfg?.baseUrl || (id === "workbuddy" ? "https://copilot.tencent.com" : "");
+      const keys = loadProviderKeys(id);
+      const auths = cfg?.auths || [];
+      let provider;
+      if (id === "workbuddy") {
+        provider = createWorkbuddyProvider({ baseUrl, apiKeys: keys, auths, file: defaultStateFile() });
+      } else {
+        if (!baseUrl) {
+          console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);
+          process.exit(1);
+        }
+        provider = createGenericProvider({ id, baseUrl, apiKeys: keys, file: defaultStateFile() });
+      }
+      const all = await provider.listModels();
+      // apply allowlist filtering mirroring dispatcher
+      const filtered = all.filter((m) => {
+        const raw = String(m.id || "").includes("/") ? String(m.id).split("/").slice(1).join("/") : String(m.id);
+        // for workbuddy, raw is like hy3, for generic it's raw id without prefix? joinModelId adds prefix, so need to extract raw
+        const checkRaw = m.id.startsWith(`${id}/`) ? m.id.slice(id.length + 1) : raw;
+        return isModelAllowed(id, checkRaw);
+      });
+      if (wantsJson) {
+        console.log(JSON.stringify({ object: "list", data: filtered }, null, 2));
+      } else {
+        console.log(`${id} models (${filtered.length}${filtered.length !== all.length ? `/${all.length}` : ""}):`);
+        for (const m of filtered) console.log(`  ${m.id}`);
+        if (!filtered.length && all.length) console.log(`  (all ${all.length} filtered by allowlist — use: mslxdff -provider ${id} allowlist list)`);
+        if (!all.length) console.log(`  (no models — check baseUrl/keys or try: curl ${baseUrl}/models)`);
+      }
+      try { await provider.close?.(); } catch {}
+    } catch (e) {
+      console.error(`could not list ${id} models: ${String(e?.message || e)}`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
   if (sub === "list" || sub === "status") {
     const keys = loadProviderKeys(id);

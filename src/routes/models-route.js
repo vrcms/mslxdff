@@ -1,5 +1,6 @@
 import { json, errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
+import { isModelAllowed } from "../state.js";
 
 export async function modelsHandler({ res, models, plugins }) {
   if (!models) return json(res, 501, { error: "Models service not configured" });
@@ -41,4 +42,31 @@ export async function modelsStatusHandler({ res, models, auto }) {
     data.push(entry);
   }
   json(res, 200, { object: "list", data });
+}
+
+export async function providerModelsHandler({ req, res, models }) {
+  if (!models) return json(res, 501, { error: "Models service not configured" });
+  const url = req.url || "";
+  const path = url.split("?")[0] || "";
+  const m = path.match(/^\/v1\/providers\/([^/]+)\/models\/?$/);
+  const pid = m ? decodeURIComponent(m[1]).toLowerCase() : "";
+  if (!pid) return json(res, 400, { error: "missing provider id" });
+  try {
+    const data = await models.get();
+    const all = Array.isArray(data?.data) ? data.data : [];
+    const filtered = all.filter((entry) => {
+      const id = String(entry?.id || "");
+      const slash = id.indexOf("/");
+      const prov = slash > 0 ? id.slice(0, slash).toLowerCase() : "opencode";
+      if (prov !== pid) return false;
+      const raw = slash > 0 ? id.slice(slash + 1) : id;
+      // allowlist check: opencode always allowed via allowAny, others respect config
+      try {
+        return isModelAllowed(pid, raw);
+      } catch { return true; }
+    });
+    json(res, 200, { object: "list", data: filtered });
+  } catch (err) {
+    json(res, 502, { error: errMsg(err) });
+  }
 }

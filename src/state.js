@@ -395,6 +395,29 @@ function normalizeAllowedModel(model, providerId) {
   }
   return s;
 }
+function normalizeEndpointPath(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  return s.startsWith("/") ? s : `/${s}`;
+}
+function defaultModelsPath(id) {
+  if (String(id).toLowerCase() === "workbuddy") return "/console/enterprises/personal/models";
+  return "/models";
+}
+function defaultChatPath(id) {
+  if (String(id).toLowerCase() === "workbuddy") return "/v2/chat/completions";
+  return "/chat/completions";
+}
+export function loadProviderModelsPath(id, { file = defaultStateFile() } = {}) {
+  const cfg = loadProviderConfigs({ file })[id];
+  if (cfg && typeof cfg.modelsPath === "string" && cfg.modelsPath.trim()) return normalizeEndpointPath(cfg.modelsPath);
+  return defaultModelsPath(id);
+}
+export function loadProviderChatPath(id, { file = defaultStateFile() } = {}) {
+  const cfg = loadProviderConfigs({ file })[id];
+  if (cfg && typeof cfg.chatPath === "string" && cfg.chatPath.trim()) return normalizeEndpointPath(cfg.chatPath);
+  return defaultChatPath(id);
+}
 
 export function loadProviderConfigs({ file = defaultStateFile() } = {}) {
   const v = readState(file).providerConfigs;
@@ -411,7 +434,9 @@ export function loadProviderConfig(id, { file = defaultStateFile() } = {}) {
     const cfg = loadProviderConfigs({ file })[id];
     const allowedModels = cfg && Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
     const auths = cfg && Array.isArray(cfg.auths) ? normalizeAuths(cfg.auths) : [];
-    if (baseUrl || envKeys.length || allowedModels.length || auths.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys, auths, allowedModels };
+    const modelsPath = cfg && typeof cfg.modelsPath === "string" && cfg.modelsPath.trim() ? normalizeEndpointPath(cfg.modelsPath) : defaultModelsPath(id);
+    const chatPath = cfg && typeof cfg.chatPath === "string" && cfg.chatPath.trim() ? normalizeEndpointPath(cfg.chatPath) : defaultChatPath(id);
+    if (baseUrl || envKeys.length || allowedModels.length || auths.length) return { baseUrl: normalizeBaseUrl(baseUrl), keys: envKeys, auths, allowedModels, modelsPath, chatPath };
     return null;
   }
   const configs = loadProviderConfigs({ file });
@@ -422,11 +447,13 @@ export function loadProviderConfig(id, { file = defaultStateFile() } = {}) {
       keys: Array.isArray(cfg.keys) ? [...new Set(cfg.keys.filter((x) => typeof x === "string" && x.trim().length))] : [],
       auths: normalizeAuths(cfg.auths),
       allowedModels: Array.isArray(cfg.allowedModels) ? [...new Set(cfg.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [],
+      modelsPath: typeof cfg.modelsPath === "string" && cfg.modelsPath.trim() ? normalizeEndpointPath(cfg.modelsPath) : defaultModelsPath(id),
+      chatPath: typeof cfg.chatPath === "string" && cfg.chatPath.trim() ? normalizeEndpointPath(cfg.chatPath) : defaultChatPath(id),
     };
   }
   // 兼容旧 providerKeys 形态：有 key 但无 configs 时视为通用供应商（baseUrl 为空，需后补）
   const keys = loadProviderKeys(id, { file });
-  if (keys.length) return { baseUrl: String(id).toLowerCase() === "workbuddy" ? WORKBUDDY_DEFAULT_BASE_URL : "", keys, auths: [], allowedModels: [] };
+  if (keys.length) return { baseUrl: String(id).toLowerCase() === "workbuddy" ? WORKBUDDY_DEFAULT_BASE_URL : "", keys, auths: [], allowedModels: [], modelsPath: defaultModelsPath(id), chatPath: defaultChatPath(id) };
   return null;
 }
 
@@ -451,12 +478,16 @@ export function saveProviderAuths(id, list, { file = defaultStateFile() } = {}) 
   const baseUrl = normalizeBaseUrl(cur.baseUrl || loadProviderBaseUrl(id, { file }) || "");
   const keys = Array.isArray(cur.keys) ? [...new Set(cur.keys.filter((x) => typeof x === "string" && x.trim().length))] : loadProviderKeys(id, { file });
   const allowedModels = Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
-  if (!baseUrl && !keys.length && !clean.length && !allowedModels.length) {
+  const modelsPath = typeof cur.modelsPath === "string" ? normalizeEndpointPath(cur.modelsPath) : "";
+  const chatPath = typeof cur.chatPath === "string" ? normalizeEndpointPath(cur.chatPath) : "";
+  if (!baseUrl && !keys.length && !clean.length && !allowedModels.length && !modelsPath && !chatPath) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl, keys };
     if (clean.length) configs[id].auths = clean;
     if (allowedModels.length) configs[id].allowedModels = allowedModels;
+    if (modelsPath) configs[id].modelsPath = modelsPath;
+    if (chatPath) configs[id].chatPath = chatPath;
   }
   writeStateImmediate(file, { providerConfigs: configs });
   return clean;
@@ -469,33 +500,43 @@ export function saveProviderBaseUrl(id, baseUrl, { file = defaultStateFile() } =
   const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
   const auths = normalizeAuths(cur.auths);
   const allowedModels = Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : [];
-  if (!clean && !keys.length && !auths.length && !allowedModels.length) {
+  const modelsPath = typeof cur.modelsPath === "string" ? normalizeEndpointPath(cur.modelsPath) : "";
+  const chatPath = typeof cur.chatPath === "string" ? normalizeEndpointPath(cur.chatPath) : "";
+  if (!clean && !keys.length && !auths.length && !allowedModels.length && !modelsPath && !chatPath) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: clean, keys };
     if (auths.length) configs[id].auths = auths;
     if (allowedModels.length) configs[id].allowedModels = allowedModels;
+    if (modelsPath) configs[id].modelsPath = modelsPath;
+    if (chatPath) configs[id].chatPath = chatPath;
   }
   writeStateImmediate(file, { providerConfigs: configs });
   return clean;
 }
 
-export function saveProviderConfig(id, { baseUrl, keys, auths, allowedModels }, { file = defaultStateFile() } = {}) {
+export function saveProviderConfig(id, { baseUrl, keys, auths, allowedModels, modelsPath, chatPath }, { file = defaultStateFile() } = {}) {
   const cleanUrl = normalizeBaseUrl(baseUrl);
   const cleanKeys = [...new Set((Array.isArray(keys) ? keys : []).map((k) => String(k || "").trim()).filter(Boolean))];
   const cleanAuths = auths === undefined ? undefined : normalizeAuths(auths);
   const cleanAllowed = [...new Set((Array.isArray(allowedModels) ? allowedModels : []).map((m) => normalizeAllowedModel(m, id)).filter(Boolean))];
+  const cleanModelsPath = modelsPath === undefined ? undefined : (String(modelsPath).trim() ? normalizeEndpointPath(modelsPath) : "");
+  const cleanChatPath = chatPath === undefined ? undefined : (String(chatPath).trim() ? normalizeEndpointPath(chatPath) : "");
   const configs = { ...loadProviderConfigs({ file }) };
   const cur = configs[id] && typeof configs[id] === "object" ? configs[id] : {};
-  // 保留已有的 allowedModels / auths 若本次未传入
+  // 保留已有的 allowedModels / auths / paths 若本次未传入
   const finalAllowed = allowedModels === undefined ? (Array.isArray(cur.allowedModels) ? [...new Set(cur.allowedModels.map((m) => normalizeAllowedModel(m, id)).filter(Boolean))] : []) : cleanAllowed;
   const finalAuths = cleanAuths === undefined ? normalizeAuths(cur.auths) : cleanAuths;
-  if (!cleanUrl && !cleanKeys.length && !finalAllowed.length && !finalAuths.length) {
+  const finalModelsPath = cleanModelsPath === undefined ? (typeof cur.modelsPath === "string" ? normalizeEndpointPath(cur.modelsPath) : "") : cleanModelsPath;
+  const finalChatPath = cleanChatPath === undefined ? (typeof cur.chatPath === "string" ? normalizeEndpointPath(cur.chatPath) : "") : cleanChatPath;
+  if (!cleanUrl && !cleanKeys.length && !finalAllowed.length && !finalAuths.length && !finalModelsPath && !finalChatPath) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl: cleanUrl, keys: cleanKeys };
     if (finalAuths.length) configs[id].auths = finalAuths;
     if (finalAllowed.length) configs[id].allowedModels = finalAllowed;
+    if (finalModelsPath) configs[id].modelsPath = finalModelsPath;
+    if (finalChatPath) configs[id].chatPath = finalChatPath;
   }
   // 同步清理旧 providerKeys 中同 id 的残留，避免双写
   const oldKeys = readState(file).providerKeys;
@@ -503,10 +544,10 @@ export function saveProviderConfig(id, { baseUrl, keys, auths, allowedModels }, 
     const nextKeys = { ...oldKeys };
     delete nextKeys[id];
     writeStateImmediate(file, { providerKeys: nextKeys, providerConfigs: configs });
-    return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed };
+    return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed, modelsPath: finalModelsPath, chatPath: finalChatPath };
   }
   writeStateImmediate(file, { providerConfigs: configs });
-  return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed };
+  return { baseUrl: cleanUrl, keys: cleanKeys, auths: finalAuths, allowedModels: finalAllowed, modelsPath: finalModelsPath, chatPath: finalChatPath };
 }
 
 // ---- 供应商模型白名单：providerConfigs.<id>.allowedModels（空 = 不限） ----
@@ -525,12 +566,16 @@ export function saveProviderAllowedModels(id, list, { file = defaultStateFile() 
   const baseUrl = normalizeBaseUrl(cur.baseUrl || loadProviderBaseUrl(id, { file }) || "");
   const keys = Array.isArray(cur.keys) ? cur.keys : loadProviderKeys(id, { file });
   const auths = normalizeAuths(cur.auths);
-  if (!baseUrl && !keys.length && !auths.length && !clean.length) {
+  const modelsPath = typeof cur.modelsPath === "string" ? normalizeEndpointPath(cur.modelsPath) : "";
+  const chatPath = typeof cur.chatPath === "string" ? normalizeEndpointPath(cur.chatPath) : "";
+  if (!baseUrl && !keys.length && !auths.length && !clean.length && !modelsPath && !chatPath) {
     delete configs[id];
   } else {
     configs[id] = { baseUrl, keys };
     if (auths.length) configs[id].auths = auths;
     if (clean.length) configs[id].allowedModels = clean;
+    if (modelsPath) configs[id].modelsPath = modelsPath;
+    if (chatPath) configs[id].chatPath = chatPath;
   }
   writeStateImmediate(file, { providerConfigs: configs });
   return clean;
