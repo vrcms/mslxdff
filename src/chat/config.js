@@ -6,5 +6,6 @@ export const CHAT_HISTORY_MAX_CHARS = 400000;
 export const CHAT_KEEP_RECENT = 40;
 export const CHAT_SUMMARY_TRIGGER = 400000;
 export const CHAT_MAX_TOOL_LOOPS = 6;
-export const CHAT_TIMEOUT_MS = 30000;
+export const CHAT_TIMEOUT_MS = 15000;
+export const CHAT_GATEWAY_TIMEOUT_MS = 25000;
 export const FORBIDDEN = ["-uninstall", "--uninstall"];

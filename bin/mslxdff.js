@@ -295,11 +295,54 @@ if (args.includes("-model") || args.includes("-models")) {
     // provider filter: bare ids are opencode, prefixed are <provider>/...
     if (modelListProvider) {
       const prov = String(modelListProvider).toLowerCase();
-      ids = ids.filter((id) => {
+      const filtered = ids.filter((id) => {
         const slash = String(id).indexOf("/");
         const p = slash > 0 ? String(id).slice(0, slash).toLowerCase() : "opencode";
         return p === prov;
       });
+      // 非 opencode 供应商的模型不在 opencode 缓存中，改从 allowlist 展示（原名+别名）
+      if (prov !== "opencode" && filtered.length === 0) {
+        try {
+          const { loadProviderAllowedModels, loadProviderAllowAnyModels, loadProviderBaseUrl } = await import("../src/state.js");
+          const { loadModelAliases, getAliasForModel } = await import("../src/providers/model-id.js");
+          try { loadModelAliases(); } catch {}
+          const allowed = loadProviderAllowedModels(prov);
+          const allowAny = loadProviderAllowAnyModels(prov);
+          const baseUrl = loadProviderBaseUrl(prov);
+          if (modelListJson) {
+            const data = allowed.length
+              ? allowed.map((raw) => ({ id: `${prov}/${raw}`, object: "model" }))
+              : [];
+            console.log(JSON.stringify({ object: "list", data }, null, 2));
+            process.exit(0);
+          }
+          if (!allowed.length) {
+            if (allowAny) {
+              console.log(`provider "${prov}" allowAny ON (allowlist 空=放行全部)${baseUrl ? `  baseUrl=${baseUrl}` : ""}`);
+              console.log(`  (未设 allowlist，全部模型放行)  查看 live 列表: mslxdff -provider ${prov} models`);
+            } else {
+              console.log(`no models for provider "${prov}" — allowlist 空 + allowAny OFF = 阻塞`);
+              console.log(`  设白名单: mslxdff -provider ${prov} allowlist set <model1> <model2>  或  mslxdff -provider ${prov} allowAny on`);
+              console.log(`  live 查看: mslxdff -provider ${prov} models`);
+            }
+            process.exit(0);
+          }
+          const at2 = cachedAt ? ` (cached ${fmtShanghaiYMDHM(cachedAt)})` : "";
+          console.log(`${allowed.length} model(s) for ${prov}${at2} (allowlist，原名 + 别名):`);
+          const pickedIds2 = loadModelPicks();
+          for (const raw of allowed) {
+            const canonical = `${prov}/${raw}`;
+            let alias = null;
+            try { alias = getAliasForModel(canonical); } catch {}
+            if (!alias && String(canonical).includes("/")) alias = String(canonical).replace(/\//g, "-");
+            const aliasStr = alias && alias !== canonical ? `  (别名: ${alias})` : "";
+            const mark2 = pickedIds2.includes(canonical) || (alias && pickedIds2.includes(alias)) ? "*" : " ";
+            console.log(`  ${mark2} ${canonical}${aliasStr}`);
+          }
+          process.exit(0);
+        } catch {}
+      }
+      ids = filtered;
       if (modelListJson) {
         console.log(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }, null, 2));
         process.exit(0);
@@ -316,12 +359,42 @@ if (args.includes("-model") || args.includes("-models")) {
       console.log("no models available — try: mslxdff -model refresh");
       process.exit(0);
     }
-    // TTY：交互式多选勾选常用模型（空格勾选，Enter 保存）；非 TTY（管道/脚本）：保持纯列表并标注勾选
-    if (process.stdin.isTTY && process.stdout.isTTY && !modelListProvider) {
+    // TTY 交互式：`mslxdff -models`（无 list）走交互；` -model list` 默认列表，但交互入口统一为 -models
+    // 为支持“opencode + 其他供应商 allowlist 原名/别名”一起勾选，交互池 = opencode 免费池 + 各供应商 allowlist + 已勾选的遗留 picks
+    if (sub === undefined && process.stdin.isTTY && process.stdout.isTTY) {
       const statuses = loadModelErrors();
       const current = getPreferredModel();
       const pickedIds = loadModelPicks();
-      const items = ids.map((id) => {
+      // 基础：opencode 免费池
+      const combinedIds = [...ids];
+      const seen = new Set(combinedIds);
+      try {
+        const { loadProviderConfigs, loadProviderAllowedModels } = await import("../src/state.js");
+        const configs = loadProviderConfigs();
+        for (const pid of Object.keys(configs).filter((k) => String(k).toLowerCase() !== "opencode")) {
+          const allowed = loadProviderAllowedModels(pid);
+          for (const raw of allowed) {
+            const canonical = `${pid}/${raw}`;
+            if (!seen.has(canonical)) {
+              seen.add(canonical);
+              combinedIds.push(canonical);
+            }
+            // 别名（dash 版）若已被 picks 选中，也确保可见（便于取消）
+            const aliasDash = String(canonical).replace(/\//g, "-");
+            if (aliasDash !== canonical && pickedIds.includes(aliasDash) && !seen.has(aliasDash)) {
+              // 不直接加入 alias 作为独立选项，保留 canonical 即可（canonical 与 alias 视为同一模型，勾选 canonical）
+            }
+          }
+        }
+      } catch {}
+      // 已勾选但不在上述池中的（例如 workbuddy/* 当 allowAny ON 时无 allowlist，或历史 picks），补齐以便取消
+      for (const pid of pickedIds) {
+        if (!seen.has(pid)) {
+          seen.add(pid);
+          combinedIds.push(pid);
+        }
+      }
+      const items = combinedIds.map((id) => {
         const e = statuses[id];
         return {
           id,
@@ -342,38 +415,158 @@ if (args.includes("-model") || args.includes("-models")) {
     const at = cachedAt ? ` (cached ${fmtShanghaiYMDHM(cachedAt)})` : "";
     const pickedIds = loadModelPicks();
     const mark = (id) => (pickedIds.includes(id) ? "*" : " ");
-    console.log(`${ids.length} free model(s)${at} (${pickedIds.length} picked, * = picked):`);
-    // 加载别名映射，显示原始名+别名
-    let aliasMap = {};
-    let fullAliases = {};
-    try {
-      const { loadModelAliases, getAliasForModel } = await import("../src/providers/model-id.js");
-      loadModelAliases();
-      for (const id of ids) {
-        const alias = getAliasForModel(id);
-        if (alias) aliasMap[id] = alias;
-      }
-      // 读取完整 alias 表（用于展示本地别名，如 clinebot/*）
-      try {
-        const aliasesFile = join(homedir(), ".config", "mslxdff", "model-aliases.json");
-        const raw = JSON.parse(readFileSync(aliasesFile, "utf8"));
-        if (raw && typeof raw === "object") fullAliases = raw;
-      } catch {}
-    } catch {}
+    // 分组展示：按供应商前缀分组，opencode 裸 id 归为 opencode
+    const groups = {};
     for (const id of ids) {
-      const alias = aliasMap[id];
-      const aliasStr = alias ? `  (alias: ${alias})` : "";
-      console.log(`  ${mark(id)} ${id}${aliasStr}`);
+      const prov = String(id).includes("/") ? String(id).split("/")[0] : "opencode";
+      if (!groups[prov]) groups[prov] = [];
+      groups[prov].push(id);
     }
-    // 额外展示本地别名（不在上游列表中的，如 clinebot/*）
-    const aliasEntries = Object.entries(fullAliases).filter(([alias, canonical]) => !ids.includes(canonical));
-    if (aliasEntries.length) {
-      console.log(`\nlocal aliases (${aliasEntries.length}):`);
-      for (const [alias, canonical] of aliasEntries) {
-        console.log(`  ${canonical}  =>  ${alias}`);
+    const order = ["opencode", "workbuddy", "clinebot", "openrouter"];
+    const sortedProvs = Object.keys(groups).sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b);
+      if (ia !== -1 || ib !== -1) {
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
       }
+      return a.localeCompare(b);
+    });
+    if (modelListProvider) {
+      console.log(`${ids.length} model(s) for ${modelListProvider}${at} (${pickedIds.length} picked, * = picked):`);
+      // 加载别名映射，显示原始名+别名
+      let aliasMap = {};
+      try {
+        const { loadModelAliases, getAliasForModel } = await import("../src/providers/model-id.js");
+        loadModelAliases();
+        for (const id of ids) {
+          const alias = getAliasForModel(id);
+          if (alias) aliasMap[id] = alias;
+          else if (String(id).includes("/")) {
+            const dashAlias = String(id).replace(/\//g, "-");
+            if (dashAlias !== id) aliasMap[id] = dashAlias;
+          }
+        }
+      } catch {}
+      for (const prov of sortedProvs) {
+        const list = groups[prov];
+        console.log(`\n  ── ${prov} (${list.length}) ──`);
+        for (const id of list) {
+          const alias = aliasMap[id];
+          const aliasStr = alias ? `  (别名: ${alias})` : "";
+          console.log(`  ${mark(id)} ${id}${aliasStr}`);
+        }
+      }
+      console.log(`\npicked only constrains auto; manage with: mslxdff -models (TTY) | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear`);
+    } else {
+      console.log(`${ids.length} free model(s)${at} (${pickedIds.length} picked, * = picked):`);
+      // 加载别名映射，显示原始名+别名
+      let aliasMap = {};
+      let fullAliases = {};
+      try {
+        const { loadModelAliases, getAliasForModel } = await import("../src/providers/model-id.js");
+        loadModelAliases();
+        for (const id of ids) {
+          const alias = getAliasForModel(id);
+          if (alias) aliasMap[id] = alias;
+          else if (String(id).includes("/")) {
+            const dashAlias = String(id).replace(/\//g, "-");
+            if (dashAlias !== id) aliasMap[id] = dashAlias;
+          }
+        }
+        try {
+          const aliasesFile = join(homedir(), ".config", "mslxdff", "model-aliases.json");
+          const raw = JSON.parse(readFileSync(aliasesFile, "utf8"));
+          if (raw && typeof raw === "object") fullAliases = raw;
+        } catch {}
+      } catch {}
+      for (const prov of sortedProvs) {
+        const list = groups[prov];
+        console.log(`\n  ── ${prov} (${list.length}) ──`);
+        for (const id of list) {
+          const alias = aliasMap[id];
+          const aliasStr = alias ? `  (别名: ${alias})` : "";
+          console.log(`  ${mark(id)} ${id}${aliasStr}`);
+        }
+      }
+      // ── 分隔 + 其他供应商 allowlist（原名 + 别名） ──
+      // 其余供应商的可用模型由 allowlist 决定（空 allowlist + allowAny OFF = 阻塞），此处直接展示 allowlist 条目与别名，不做网络拉取，速度快
+      try {
+        const { loadProviderConfigs, loadProviderAllowedModels, loadProviderAllowAnyModels, loadProviderBaseUrl } = await import("../src/state.js");
+        const { loadModelAliases: _la2, getAliasForModel: _gaf } = await import("../src/providers/model-id.js");
+        try { _la2(); } catch {}
+        const configs = loadProviderConfigs();
+        const otherIds = Object.keys(configs).filter((k) => String(k).toLowerCase() !== "opencode");
+        // 仅展示已配置过的供应商（有 baseUrl/keys/allowlist 任一），按固定顺序 + 字典序
+        const order2 = ["workbuddy", "clinebot", "openrouter", "bai"];
+        otherIds.sort((a, b) => {
+          const ia = order2.indexOf(a), ib = order2.indexOf(b);
+          if (ia !== -1 || ib !== -1) {
+            if (ia === -1) return 1;
+            if (ib === -1) return -1;
+            return ia - ib;
+          }
+          return a.localeCompare(b);
+        });
+        if (otherIds.length) {
+          console.log(`\n────────────────────────────────────────`);
+          console.log(`其他供应商 (allowlist，原名 + 别名) (${otherIds.length} providers):`);
+          for (const pid of otherIds) {
+            const allowed = loadProviderAllowedModels(pid);
+            const allowAny = loadProviderAllowAnyModels(pid);
+            const baseUrl = loadProviderBaseUrl(pid) || configs[pid]?.baseUrl || "";
+            const header = allowAny
+              ? (allowed.length ? `allowlist ${allowed.length} (allowAny ON)` : `allowAny ON (allowlist 空=放行全部)`)
+              : (allowed.length ? `allowlist ${allowed.length} (allowAny OFF)` : `allowlist 空 + allowAny OFF = 阻塞`);
+            console.log(`\n  ── ${pid} (${header})${baseUrl ? `  baseUrl=${baseUrl}` : ""} ──`);
+            if (!allowed.length) {
+              if (allowAny) {
+                console.log(`     (未设 allowlist，全部模型放行)  查看 live 列表: mslxdff -provider ${pid} models`);
+                console.log(`     限制可用模型: mslxdff -provider ${pid} allowlist set <model1> <model2>`);
+              } else {
+                console.log(`     阻塞中：无可用模型 — 设白名单: mslxdff -provider ${pid} allowlist set <model1> <model2>`);
+                console.log(`     或放行全部: mslxdff -provider ${pid} allowAny on`);
+              }
+            } else {
+              for (const raw of allowed) {
+                const canonical = `${pid}/${raw}`;
+                let alias = null;
+                try { alias = _gaf(canonical); } catch {}
+                if (!alias && String(canonical).includes("/")) alias = String(canonical).replace(/\//g, "-");
+                const aliasStr = alias && alias !== canonical ? `  (别名: ${alias})` : "";
+                const pickedMark = pickedIds.includes(canonical) || pickedIds.includes(alias || "") ? "*" : " ";
+                console.log(`     ${pickedMark} ${canonical}${aliasStr}`);
+              }
+              console.log(`     管理: mslxdff -provider ${pid} allowlist [list|add|remove|clear] | allowAny on|off`);
+            }
+          }
+        } else {
+          console.log(`\n────────────────────────────────────────`);
+          console.log(`其他供应商 (allowlist，原名 + 别名): (none — 尚未配置)`);
+          console.log(`  添加示例: mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models`);
+        }
+        // 额外兜底：本地别名中不在任何 allowlist 里的，单独提示
+        const aliasEntries = Object.entries(fullAliases).filter(([alias, canonical]) => {
+          if (ids.includes(canonical)) return false;
+          // 已在 allowlist 中展示过的别名不重复
+          for (const pid of otherIds) {
+            const allowed = loadProviderAllowedModels(pid);
+            for (const raw of allowed) {
+              const can = `${pid}/${raw}`;
+              if (can === canonical) return false;
+            }
+          }
+          return true;
+        });
+        if (aliasEntries.length) {
+          console.log(`\n  本地别名 (不在 allowlist 里的遗留映射 ${aliasEntries.length}):`);
+          for (const [alias, canonical] of aliasEntries) {
+            console.log(`     ${canonical}  =>  ${alias}`);
+          }
+        }
+      } catch {}
+      console.log(`\npicked only constrains auto; manage with: mslxdff -models (TTY) | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear`);
     }
-    console.log(`\npicked only constrains auto; manage with: mslxdff -models (TTY) | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear`);
   } catch (err) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
     process.exit(1);
@@ -764,17 +957,21 @@ if (args.includes("-provider") || args.includes("--provider")) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url|allowlist|allowAny]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|models|clear|share|set-url|allowlist|allowAny]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
+    console.error("            mslxdff -provider openrouter models [--json]      list provider models (allowlist filtered)");
     console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
     console.error("            mslxdff -provider openrouter set-url https://api.example.com/v1");
+    console.error("            mslxdff -provider openrouter set-models-path /v1/models");
+    console.error("            mslxdff -provider openrouter set-chat-path /v1/chat/completions");
     console.error("            mslxdff -provider openrouter allowlist set gpt-4 gpt-3.5  manage allowed models (empty=block unless allowAny ON)");
     console.error("            mslxdff -provider openrouter allowAny on|off     empty allowlist = allow all or block all (default OFF, secure)");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx   add generic OpenAI-compatible provider");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4  add with allowlist");
+    console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models --chat-path /v1/chat/completions");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
@@ -832,9 +1029,10 @@ if (args.includes("-provider") || args.includes("--provider")) {
     const gBase = rest[1];
     const gKey = rest[2];
     if (!gid || !gBase || !gKey) {
-      console.error("usage: mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]");
+      console.error("usage: mslxdff -provider add <id> <baseUrl> <key> [allowedModel...] [--models-path <path>] [--chat-path <path>]");
       console.error("       e.g. mslxdff -provider add myapi https://api.example.com/v1 sk-xxx");
       console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4 gpt-3.5");
+      console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models --chat-path /v1/chat/completions");
       process.exit(1);
     }
     if (gid === "opencode" || gid === "oc" || gid === "openrouter") {
@@ -1317,7 +1515,8 @@ async function pickInteractive(items, startCursor = 0) {
   let cursor = Math.min(Math.max(startCursor, 0), items.length - 1);
   const draw = () => {
     const lines = [...renderChooser(items, cursor), ...renderChooserHelp()];
-    process.stdout.write("\x1b[G\x1b[J" + lines.join("\n"));
+    // PowerShell 兼容：\x1b[2J 清屏 + \x1b[H 回到左上，比 \x1b[G\x1b[J 更可靠
+    process.stdout.write("\x1b[2J\x1b[H" + lines.join("\n"));
   };
   draw();
   return new Promise((resolve) => {
@@ -1359,7 +1558,7 @@ async function pickInteractiveMulti(items, initialPicked = new Set(), startCurso
   const draw = () => {
     const rows = items.map((it, i) => ({ ...it, picked: picked.has(it.id) }));
     const lines = [...renderChooser(rows, cursor, { multi: true }), ...renderChooserHelp(true)];
-    process.stdout.write("\x1b[G\x1b[J" + lines.join("\n"));
+    process.stdout.write("\x1b[2J\x1b[H" + lines.join("\n"));
   };
   draw();
   return new Promise((resolve) => {

@@ -25,8 +25,8 @@
 | token 读 | `-showtoken` / `--showtoken` | 打印 Bearer token |
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
 | 更新 | `-update` / `--update` | 更新到 npm latest |
-| 模型交互 | `-models` | TTY 交互多选勾常用模型 |
-| 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型；`--provider workbuddy` 只看该供应商（前缀过滤），`--json` 输出 `{"object":"list","data":[...]}` |
+| 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 Space勾选 Enter保存，候选池=opencode免费池+各供应商allowlist原名/别名+已勾选，`别名: dash` 同步展示） |
+| 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型：默认先列 opencode 免费池，`────────────────────────────────────────` 分隔后列其他供应商 allowlist（原名 + 别名 `别名: dash`）；`--provider clinebot` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` |
 | 模型设默认 | `-model set <id>` | 设首选模型，自动入 picks |
 | 模型健康 | `-model status` | 每模型 normal/limit/error |
 | 模型刷新 | `-model refresh` | 强制拉上游刷新 |

@@ -150,7 +150,7 @@ export function formatBannerLines() {
   const green = "\x1b[32m";
   const lines = [];
   lines.push(`${cyan}┌─ mslxdff chat  ·  数据来自 -d 网关进程（非本会话） ─────${rst}`);
-  lines.push(`${cyan}│${rst}  对话模型  ${yellow}${s.chatPref}${rst} ${dim}→ ${s.chatFall}（自动降级）${rst}  ${dim}[${s.chatPrefStatus}/${s.chatFallStatus}]${rst}`);
+  lines.push(`${cyan}│${rst}  对话模型  ${yellow}${s.chatPref}${rst} ${dim}→ ${s.chatFall} → gateway auto:8989${rst}  ${dim}[${s.chatPrefStatus}/${s.chatFallStatus}]${rst}  ${dim}三级兜底${rst}`);
   lines.push(`${cyan}│${rst}  网关默认  ${green}${s.gatewayModel}${rst} ${dim}[${s.gatewayStatus}]${rst}  ·  端口 ${s.port}  ·  ${dim}${s.endpointUrl}${rst}`);
   const prefTtfb = s.chatPrefStat?.avgTtfbMs ?? s.chatPrefStat?.emaTtfbMs ?? s.chatPrefLat?.emaMs;
   const fallTtfb = s.chatFallStat?.avgTtfbMs ?? s.chatFallStat?.emaTtfbMs ?? s.chatFallLat?.emaMs;

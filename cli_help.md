@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.60`（含 WorkBuddy 供应商 + 每日 100 credits 签到）。最后更新：2026-08-28。
+> 适用版本：`>=0.1.63`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查）。最后更新：2026-08-30。
 
 ## 目录
 
@@ -51,8 +51,8 @@
 | `mslxdff -showtoken` | `--showtoken` | 打印当前 Bearer token | 首次会生成 | 否 |
 | `mslxdff -refresh-token` | `--refresh-token` | 轮换 token 并打印新值 | 是（`token`） | 否 |
 | `mslxdff -update` | `--update` | 查询 npm `latest`，若有新版则 `npm install -g` 并重启 daemon | 否 | 重启若有更新 |
-| `mslxdff -models` | — | 交互式多选：空格勾选常用模型，Enter 保存到 `modelPicks`；非 TTY 则纯列表 | 是（`modelPicks`） | 否 |
-| `mslxdff -model list` | `-models` 同 | 列出免费模型（每次 4s 超时尝试刷新，失败回退缓存） | 否 | 否 |
+| `mslxdff -models` | — | 交互式多选（↑↓移动 Space勾选 Enter保存 q取消，候选池=opencode免费池+各供应商allowlist原名/别名+已勾选）：空格勾选常用模型，Enter 保存到 `modelPicks`；非 TTY 则等价 ` -model list` 纯列表（含分隔后 allowlist） | 是（`modelPicks`） | 否 |
+| `mslxdff -model list [--provider <id>] [--json]` | `-models` 同 | 列出免费模型（每次 4s 超时尝试刷新，失败回退缓存）；默认先列 `opencode` 免费池，`────────────────────────────────────────` 分隔后列其他供应商 `allowlist`（原名 + 别名 `别名: dash`，如 `clinebot/z-ai/glm-5.3-flash (别名: clinebot-z-ai-glm-5.3-flash)`）；`--provider clinebot` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` 供脚本 | 否 | 否 |
 | `mslxdff -model set <id>` | — | 设默认模型 `preferredModel`，并自动加入 `modelPicks` | 是 | 热重载 |
 | `mslxdff -model status` | — | 显示每模型健康状态 normal/limit/error + 时间 + HTTP 码 | 否 | 否 |
 | `mslxdff -model refresh` | — | 强制从上游拉取模型列表并更新缓存 | 是（cacheFile） | 否 |
@@ -60,8 +60,11 @@
 | `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除 | 是 | — |
 | `mslxdff -model picks` | — | 列出当前勾选集 | 否 | — |
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
-| `mslxdff -provider add <id> <baseUrl> <key>` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`） | 是 | 重启生效 |
+| `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
+| `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
+| `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
+| `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
 | `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=阻塞除非 `allowAny on`，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
 | `mslxdff -provider <id> allowAny on\|off` | `--provider` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） | 是 | 热更新立即生效 |
@@ -86,7 +89,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
-| `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：mimo 优先/big-pickle 兜底，模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
+| `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：`mimo-v2.5-free → big-pickle → 本地网关 auto:8989` 三级兜底（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，失败自动切本地 `http://127.0.0.1:8989/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer），模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
 ---
@@ -262,13 +265,13 @@
 ### `-models`（交互式多选，TTY 专属）
 
 - **语法**：`mslxdff -models`（无子命令）
-- **作用**：交互式勾选常用模型集合 `modelPicks`。`modelPicks` 为空表示“不筛选，全量 auto”。
+- **作用**：交互式勾选常用模型集合 `modelPicks`。`modelPicks` 为空表示“不筛选，全量 auto”。候选池 = `opencode` 免费池 + 各供应商 `allowlist` 原名（`provider/raw`） + 已勾选的遗留 picks（便于取消），`allowAny ON` 的供应商无 allowlist 时不在候选池（提示用 `allowlist set` 限制或 `provider models` 看 live）。
 - **交互**（仅 TTY）：
   - `↑/↓` 移动光标，`Space` 勾选/取消，`Enter` 保存，`q/Esc` 取消（`picks 不变`）。
-  - 初始光标在当前首选模型 `getPreferredModel()` 所在行；已勾选项带 `picked` 标记。
+  - 初始光标在当前首选模型 `getPreferredModel()` 所在行；已勾选项带 `picked` 标记（含 `clinebot/...` 等 allowlist 原名）。
   - 保存：`saveModelPicks([...result])`，打印 `saved N picked model(s): ...` 或 `(none — auto uses full list)`。
   - 取消：`cancelled — picks unchanged`。
-- **非 TTY 行为**：等价于 ` -model list` 的纯列表分支（带 `*` 标注已勾选），不进入交互。
+- **非 TTY 行为**：等价于 ` -model list` 的纯列表分支（opencode 在上 + `────────────────────────────────────────` 分隔后 allowlist 原名/别名，带 `*` 标注已勾选），不进入交互。
 - **前置**：每次执行都会 4s 超时尝试刷新模型列表（`tryRefreshModels()`），成功则用新列表，失败回退 stale 缓存。
 - **示例**：
   ```bash
@@ -276,18 +279,35 @@
   # → ↑/↓ 移动  Space 勾选  Enter 保存
   ```
 
-### `-model list` / `-models`（非交互列表）
+### `-model list` / `-models`（非交互列表，支持按供应商过滤）
 
-- **语法**：`mslxdff -model list` 或 `mslxdff -models`（非 TTY）
-- **作用**：列出当前代理对外暴露的免费模型（已过滤，仅 free）。每次都尝试刷新，4s 超时失败则回退缓存；无缓存且刷新失败则 `no cached models and refresh failed`。
+- **语法**：`mslxdff -model list` 或 `mslxdff -models`（非 TTY）；`mslxdff -model list --provider clinebot` 只看该供应商 allowlist（`clinebot/z-ai/...` + 别名）；`--json` 输出 `{"object":"list","data":[...]}` 供脚本
+- **作用**：列出当前代理对外暴露的免费模型（已过滤，仅 free）。每次都尝试刷新，4s 超时失败则回退缓存；无缓存且刷新失败则 `no cached models and refresh failed`。默认输出分两段：`opencode` 免费池在上，`────────────────────────────────────────` 分隔后为其他供应商 `allowlist`（原名 + 别名，如 `clinebot/z-ai/glm-5.3-flash (别名: clinebot-z-ai-glm-5.3-flash)`）。`--provider clinebot` 时直接展示该供应商 allowlist（原名+别名），`workbuddy` 等 `allowAny ON` 时提示“allowlist 空=放行全部，live 列表用 `mslxdff -provider workbuddy models`”。
 - **输出**：
   ```
-  8 free model(s) (cached 2026-08-27 14:00) (2 picked, * = picked):
+  8 free model(s) (cached 2026-08-30 20:35) (9 picked, * = picked):
+
+    ── opencode (8) ──
     * big-pickle
       deepseek-v4-flash-free
-  picked only constrains auto; manage with: ...
+      ...
+
+  ────────────────────────────────────────
+  其他供应商 (allowlist，原名 + 别名) (2 providers):
+
+    ── workbuddy (allowAny ON ...)  baseUrl=https://copilot.tencent.com ──
+       (未设 allowlist，全部放行)  查看 live: mslxdff -provider workbuddy models
+
+    ── clinebot (allowlist 3 ...)  baseUrl=https://api.cline.bot/api/v1 ──
+     * clinebot/z-ai/glm-5.3-flash  (别名: clinebot-z-ai-glm-5.3-flash)
   ```
-- **示例**：`mslxdff -model list | cat`（非 TTY 强制列表）
+- **示例**：
+  ```bash
+  mslxdff -model list | cat                        # 全量
+  mslxdff -model list --provider workbuddy          # 只看 workbuddy
+  mslxdff -model list --provider workbuddy --json   # 脚本用
+  mslxdff -provider workbuddy models                # 同义，直查该供应商（推荐）
+  ```
 
 ### `-model set <id>`
 
@@ -375,7 +395,7 @@
   - `401 {"error":"Unauthorized"}` + `www-authenticate: Bearer` → 本机 token 陈旧（`state.json` 改动后未重启），提示用户 `mslxdff -stop && mslxdff` 重启 daemon
   - `403 {"error":"model not allowed…"} + x-mslxdff-allowlist:1` → `allowlist` 未放行，需 `mslxdff -provider <id> allowlist add <model>` 或 `allowAny on`
   - `429/5xx` → 上游限流/故障，走冷却与转发兜底
-- **与 `-chat` 的区别**：`-chat` 的 `mimo-v2.5-free → big-pickle` 是**直连上游** `https://opencode.ai/zen/v1/chat/completions`（`createUpstreamClient`），不经本地网关；探活 `clinebot/*` / `workbuddy/*` 必须经本地网关 `curl`，不能用 `run_command` 拼 CLI。
+- **与 `-chat` 的区别**：`-chat` 的 `mimo-v2.5-free → big-pickle → gateway auto:8989` 是**前两者直连上游** `https://opencode.ai/zen/v1/chat/completions`（`createUpstreamClient`，`globalThis.fetch`，`keepAlive:false`），均失败则**自动切本地网关** `http://127.0.0.1:8989/v1/chat/completions` 的 `auto`（含多供应商择优/hedge/peer，含 `workbuddy/clinebot` 等），`mimo→pickle` 阶段不经网关；探活 `clinebot/*` / `workbuddy/*` 必须经本地网关 `curl`，不能用 `run_command` 拼 CLI。
 - **反例（禁止）**：
   ```bash
   mslxdff "hi" --model clinebot/z-ai/glm-5.3-flash   # ❌ 输出 status 页
@@ -484,30 +504,49 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider openrouter list          # 一并显示 share 状态
   ```
 
-#### `mslxdff -provider add <id> <baseUrl> <key>`（通用 OpenAI 兼容供应商一键添加）
+#### `mslxdff -provider add <id> <baseUrl> <key>`（通用 OpenAI 兼容供应商一键添加，支持异形路径）
 
-- **语法**：`mslxdff -provider add <id> <baseUrl> <key>`
-- **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl>/chat/completions`，`GET <baseUrl>/models` 拉模型列表（不过滤，全量前缀化）。
+- **语法**：`mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]`
+- **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl><chatPath>`，`GET <baseUrl><modelsPath>` 拉模型列表（不过滤，全量前缀化）。`--models-path`/`--chat-path` 用于适配异形上游：`opencode=/zen/v1/models`、`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`，不传则按供应商默认值（`workbuddy` 为定制，其余为 `/models` & `/chat/completions`）。
 - **安全默认（0.1.61 起）**：`allowAnyModels=false`，**空 `allowlist` 时上游直接禁用**，`chat` 返回 `403 {"error":"model not allowed… — allowed: (none) (use: mslxdff -provider <id> allowlist add <model>)"}` + 头 `x-mslxdff-allowlist:1`，不打上游、不计费。**必须二选一**：`mslxdff -provider <id> allowlist set <m1> <m2> ...`（推荐，精确 free 模型）或 `mslxdff -provider <id> allowAny on`（放行全部，`opencode` 例外默认 `ON`）。
-- **行为**：`saveProviderConfig(id, {baseUrl, keys:[key]})`，若 `id` 已存在则更新 `baseUrl` 并追加 key（去重）；`opencode/openrouter` 保留走原分支，误用 `add openrouter ...` 会提示改用 `add <key>` / `set-url`。
-- **校验**：`id` 经 `normalizeProviderId`，`baseUrl` 必须 `http(s)://` 前缀。
+- **行为**：`saveProviderConfig(id, {baseUrl, keys:[key], modelsPath, chatPath})`，若 `id` 已存在则更新 `baseUrl` 并追加 key（去重）；`opencode/openrouter` 保留走原分支，误用 `add openrouter ...` 会提示改用 `add <key>` / `set-url`。
+- **校验**：`id` 经 `normalizeProviderId`，`baseUrl` 必须 `http(s)://` 前缀，`modelsPath`/`chatPath` 必须以 `/` 开头。
 - **输出**：`added generic provider: myapi / baseUrl: ... / keys: 1 (...) / allow=none(BLOCKED) — set allowlist or allowAny on to enable / use as: myapi/<model-id> — restart daemon to activate`
 - **示例**：
   ```bash
   mslxdff -provider add myapi https://api.example.com/v1 sk-xxx
-  mslxdff -provider myapi list        # 看 baseUrl + keys
+  mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models --chat-path /v1/chat/completions  # b.ai 等异形
+  mslxdff -provider myapi list        # 看 baseUrl + keys + paths
   # 调用
   curl -H "Authorization: Bearer $(mslxdff -showtoken)" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"myapi/gpt-4","messages":[{"role":"user","content":"hi"}]}'
   ```
 
-#### `mslxdff -provider <id> set-url <baseUrl>`（改通用供应商地址）
+#### `mslxdff -provider <id> models [--json]`（查该供应商支持哪些模型，直观答案）
 
-- **语法**：`mslxdff -provider <id> set-url <baseUrl>`（别名 `setUrl`/`url`）
-- **作用**：仅改已注册通用供应商的 `baseUrl`，保留 `keys`；`openrouter` 的地址仍由 `MSLXDFF_OPENROUTER_BASE_URL` 控制，不建议用此改。
-- **输出**：`set <id> baseUrl: https://... — restart daemon to activate`
+- **语法**：`mslxdff -provider workbuddy models` / `mslxdff -provider clinebot models --json` / `mslxdff -provider myapi models`
+- **作用**：**“上游供应商支持哪些模型”的一级答案**，无需 `curl`。直连该供应商 `GET <baseUrl><modelsPath>` 拉取，按 `allowlist` 过滤后按 `workbuddy/` 前缀输出；`opencode` 时读本地 `models.json` 缓存的裸 id。`--json` 输出 `{"object":"list","data":[...]}` 供脚本 `jq`。
+- **示例**：
+  ```bash
+  mslxdff -provider workbuddy models          # 28 个 workbuddy/hy3 ...
+  mslxdff -provider clinebot models --json | jq .data[].id
+  mslxdff -model list --provider workbuddy    # 同义（见 5. 模型管理）
+  ```
+
+#### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
+
+- **语法**：
+  ```bash
+  mslxdff -provider <id> set-url <baseUrl>          # 别名 setUrl/url
+  mslxdff -provider <id> set-models-path <path>     # 如 /v1/models 或 /console/enterprises/personal/models
+  mslxdff -provider <id> set-chat-path <path>       # 如 /v1/chat/completions 或 /v2/chat/completions
+  ```
+- **作用**：仅改已注册通用供应商的对应路径，保留 `keys`/`allowlist`；`openrouter` 的地址仍由 `MSLXDFF_OPENROUTER_BASE_URL` 控制，不建议用此改。`modelsPath`/`chatPath` 持久化到 `state.json providerConfigs.<id>`，`0600` 原子写。
+- **输出**：`set <id> modelsPath: /v1/models — restart daemon to activate` / `set <id> baseUrl: https://... — restart daemon to activate`
 - **示例**：
   ```bash
   mslxdff -provider myapi set-url https://api.new.com/v1
+  mslxdff -provider myapi set-models-path /v1/models
+  mslxdff -provider myapi set-chat-path /chat/completions
   ```
 
 #### `mslxdff -providers list` / `mslxdff -provider list`（列出所有已部署供应商）
@@ -812,7 +851,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 ### `-chat ["prompt"]` / `--chat ["prompt"]`
 
 - **语法**：`mslxdff -chat`（进入常驻 REPL）或 `mslxdff -chat "把 hy3 设为默认模型"`（单次执行后退出）
-- **作用**：自然语言转精确 CLI 命令并执行。背后是 `src/chat/*` 独立模块，**优先调 `mimo-v2.5-free`**，失败自动降级 `big-pickle`（与 auto 同套冷却），把用户说的简称（如 `hy3`）自行查可用模型列表补全为全称（如 `hy3-free`）再调用工具。
+- **作用**：自然语言转精确 CLI 命令并执行。背后是 `src/chat/*` 独立模块，**三级兜底 `mimo-v2.5-free → big-pickle → 本地网关 auto:8989`**（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，均失败则自动切本地 `http://127.0.0.1:<port>/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer 完整链路，30s 超时，`gateway no choice` 等会透传），把用户说的简称（如 `hy3`）自行查可用模型列表补全为全称（如 `hy3-free`）再调用工具。失败时 REPL 尾部会显示 `mimo→big-pickle` 或 `gateway auto` 的 `fallback/gateway-fallback` 标记及耗时。
 - **交互**：
   - `mimo> ` 提示符，支持上下历史、`/help`（看可用说法）、`/clear`（清历史）、`/history`（看条数）、`/exit`/`quit`/`退出`/`Ctrl+D` 退出。
   - 单次模式：`mslxdff -chat "查看组列表"` 直接执行一次后退出，适合管道/脚本。

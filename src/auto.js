@@ -85,6 +85,7 @@ function effectiveCooldown(entry, slowCooldownMs, cooldownMs) {
 function inCooldown(id, errors, now, cooldownMs, slowCooldownMs) {
   const e = normEntry(errors[id]);
   if (!e || !(e.at > 0)) return false;
+  if (e.status === MODEL_STATUS.NORMAL) return false;
   const cd = effectiveCooldown(e, slowCooldownMs, cooldownMs);
   return cd > 0 && now - e.at < cd;
 }
@@ -98,6 +99,16 @@ function normLatency(e) {
 
 export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0, slowCooldownMs = 0, latencies = {}, preferred } = {}) {
   const pref = preferred ?? getPreferredModel();
+  // 最近一次成功的模型（NORMAL 且非慢且 at 最大），用于“上次成功优先”——慢模型即使刚成功也不应钉死
+  let lastSuccessId = null;
+  let lastSuccessAt = 0;
+  for (const [id, e] of Object.entries(errors)) {
+    const ne = normEntry(e);
+    if (ne && ne.status === MODEL_STATUS.NORMAL && !ne.slow && ne.at > lastSuccessAt) {
+      lastSuccessAt = ne.at;
+      lastSuccessId = id;
+    }
+  }
   return [...new Set(ids)]
     .filter(Boolean)
     .map((id) => ({
@@ -105,12 +116,14 @@ export function rankModels(ids, errors = {}, { now = Date.now(), cooldownMs = 0,
       e: normEntry(errors[id]),
       err: normEntry(errors[id])?.at ?? 0,
       isPreferred: id === pref,
+      isLastSuccess: id === lastSuccessId,
       cooling: inCooldown(id, errors, now, cooldownMs, slowCooldownMs),
       latency: normLatency(latencies[id]) ?? Number.MAX_SAFE_INTEGER,
     }))
     .sort(
       (a, b) =>
         (a.cooling ? 1 : 0) - (b.cooling ? 1 : 0) ||
+        (b.isLastSuccess ? 1 : 0) - (a.isLastSuccess ? 1 : 0) ||
         (b.isPreferred ? 1 : 0) - (a.isPreferred ? 1 : 0) ||
         a.latency - b.latency ||
         a.err - b.err
