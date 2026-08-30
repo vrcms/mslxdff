@@ -71,6 +71,30 @@ function isInsufficientStatus(status, bodyText, cached) {
   return false;
 }
 
+// 401/403 或 body 含 token 失效关键词 → 视为需刷新（workbuddy 返回 200+JSON 或 SSE 错误时也能命中）
+function isAuthError(status, bodyText) {
+  if (status === 401 || status === 403) return true;
+  const t = String(bodyText || "").toLowerCase();
+  // 常见 workbuddy 鉴权失败文案
+  if (t.includes("unauthorized") || t.includes("authenticate") || t.includes("invalid token") || t.includes("token expired") || t.includes("token invalid") || t.includes("access token") || t.includes("login expired") || t.includes("need login") || t.includes("session expired")) return true;
+  if (t.includes("code") && (t.includes("401") || t.includes("403")) && t.includes("token")) return true;
+  // JWT 失效的 400 也可能带 token
+  if (status === 400 && t.includes("token")) return true;
+  return false;
+}
+
+function decodeJwtExp(token) {
+  try {
+    const payload = String(token || "").split(".")[1];
+    if (!payload) return 0;
+    const json = JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    return Number(json.exp || 0);
+  } catch { return 0; }
+}
+
+// 并发去重：同一 uid 同时只刷一次
+const inflightRefresh = new Map();
+
 function withUidHeader(res, uid) {
   try {
     // try mutable set first
@@ -184,7 +208,7 @@ export function createWorkbuddyProvider({
     } catch {}
   }
 
-  const ring = createKeyRing(keys, { cooldownMs });
+  let ring = createKeyRing(keys, { cooldownMs });
 
   let dispatcher = null;
   let agent = null;
@@ -212,51 +236,76 @@ export function createWorkbuddyProvider({
     const rt = auth?.refreshToken;
     const uid = auth?.uid;
     if (!rt || !uid) return null;
-    const url = joinUrl(resolvedBase, "/v2/plugin/auth/token/refresh");
-    const headers = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      "X-Refresh-Token": rt,
-      "X-User-Id": uid,
-      "X-Domain": auth.domain || "www.codebuddy.cn",
-      "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
-      Origin: "https://www.codebuddy.cn",
-      Referer: "https://www.codebuddy.cn/",
-    };
-    try {
-      const opts = { method: "POST", headers, body: "{}" };
-      if (dispatcher) opts.dispatcher = dispatcher;
-      const res = await fetchImpl(url, opts);
-      const text = await res.text();
-      const j = JSON.parse(text);
-      if (j.code === 0 && j.data?.accessToken) {
-        const newAt = j.data.accessToken;
-        const newRt = j.data.refreshToken || rt;
-        // update in-memory
-        const idx = keys.indexOf(key);
-        if (idx >= 0) {
-          keys[idx] = newAt;
-          // also update ring? createKeyRing holds reference? need to reset
-          // simplest: save to state and update authList
-          authList[idx] = { ...auth, refreshToken: newRt };
-          try {
-            saveProviderConfig(id, { baseUrl: resolvedBase, keys: [...keys], auths: [...authList] }, file ? { file } : {});
-          } catch {}
-          try {
-            const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
-            mkdirSync(authDir, { recursive: true });
-            const expAt = (() => { try { return JSON.parse(Buffer.from(newAt.split(".")[1], "base64").toString()).exp; } catch { return Math.floor(Date.now()/1000)+5184000; } })();
-            const doc = { account: { uid, enterpriseId: auth.enterpriseId || "", nickname: "" }, auth: { accessToken: newAt, refreshToken: newRt, expiresAt: expAt, domain: auth.domain || "www.codebuddy.cn" } };
-            const fp = join(authDir, `workbuddy-${uid}.json`);
-            const tmp = fp + ".tmp";
-            writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 });
-            try { if (existsSync(fp)) { const { unlinkSync, renameSync } = await import("node:fs"); unlinkSync(fp); renameSync(tmp, fp); } else { const { renameSync } = await import("node:fs"); renameSync(tmp, fp); } } catch { writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 }); }
-          } catch {}
+    const dedupKey = String(uid);
+    if (inflightRefresh.has(dedupKey)) {
+      try { return await inflightRefresh.get(dedupKey); } catch { return null; }
+    }
+    const p = (async () => {
+      const url = joinUrl(resolvedBase, "/v2/plugin/auth/token/refresh");
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        "X-Refresh-Token": rt,
+        "X-User-Id": uid,
+        "X-Domain": auth.domain || "www.codebuddy.cn",
+        "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
+        Origin: "https://www.codebuddy.cn",
+        Referer: "https://www.codebuddy.cn/",
+      };
+      try {
+        const opts = { method: "POST", headers, body: "{}" };
+        if (dispatcher) opts.dispatcher = dispatcher;
+        const res = await fetchImpl(url, opts);
+        const text = await res.text();
+        const j = JSON.parse(text);
+        if (j.code === 0 && j.data?.accessToken) {
+          const newAt = j.data.accessToken;
+          const newRt = j.data.refreshToken || rt;
+          const idx = keys.indexOf(key);
+          if (idx >= 0) {
+            keys[idx] = newAt;
+            authList[idx] = { ...auth, refreshToken: newRt };
+            // 同步 ring，避免下一轮仍取旧 token
+            try { ring.replace(key, newAt); } catch {}
+            try { saveProviderConfig(id, { baseUrl: resolvedBase, keys: [...keys], auths: [...authList] }, file ? { file } : {}); } catch {}
+            try {
+              const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
+              mkdirSync(authDir, { recursive: true });
+              const expAt = (() => { try { return JSON.parse(Buffer.from(newAt.split(".")[1], "base64").toString()).exp; } catch { return Math.floor(Date.now()/1000)+5184000; } })();
+              const doc = { account: { uid, enterpriseId: auth.enterpriseId || "", nickname: "" }, auth: { accessToken: newAt, refreshToken: newRt, expiresAt: expAt, domain: auth.domain || "www.codebuddy.cn" } };
+              const fp = join(authDir, `workbuddy-${uid}.json`);
+              const tmp = fp + ".tmp";
+              writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 });
+              try { if (existsSync(fp)) { const { unlinkSync, renameSync } = await import("node:fs"); unlinkSync(fp); renameSync(tmp, fp); } else { const { renameSync } = await import("node:fs"); renameSync(tmp, fp); } } catch { writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 }); }
+            } catch {}
+          } else {
+            // 未在 keys 里的 key（如临时 ring），也尝试追加
+            if (!keys.includes(newAt)) {
+              keys.push(newAt);
+              authList.push({ ...auth, refreshToken: newRt });
+              try { ring.replace(key, newAt); } catch {}
+            }
+          }
+          return newAt;
         }
-        return newAt;
+      } catch {}
+      return null;
+    })();
+    inflightRefresh.set(dedupKey, p);
+    try { const r = await p; return r; } finally { inflightRefresh.delete(dedupKey); }
+  }
+
+  // 主动续期：JWT 5 分钟内过期则后台刷新一次（不阻塞当前请求）
+  function maybeProactiveRefresh(auth, key) {
+    try {
+      const exp = decodeJwtExp(key);
+      if (!exp) return;
+      const remain = exp * 1000 - Date.now();
+      if (remain < 5 * 60 * 1000 && remain > -60 * 60 * 1000) {
+        // 剩余 <5min 且未过期太久才刷，避免每次都刷
+        void refreshTokenFor(key, auth).catch(() => {});
       }
     } catch {}
-    return null;
   }
 
   async function attemptOnce(url, body, key) {
@@ -294,6 +343,7 @@ export function createWorkbuddyProvider({
       }
       const key = keys[idx];
       const auth = authList[idx];
+      maybeProactiveRefresh(auth, key);
       const cached = getCachedBalance(auth.uid);
       if (cached && Number(cached.total) === 0) {
         const errBody = JSON.stringify({ error: `workbuddy uid in cooldown (balance 0): ${auth.uid}` });
@@ -301,9 +351,6 @@ export function createWorkbuddyProvider({
         res._t = { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - t0) };
         return res;
       }
-      // check ring cooldown by peeking if key is cooling (ring doesn't expose, so try next and see)
-      // we enforce by attempting; if ring would skip, we still allow manual but mark cooling
-      // do single attempt with this key
       const attempts = [];
       let waitMs = 0;
       for (let attempt = 0; ; attempt++) {
@@ -318,24 +365,33 @@ export function createWorkbuddyProvider({
           result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
           throw result;
         }
-        if ((result.status === 401 || result.status === 403) && attempt === 0) {
-          const newKey = await refreshTokenFor(key, auth);
-          if (newKey) {
-            const auth2 = authForKey(newKey);
-            const headers2 = buildAuthHeaders(newKey, auth2);
-            const finalBody = { ...body, stream: true };
-            const controller2 = new AbortController();
-            const timer2 = setTimeout(() => controller2.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
-            try {
-              const opts2 = { method: "POST", headers: headers2, body: JSON.stringify(finalBody), signal: controller2.signal };
-              if (dispatcher) opts2.dispatcher = dispatcher;
-              let res2 = await fetchImpl(url, opts2);
-              res2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0), refreshed: true };
-              res2 = withUidHeader(res2, auth2.uid || auth.uid);
-              if (res2.status === 401 || res2.status === 403 || res2.status === 429 || res2.status >= 500) activeRing.onError(newKey);
-              appendRotationLog({ uid: auth2.uid || auth.uid, model: modelForLog, totalMs: Math.round(performance.now() - t0), balanceHit: false });
-              return res2;
-            } catch (e2) { e2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) }; throw e2; } finally { clearTimeout(timer2); }
+        // 401/403 或 body 含 token 失效 → 自动续期（覆盖 workbuddy 200+JSON 错误体）
+        if (attempt === 0) {
+          let bodyText = "";
+          try { bodyText = await result.clone().text(); } catch {}
+          if (isAuthError(result.status, bodyText)) {
+            const newKey = await refreshTokenFor(key, auth);
+            if (newKey) {
+              const auth2 = authForKey(newKey);
+              const headers2 = buildAuthHeaders(newKey, auth2);
+              const finalBody = { ...body, stream: true };
+              const controller2 = new AbortController();
+              const timer2 = setTimeout(() => controller2.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
+              try {
+                const opts2 = { method: "POST", headers: headers2, body: JSON.stringify(finalBody), signal: controller2.signal };
+                if (dispatcher) opts2.dispatcher = dispatcher;
+                let res2 = await fetchImpl(url, opts2);
+                // 刷新后若仍 401/403，视为刷新未生效，标记新 key 冷却并返回错误
+                let res2Body = "";
+                try { res2Body = await res2.clone().text(); } catch {}
+                const stillAuth = isAuthError(res2.status, res2Body);
+                res2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0), refreshed: true };
+                res2 = withUidHeader(res2, auth2.uid || auth.uid);
+                if (stillAuth || res2.status === 429 || res2.status >= 500) activeRing.onError(newKey);
+                appendRotationLog({ uid: auth2.uid || auth.uid, model: modelForLog, totalMs: Math.round(performance.now() - t0), balanceHit: false, error: stillAuth ? `still auth ${res2.status}` : undefined });
+                return res2;
+              } catch (e2) { e2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) }; throw e2; } finally { clearTimeout(timer2); }
+            }
           }
         }
         const entry = retry?.[result.status];
@@ -381,6 +437,8 @@ export function createWorkbuddyProvider({
         err._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
         throw err;
       }
+      // 主动续期（JWT 5min 内过期）
+      maybeProactiveRefresh(auth, key);
       // single attempt with retry for network/429
       let result = null;
       let attempt = 0;
@@ -397,24 +455,45 @@ export function createWorkbuddyProvider({
           result._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
           break;
         }
-        if ((result.status === 401 || result.status === 403) && attempt === 0) {
-          const newKey = await refreshTokenFor(key, auth);
-          if (newKey) {
-            const auth2 = authForKey(newKey);
-            const headers2 = buildAuthHeaders(newKey, auth2);
-            const finalBody = { ...body, stream: true };
-            const controller2 = new AbortController();
-            const timer2 = setTimeout(() => controller2.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
-            try {
-              const opts2 = { method: "POST", headers: headers2, body: JSON.stringify(finalBody), signal: controller2.signal };
-              if (dispatcher) opts2.dispatcher = dispatcher;
-              let res2 = await fetchImpl(url, opts2);
-              res2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0), refreshed: true };
-              if (res2.status === 401 || res2.status === 403 || res2.status === 429 || res2.status >= 500) activeRing.onError(newKey);
-              res2 = withUidHeader(res2, auth2.uid || uid);
-              appendRotationLog({ uid: auth2.uid || uid, model: modelForLog, totalMs: Math.round(performance.now() - t0), balanceHit: false });
-              return res2;
-            } catch (e2) { e2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) }; lastErr = e2; break; } finally { clearTimeout(timer2); }
+        // 401/403 或 body 含 token 失效 → 自动续期后重试一次；若仍失败则切下一账号
+        if (attempt === 0) {
+          let bodyText = "";
+          try { bodyText = await result.clone().text(); } catch {}
+          const needRefresh = isAuthError(result.status, bodyText);
+          if (needRefresh) {
+            const newKey = await refreshTokenFor(key, auth);
+            if (newKey) {
+              const auth2 = authForKey(newKey);
+              const headers2 = buildAuthHeaders(newKey, auth2);
+              const finalBody = { ...body, stream: true };
+              const controller2 = new AbortController();
+              const timer2 = setTimeout(() => controller2.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
+              try {
+                const opts2 = { method: "POST", headers: headers2, body: JSON.stringify(finalBody), signal: controller2.signal };
+                if (dispatcher) opts2.dispatcher = dispatcher;
+                let res2 = await fetchImpl(url, opts2);
+                let res2Body = "";
+                try { res2Body = await res2.clone().text(); } catch {}
+                const stillAuth = isAuthError(res2.status, res2Body);
+                res2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0), refreshed: true };
+                res2 = withUidHeader(res2, auth2.uid || uid);
+                if (stillAuth || res2.status === 429 || res2.status >= 500) activeRing.onError(newKey);
+                appendRotationLog({ uid: auth2.uid || uid, model: modelForLog, totalMs: Math.round(performance.now() - t0), balanceHit: false, error: stillAuth ? `still auth ${res2.status}` : undefined });
+                if (stillAuth) {
+                  lastErr = new Error(`workbuddy auth still failing after refresh for ${uid}: ${res2Body.slice(0,120)}`);
+                  lastErr._t = res2._t;
+                  activeRing.onError(newKey);
+                  break; // 切下一账号
+                }
+                return res2;
+              } catch (e2) { e2._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) }; lastErr = e2; break; } finally { clearTimeout(timer2); }
+            } else {
+              // 刷新失败也切下一账号
+              lastErr = new Error(`workbuddy refresh failed for ${uid}: ${bodyText.slice(0,120)}`);
+              lastErr._t = { attempts, waitMs, totalMs: Math.round(performance.now() - t0) };
+              activeRing.onError(key);
+              break;
+            }
           }
         }
         const entry = retry?.[result.status];
@@ -500,24 +579,41 @@ export function createWorkbuddyProvider({
     const now = Date.now();
     if (cache && now - fetchedAt < CACHE_TTL_MS) return cache;
     const url = joinUrl(resolvedBase, resolvedModelsPath);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`${id} models timed out`)), 15_000);
+    const execList = async (useKey, useAuth) => {
+      const controller2 = new AbortController();
+      const timer2 = setTimeout(() => controller2.abort(new Error(`${id} models timed out`)), 15_000);
+      try {
+        const headers = {
+          Accept: "application/json",
+          "X-User-Id": useAuth?.uid || "",
+          "X-Domain": useAuth?.domain || "www.codebuddy.cn",
+          "X-Product": "SaaS",
+          "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
+          Origin: "https://www.codebuddy.cn",
+          Referer: "https://www.codebuddy.cn/",
+        };
+        if (useKey) headers["Authorization"] = `Bearer ${useKey}`;
+        const opts = { headers, signal: controller2.signal };
+        if (dispatcher) opts.dispatcher = dispatcher;
+        return await fetchImpl(url, opts);
+      } finally { clearTimeout(timer2); }
+    };
     try {
       const key = ring.next() || keys[0] || "";
       const auth = authForKey(key);
-      const headers = {
-        Accept: "application/json",
-        "X-User-Id": auth?.uid || "",
-        "X-Domain": auth?.domain || "www.codebuddy.cn",
-        "X-Product": "SaaS",
-        "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
-        Origin: "https://www.codebuddy.cn",
-        Referer: "https://www.codebuddy.cn/",
-      };
-      if (key) headers["Authorization"] = `Bearer ${key}`;
-      const opts = { headers, signal: controller.signal };
-      if (dispatcher) opts.dispatcher = dispatcher;
-      const res = await fetchImpl(url, opts);
+      maybeProactiveRefresh(auth, key);
+      let res = await execList(key, auth);
+      if (!res.ok) {
+        let t = "";
+        try { t = await res.clone().text(); } catch {}
+        if (isAuthError(res.status, t)) {
+          const newKey = await refreshTokenFor(key, auth);
+          if (newKey) {
+            const auth2 = authForKey(newKey);
+            res = await execList(newKey, auth2);
+          }
+        }
+      }
       if (!res.ok) return [];
       const json = await res.json().catch(() => ({}));
       const models = json?.data?.models;
@@ -528,8 +624,6 @@ export function createWorkbuddyProvider({
       return cache;
     } catch {
       return [];
-    } finally {
-      clearTimeout(timer);
     }
   }
 

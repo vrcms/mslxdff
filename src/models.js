@@ -30,8 +30,11 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
     let lastAllowlistKey = "";
     async function currentAllowlistKey() {
       try {
-        const { loadProviderAllowedModels } = await import("./state.js");
-        return providers.map((p) => `${p.id}:${loadProviderAllowedModels(p.id).join(",")}`).join("|");
+        const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
+        return providers.map((p) => {
+          const allowAny = loadProviderAllowAnyModels(p.id) ? "any" : "block";
+          return `${p.id}:${allowAny}:${loadProviderAllowedModels(p.id).join(",")}`;
+        }).join("|");
       } catch {
         return "";
       }
@@ -41,10 +44,15 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
       for (const p of providers) {
         try {
           let list = (await p.listModels?.()) ?? [];
-          // 白名单过滤：若该供应商设置了 allowlist，则仅保留名单内模型
+          // 白名单过滤：空名单且 allowAny=false → 该供应商不暴露任何模型（安全默认全拦，auto 直接跳过该供应商）
           try {
-            const { loadProviderAllowedModels } = await import("./state.js");
+            const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
             const allowed = loadProviderAllowedModels(p.id);
+            const allowAny = loadProviderAllowAnyModels(p.id);
+            if (!allowed.length && !allowAny) {
+              // 该供应商被全拦，auto 直接跳过整个供应商
+              continue;
+            }
             if (allowed.length) {
               const allowedSet = new Set(allowed);
               const { splitModelId } = await import("./providers/model-id.js");
@@ -81,12 +89,14 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
         } catch {}
         // 否则尝试在缓存上二次过滤（处理 allowlist 从空变非空等未触发重载的场景）
         try {
-          const { loadProviderAllowedModels } = await import("./state.js");
+          const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
           const { splitModelId } = await import("./providers/model-id.js");
           const filteredData = aggregate.data.filter((m) => {
             if (!m || !m.id) return false;
             const { provider, raw } = splitModelId(m.id, providers.map((x) => x.id));
             const allowed = loadProviderAllowedModels(provider);
+            const allowAny = loadProviderAllowAnyModels(provider);
+            if (!allowed.length && !allowAny) return false;
             if (!allowed.length) return true;
             return allowed.includes(String(raw || "").trim());
           });
