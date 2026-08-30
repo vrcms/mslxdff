@@ -26,7 +26,7 @@
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
 | 更新 | `-update` / `--update` | 更新到 npm latest |
 | 模型交互 | `-models` | TTY 交互多选勾常用模型 |
-| 模型列表 | `-model list` | 列免费模型 |
+| 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型；`--provider workbuddy` 只看该供应商（前缀过滤），`--json` 输出 `{"object":"list","data":[...]}` |
 | 模型设默认 | `-model set <id>` | 设首选模型，自动入 picks |
 | 模型健康 | `-model status` | 每模型 normal/limit/error |
 | 模型刷新 | `-model refresh` | 强制拉上游刷新 |
@@ -35,12 +35,15 @@
 | 模型查勾 | `-model picks` | 列 picks |
 | 模型清空 | `-model pick clear` | 清空 picks |
 | 模型探活（必用 curl） | `curl` POST `http://localhost:8989/v1/chat/completions` body `{"model":"<id>","messages":[{"role":"user","content":"hi"}]}` | 测试指定模型是否通，**禁止** `mslxdff "hi" --model X` / `mslxdff --model X "hi"` 等幻觉命令 |
-| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单；默认 `allowAny OFF` 空名单=禁用，需 `allowlist set` 或 `allowAny on` 否则 `403`；`workbuddy`除外） |
+| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...] [--models-path <path>] [--chat-path <path>]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单；默认 `allowAny OFF` 空名单=禁用，需 `allowlist set` 或 `allowAny on` 否则 `403`；`workbuddy`除外；`--models-path`/`--chat-path` 可配异形路径如 `/v1/models`） |
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
+| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`--json` 供脚本） |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
+| 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
+| 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
 | 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
 | 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=阻塞除非 `allowAny on`，非空仅名单内可用（防昂贵模型） |
@@ -75,7 +78,7 @@
 
 - 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3` 走指定供应商。
 - 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
-- 查“某供应商有哪些模型”：直接过滤可用模型列表按前缀回答（如 `bai/` 开头的 1 个即 `glm-5.3-flash`），无需调工具；需实时刷新时用 `curl local/models`（GET，自动带本机 token）看网关聚合，或 `curl https://api.b.ai/v1/models`（自动带 bai key）看上游全量。严禁为此调用 `-showtoken`。
+- 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（按 allowlist 过滤，`--json` 供脚本），或 `curl local/models` 后前缀过滤；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
 
 ## 工具调用规范
 

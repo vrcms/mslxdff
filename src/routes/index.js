@@ -4,12 +4,21 @@ import { json, notFound, authorized } from "./helpers.js";
 import { chatHandler } from "./chat.js";
 import { joinHandler, leaveHandler } from "./groups.js";
 import { heartbeatHandler, pollHandler, resultHandler, forwardHandler } from "./groups-relay.js";
-import { modelsHandler, modelsStatusHandler } from "./models-route.js";
+import { modelsHandler, modelsStatusHandler, providerModelsHandler } from "./models-route.js";
 
 export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins }) {
   return async function router(req, res) {
     const method = req.method || "GET";
     const path = (req.url || "").split("?")[0];
+    // dynamic provider models route: GET /v1/providers/:id/models
+    if (method === "GET" && /^\/v1\/providers\/[^/]+\/models\/?$/.test(path)) {
+      if (!authorized(req, token)) {
+        res.statusCode = 401;
+        res.setHeader("WWW-Authenticate", "Bearer");
+        return json(res, 401, { error: "Unauthorized" });
+      }
+      return providerModelsHandler({ req, res, models, upstream });
+    }
     const route = ROUTES.find((r) => r.method === method && r.path === path);
     if (!route) return notFound(res);
     if (route.requiresAuth && !authorized(req, token)) {

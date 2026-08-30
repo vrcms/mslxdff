@@ -1,6 +1,14 @@
 import { joinModelId } from "./model-id.js";
 import { createKeyRing } from "./keyring.js";
-import { loadProviderKeys, loadProviderBaseUrl } from "../state.js";
+import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath } from "../state.js";
+
+function joinUrl(base, path) {
+  const b = String(base || "").trim().replace(/\/+$/, "");
+  const p = String(path || "").trim();
+  if (!p) return b;
+  const pp = p.startsWith("/") ? p : `/${p}`;
+  return `${b}${pp}`;
+}
 
 let UndiciAgent = null;
 let UndiciFetch = null;
@@ -36,6 +44,8 @@ export function createGenericProvider({
   baseUrl,
   apiKeys,
   apiKey,
+  modelsPath,
+  chatPath,
   connectTimeoutMs = Number(process.env.MSLXDFF_GENERIC_TIMEOUT_MS) || 30_000,
   cooldownMs = envInt("MSLXDFF_GENERIC_COOLDOWN_MS", 30_000),
   retry = {
@@ -48,11 +58,14 @@ export function createGenericProvider({
   fetchImpl,
   headers: extraHeaders,
   noAgent = false,
+  file,
 } = {}) {
   if (!id) throw new Error("generic provider requires id");
   const resolvedBase = resolveBaseUrl(id, baseUrl);
   if (!resolvedBase) throw new Error(`generic provider ${id}: missing baseUrl`);
   if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  const resolvedModelsPath = modelsPath || loadProviderModelsPath(id, file ? { file } : {});
+  const resolvedChatPath = chatPath || loadProviderChatPath(id, file ? { file } : {});
 
   const ring = createKeyRing(collectApiKeys(id, apiKeys, apiKey), { cooldownMs });
 
@@ -98,7 +111,7 @@ export function createGenericProvider({
   }
 
   async function runChat(body, activeRing, sourceKey) {
-    const url = `${resolvedBase}/chat/completions`;
+    const url = joinUrl(resolvedBase, resolvedChatPath);
     const t0 = performance.now();
     const attempts = [];
     let waitMs = 0;
@@ -156,7 +169,7 @@ export function createGenericProvider({
   async function listModels() {
     const now = Date.now();
     if (cache && now - fetchedAt < CACHE_TTL_MS) return cache;
-    const url = `${resolvedBase}/models`;
+    const url = joinUrl(resolvedBase, resolvedModelsPath);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`${id} models timed out`)), 15_000);
     try {
@@ -181,7 +194,7 @@ export function createGenericProvider({
   }
 
   async function preheat() {
-    const url = `${resolvedBase}/models`;
+    const url = joinUrl(resolvedBase, resolvedModelsPath);
     const t0 = performance.now();
     try {
       const headers = { Accept: "application/json" };
