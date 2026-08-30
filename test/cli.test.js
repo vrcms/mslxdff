@@ -9,9 +9,10 @@ import { join } from "node:path";
 const BIN = join(import.meta.dirname, "..", "bin", "mslxdff.js");
 
 function runCli(args, env) {
+  const dir = tmpState();
   const res = spawnSync(process.execPath, [BIN, ...args], {
     encoding: "utf8",
-    env: { ...process.env, MSLXDFF_DAEMON_DIR: tmpState(), ...env },
+    env: { ...process.env, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json"), ...env },
   });
   return { stdout: res.stdout, stderr: res.stderr, status: res.status };
 }
@@ -25,6 +26,7 @@ function tmpState() {
 // Async form of runCli — spawnSync deadlocks child-process networking on this
 // Windows host (undici sockets never wake), while execFile is fine.
 function runCliAsync(args, env) {
+  const dir = tmpState();
   return new Promise((resolve) => {
     execFile(
       process.execPath,
@@ -32,7 +34,7 @@ function runCliAsync(args, env) {
       {
         encoding: "utf8",
         timeout: 20_000,
-        env: { ...process.env, MSLXDFF_DAEMON_DIR: tmpState(), ...env },
+        env: { ...process.env, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json"), ...env },
       },
       (err, stdout, stderr) => resolve({ stdout, stderr, status: err ? err.code || 1 : 0 })
     );
@@ -90,9 +92,10 @@ test("-showtoken works", () => {
 
 test("-refresh-token rotates the token", () => {
   const dir = tmpState();
-  const a = spawnSync(process.execPath, [BIN, "-showtoken"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir } });
-  const b = spawnSync(process.execPath, [BIN, "-refresh-token"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir } });
-  const c = spawnSync(process.execPath, [BIN, "-showtoken"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir } });
+  const sf = join(dir, "state.json");
+  const a = spawnSync(process.execPath, [BIN, "-showtoken"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: sf } });
+  const b = spawnSync(process.execPath, [BIN, "-refresh-token"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: sf } });
+  const c = spawnSync(process.execPath, [BIN, "-showtoken"], { encoding: "utf8", env: { ...process.env, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: sf } });
   assert.match(a.stdout.trim(), /^[0-9a-f]{64}$/);
   assert.match(b.stdout.trim(), /^[0-9a-f]{64}$/);
   assert.equal(c.stdout.trim(), b.stdout.trim());

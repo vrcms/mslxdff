@@ -41,7 +41,7 @@
 |---|---|---|---|---|
 | `mslxdff` | — | 无参：daemon 已在且版本一致→显示 status+help；否则以后台 daemon 启动并退出（npx 友好） | 否 | 否 |
 | `mslxdff -d` | `--daemon` | 以 detached 后台进程启动 daemon，等待 `/health` | 否 | 否 |
-| `mslxdff -status` | `--status`, `-s` | 打印 daemon、端口、群组、failover、模型、最近调用、错误 | 否 | 否（未运行时也打印） |
+| `mslxdff -status` | `--status`, `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/share）、models（free 缓存/preferred/picks + 体检表 avg首字/tps/啰嗦/p95）、autostart/plugins、群组/failover、recent calls(含 ttfb/tps/tok)、last error | 否 | 否（未运行时也打印，health 显示 fail） |
 | `mslxdff -log [N]` | `--log`, `-logs`, `--logs` | 显示最近 N 条事件（默认 10），并提示其他日志路径 | 否 | 否 |
 | `mslxdff -debug` | `--debug` | 停掉后台 daemon，前台运行并实时打印事件流；Ctrl+C 恢复后台 | 清空旧日志 | 会停旧 daemon |
 | `mslxdff -plugins` | `--plugins` | 列出插件目录与已识别插件及其 hooks，不启动 daemon | 否 | 否 |
@@ -63,7 +63,8 @@
 | `mslxdff -provider add <id> <baseUrl> <key>` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
-| `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=不限，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
+| `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=阻塞除非 `allowAny on`，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
+| `mslxdff -provider <id> allowAny on\|off` | `--provider` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） | 是 | 热更新立即生效 |
 | `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用/workbuddy）及启用状态（含 allowlist 摘要） | 否 | 否 |
 | `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发） | 否 | 否 |
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
@@ -71,6 +72,9 @@
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
+| `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
+| `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
+| `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
 | `mslxdff -setto opencode [modelId]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
@@ -168,15 +172,19 @@
 ### `-status` / `--status` / `-s`
 
 - **语法**：`mslxdff -status` / `mslxdff --status` / `mslxdff -s`
-- **作用**：只读聚合展示当前节点全貌（不启 daemon）。依次打印：
-  - `mslxdff vX.Y.Z`、`daemon` 是否运行、`endpoint`、`log dir`
-  - `joined groups`：每个已加入群组的 `name`、`leaderUrl`、成员列表（leader 成员可带 `broadband`/`ip`/`via leader Xs ago`/`stale` 标签）
-  - `failover targets`：`peers.all()` 列表，带 `cooling`/`hot`/`latencyMs`/`fails` 标签
+- **作用**：只读聚合展示当前节点全貌（不启 daemon）。依次打印（v0.1.60 起大幅增强，原仅 daemon/模型/调用）：
+  - `mslxdff vX.Y.Z`、`daemon` 是否运行（pid + uptime + version ok）、`endpoint` + `health` 探活（ok/fail + ms）、`config`（port 来源 persisted/env/default + state/log 路径 + bind host）
+  - `upstream providers`：所有已配置供应商（`opencode` 恒 enabled 无需 key + `openrouter`/`workbuddy`/通用 `providerConfigs.<id>`），每行 `●/○ enabled/disabled  keys/acc  allow  baseUrl  share` + 备注（测试桩/缺 key 等），0 enabled 时提示加 `mslxdff -provider add` 或 `node workbuddy-token-auto.js`（`providerRows` 聚合 `loadProviderConfigs+Keys+BaseUrl+Allow+Share`，workbuddy `k-new` stub 特殊识别）
+  - `models`：`models.json` free 数 + 缓存时间/age、`preferred`（含 avg首字/tps/次数）、`picks`（勾选集，空=全量）、`free list`（每模型 `fmtStatus` + avg首字/tps/次数，<10ms 视为测试数据隐藏）、`模型体检 TopN`（`modelStats` 按次数排序的 `avg首字/总耗时/速度/啰嗦/样本/p95`，<10ms 隐藏，仅样本>0）
+  - `autostart`：`getAutostartStatus()` 的 `detail` + `task/unit`，含 `mslxdff -autostart status` 提示
+  - `plugins`：`resolvePluginDirs+loadPlugins` 的 `plugins.length` 与每插件 `name@version [hooks]` 或 `none` 提示
+  - `joined groups`：每个已加入群组的 `name`、`leaderUrl`、成员列表（同前）
+  - `failover targets`：`peers.all()` 列表（同前），空时提示 `failover: (none — 加组后自动出现)`
   - `groups on this node`：本节点作为 leader 创建的组名
-  - `models`：`models.json` 缓存的 free 模型数与每模型状态（`fmtStatus`）
-  - `recent calls`：`recentCalls(5)` 的 `ts/model/status/duration/auto`
-  - `last error`：`lastError()` 的 `ts/model/status/message`
-  - 额外：`auth token: use mslxdff -showtoken` 或 `not running — start with: mslxdff -d`
+  - `recent calls:`：`(gateway 持久化，最近5条，含首字/tok/s)` 头 + avg + 每行 `ts/model/status/dur+ttfb+tps/tok`（来自 `recentCalls(5)` 的 `ttfbMs/tps/usage`，v0.1.59 起记录）
+  - `last error`：`lastError()` 的 `ts/model/status/message`（无则 `none — 暂无错误`）
+  - 额外：`auth token: use mslxdff -showtoken` + `health: http://127.0.0.1:<port>/health` 或 `not running — start with: mslxdff -d` + `hints: mslxdff -providers list · mslxdff -model status ...`
+  - 体验：空状态有明确提示（如 `models: not cached yet`、`recent calls: (none yet — 发一次请求后出现)`、`plugins: (none) — 放 *.mjs ...`），`health` 探测失败有 `health fail (…)`，测试桩 `workbuddy k-new` 标 `disabled (测试桩…)`
 - **实现**：`createGroupsService` + `loadGroupsJoined`，成员通过 `refreshGroupMembers`（1.5s 超时）拉取。
 - **示例**：`mslxdff -status`
 
@@ -341,6 +349,40 @@
   mslxdff -model pick clear
   ```
 
+### 模型连通性探活（给 `mslxdff -chat` 的 Agent 看，禁止幻觉命令）
+
+> **唯一正确方式**：`curl` 直连本机网关 `POST /v1/chat/completions`，自动带 `Authorization: Bearer $(mslxdff -showtoken)`。**严禁** `mslxdff "hi" --model X` / `mslxdff --model X "hi"` / `mslxdff -chat --model X` 等不存在的命令（CLI 无此参数，执行只会输出 `mslxdff vX.Y.Z` 状态页）。
+
+- **语法（curl 工具）**：
+  ```json
+  {
+    "url": "http://localhost:8989/v1/chat/completions",
+    "method": "POST",
+    "headers": {"Content-Type":"application/json"},
+    "body": "{\"model\":\"<provider/模型>\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"
+  }
+  ```
+  等价 shell：
+  ```bash
+  curl -H "Authorization: Bearer $(mslxdff -showtoken)" \
+       -H "Content-Type: application/json" \
+       http://127.0.0.1:8989/v1/chat/completions \
+       -d '{"model":"clinebot/z-ai/glm-5.3-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+  ```
+- **模型 id 精确匹配**：`clinebot/z-ai/glm-5.3-flash`、`clinebot/deepseek/deepseek-v4-flash`、`workbuddy/hy3` 等必须与 `mslxdff -providers list` / `GET /v1/models` 的 `id` 完全一致（含前缀）。
+- **结果判读**：
+  - `200 + x-mslxdff-via: local` → 通，`body` 含 `choices[0].message.content` 与 `usage.cost`
+  - `401 {"error":"Unauthorized"}` + `www-authenticate: Bearer` → 本机 token 陈旧（`state.json` 改动后未重启），提示用户 `mslxdff -stop && mslxdff` 重启 daemon
+  - `403 {"error":"model not allowed…"} + x-mslxdff-allowlist:1` → `allowlist` 未放行，需 `mslxdff -provider <id> allowlist add <model>` 或 `allowAny on`
+  - `429/5xx` → 上游限流/故障，走冷却与转发兜底
+- **与 `-chat` 的区别**：`-chat` 的 `mimo-v2.5-free → big-pickle` 是**直连上游** `https://opencode.ai/zen/v1/chat/completions`（`createUpstreamClient`），不经本地网关；探活 `clinebot/*` / `workbuddy/*` 必须经本地网关 `curl`，不能用 `run_command` 拼 CLI。
+- **反例（禁止）**：
+  ```bash
+  mslxdff "hi" --model clinebot/z-ai/glm-5.3-flash   # ❌ 输出 status 页
+  mslxdff --model clinebot/z-ai/glm-5.3-flash "hi"  # ❌ 同上
+  mslxdff -chat --model clinebot/z-ai/glm-5.3-flash # ❌ -chat 无 --model 参数
+  ```
+
 ---
 
 ## 6. 供应商 Provider
@@ -446,9 +488,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 
 - **语法**：`mslxdff -provider add <id> <baseUrl> <key>`
 - **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl>/chat/completions`，`GET <baseUrl>/models` 拉模型列表（不过滤，全量前缀化）。
+- **安全默认（0.1.61 起）**：`allowAnyModels=false`，**空 `allowlist` 时上游直接禁用**，`chat` 返回 `403 {"error":"model not allowed… — allowed: (none) (use: mslxdff -provider <id> allowlist add <model>)"}` + 头 `x-mslxdff-allowlist:1`，不打上游、不计费。**必须二选一**：`mslxdff -provider <id> allowlist set <m1> <m2> ...`（推荐，精确 free 模型）或 `mslxdff -provider <id> allowAny on`（放行全部，`opencode` 例外默认 `ON`）。
 - **行为**：`saveProviderConfig(id, {baseUrl, keys:[key]})`，若 `id` 已存在则更新 `baseUrl` 并追加 key（去重）；`opencode/openrouter` 保留走原分支，误用 `add openrouter ...` 会提示改用 `add <key>` / `set-url`。
 - **校验**：`id` 经 `normalizeProviderId`，`baseUrl` 必须 `http(s)://` 前缀。
-- **输出**：`added generic provider: myapi / baseUrl: ... / keys: 1 (...) / use as: myapi/<model-id> — restart daemon to activate`
+- **输出**：`added generic provider: myapi / baseUrl: ... / keys: 1 (...) / allow=none(BLOCKED) — set allowlist or allowAny on to enable / use as: myapi/<model-id> — restart daemon to activate`
 - **示例**：
   ```bash
   mslxdff -provider add myapi https://api.example.com/v1 sk-xxx
@@ -479,10 +522,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   ```
   providers (3):
     opencode     enabled   0 keys                        allow=all               baseUrl=https://opencode.ai  cannot share  (built-in, no key, cannot share)
-    openrouter   disabled  0 keys                        allow=all               baseUrl=https://openrouter.ai/api/v1  share=off  (no keys)
+    openrouter   disabled  0 keys                        allow=none(BLOCKED)     baseUrl=https://openrouter.ai/api/v1  share=off  (no keys)
     bai          enabled   1 key sk-t…93hc               allow=2(glm-5.3-flash,minimax-m3)  baseUrl=https://api.b.ai/v1  share=off
   ```
-  每行含 `keys` 脱敏（首尾 4 字符）、`baseUrl`、`share=ON/off`、`allow` 摘要与 `note`。
+  每行含 `keys` 脱敏（首尾 4 字符）、`baseUrl`、`share=ON/off`、`allow` 摘要（`allow=none(BLOCKED)` 表示空名单+`allowAny OFF`）与 `note`。
 - **示例**：
   ```bash
   mslxdff -providers list
@@ -498,15 +541,16 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider <id> allowlist set <m1> <m2> ...           # 覆盖
   mslxdff -provider <id> allowlist add <m> [m2 ...]            # 追加（去重）
   mslxdff -provider <id> allowlist remove <m> [m2 ...]         # 移除
-  mslxdff -provider <id> allowlist clear                       # 清空（=不限）
+  mslxdff -provider <id> allowlist clear                       # 清空（= 阻塞，见 allowAny）
   # 别名：allow / allowed / whitelist 均等价于 allowlist
   # 接入时直接带白名单：
   mslxdff -provider add <id> <baseUrl> <key> [m1 m2 ...]
   ```
-- **语义**：
-  - `allowlist` 为空（默认）→ **不限**，该供应商全部模型可用（向后兼容）。
-  - 非空 → **仅名单内可用**，`chat` 时 `rawModel` 不在名单则立即 `403`（`{"error":"model not allowed for provider \"...\""}`），不计入冷却、不触发 fallback；`GET /v1/models` 亦仅返回白名单内的模型（按 `raw` 精确匹配，支持 `bai/glm-...` 或 `glm-...` 两种写法，存储时自动归一为 raw）。
-- **存储**：`state.json providerConfigs.<id>.allowedModels: string[]`（`saveProviderAllowedModels` 去重、trim、支持逗号分隔的一串如 `m1,m2`）。`providerConfigs.<id>.baseUrl/keys` 为空但 `allowedModels` 非空时仍保留条目（便于先定白名单后补 key）。
+- **语义（0.1.61 起安全默认）**：
+  - `allowlist` 为空 + `allowAnyModels=false`（默认，`opencode` 例外为 `true`）→ **阻塞**，`chat` 直接 `403`（`{"error":"model not allowed for provider \"...\" — allowed: (none) (use: mslxdff -provider ... allowlist add <model>)"}` + 头 `x-mslxdff-allowlist:1`），`GET /v1/models` 不暴露任何模型。
+  - `allowlist` 为空 + `allowAnyModels=true` → **不限**，全部模型可用（需显式 `mslxdff -provider <id> allowAny on`）。
+  - 非空 → **仅名单内可用**，`chat` 时 `rawModel` 不在名单则立即 `403`，不计入冷却、不触发 fallback；`GET /v1/models` 亦仅返回白名单内的模型（按 `raw` 精确匹配，支持 `bai/glm-...` 或 `glm-...` 两种写法，存储时自动归一为 raw）。
+- **存储**：`state.json providerConfigs.<id>.{allowedModels: string[], allowAnyModels: boolean}`（`saveProviderAllowedModels` 去重、trim、支持逗号分隔的一串如 `m1,m2`）。`providerConfigs.<id>.baseUrl/keys` 为空但 `allowedModels` 非空时仍保留条目（便于先定白名单后补 key）。
 - **生效**：热更新立即生效（`chat` 与 `listModels` 均无需重启；`provider add` 的白名单亦同）；`opencode` 亦支持（`mslxdff -provider opencode allowlist set big-pickle mimo-v2.5-free`）。
 - **示例**：
   ```bash
@@ -518,8 +562,20 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   #     [2]  gpt-3.5
   mslxdff -provider myapi allowlist add gpt-4o
   mslxdff -provider myapi allowlist remove gpt-3.5
-  mslxdff -provider myapi allowlist clear   # 回到不限
-  mslxdff -providers list   # 聚合视图亦显示 allow=2(...) 摘要
+  mslxdff -provider myapi allowlist clear   # 回到阻塞（allowAny OFF）或不限（allowAny ON）
+  mslxdff -providers list   # 聚合视图亦显示 allow=2(...) 或 allow=none(BLOCKED) 摘要
+  ```
+
+#### `mslxdff -provider <id> allowAny on|off`（空 allowlist 时放行或阻塞，安全开关）
+
+- **语法**：`mslxdff -provider <id> allowAny on|off`（别名 `allow-any`/`allow_any`/`allowany`，`list` 为空参时仅查看）
+- **作用**：控制 `allowlist` 为空时的行为。默认 `OFF`（`opencode` 例外 `ON`，兼容历史免费池），`OFF` 时空名单=`403 BLOCKED`，`ON` 时空名单=放行全部。
+- **存储**：`state.json providerConfigs.<id>.allowAnyModels: boolean`（显式存 `true/false`，`saveProviderAllowAnyModels`）。
+- **示例**：
+  ```bash
+  mslxdff -provider cline allowlist list  # → (none — BLOCK ALL, provider disabled until allowlist set or allowAny ON)
+  mslxdff -provider cline allowAny on    # 空名单时放行全部（不推荐，cline 易欠费）
+  mslxdff -provider workbuddy allowAny on # 恢复旧不限行为
   ```
 
 #### WorkBuddy 专用供应商（`workbuddy/hy3` 等 16 CLI 模型）

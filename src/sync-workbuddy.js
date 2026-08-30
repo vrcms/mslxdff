@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
+import { loadModelAliases, registerModelAlias, persistModelAliases } from "./providers/model-id.js";
 
 export function workbuddyModelsPath() {
   const env = process.env.WORKBUDDY_MODELS_FILE || process.env.WORKBUDDY_MODELS_PATH;
@@ -8,11 +9,17 @@ export function workbuddyModelsPath() {
   return join(os.homedir(), ".workbuddy", "models.json");
 }
 
+// WorkBuddy 不支持模型 ID 中的 /，写入时替换为 -
+// mslxdff 需保留原始 / 格式用于路由，所以同时存原始 id
+const toWorkbuddyId = (id) => String(id).replace(/\//g, "-");
+
 export function buildWorkbuddyEntry({ id, token, port }) {
   const p = Number(port) || 8989;
+  const originalId = String(id);
+  const wbId = toWorkbuddyId(originalId);
   return {
-    id: String(id),
-    name: String(id),
+    id: wbId,
+    name: wbId,
     vendor: "Custom",
     url: `http://127.0.0.1:${p}/v1/chat/completions`,
     apiKey: String(token || ""),
@@ -30,8 +37,13 @@ export function isLocalUrl(url) {
 
 function isTargetEntry(m, id) {
   if (!m || typeof m !== "object") return false;
-  if (m.id !== id) return false;
-  return isLocalUrl(m.url);
+  if (!isLocalUrl(m.url)) return false;
+  // 匹配原始 id（/ 格式）和 WorkBuddy id（- 格式）
+  if (m.id === id) return true;
+  if (m.id === toWorkbuddyId(id)) return true;
+  // 兜底：匹配 _mslxdffOriginalId 字段
+  if (m._mslxdffOriginalId === id) return true;
+  return false;
 }
 
 export async function syncToWorkbuddy({ id, token, port, file } = {}) {
@@ -66,11 +78,19 @@ export async function syncToWorkbuddy({ id, token, port, file } = {}) {
 
   // find exact target (id + local url, any port -> will update port)
   let idx = arr.findIndex((m) => isTargetEntry(m, cleanId));
+  const wbId = toWorkbuddyId(cleanId);
   let action;
   if (idx >= 0) {
     // update token/url/name, preserve other fields
     const old = arr[idx];
-    arr[idx] = { ...old, id: cleanId, name: cleanId, url: `http://127.0.0.1:${p}/v1/chat/completions`, apiKey: cleanToken };
+    const { _mslxdffOriginalId, ...oldClean } = old;
+    arr[idx] = {
+      ...oldClean,
+      id: wbId,
+      name: wbId,
+      url: `http://127.0.0.1:${p}/v1/chat/completions`,
+      apiKey: cleanToken,
+    };
     if (!arr[idx].vendor) arr[idx].vendor = "Custom";
     if (arr[idx].supportsToolCall === undefined) arr[idx].supportsToolCall = true;
     if (arr[idx].supportsImages === undefined) arr[idx].supportsImages = true;
@@ -78,7 +98,12 @@ export async function syncToWorkbuddy({ id, token, port, file } = {}) {
     if (arr[idx].useCustomProtocol === undefined) arr[idx].useCustomProtocol = false;
     action = "updated";
   } else {
-    // ensure existence: no reuse, always insert new entry (preserves other local entries like x-preview)
+    // 检查归一化 id 是否与已有条目冲突（如已存在 clinebot-z-ai-glm-5.3-flash 但不是本地 URL）
+    const conflict = arr.findIndex((m) => m && m.id === wbId);
+    if (conflict >= 0) {
+      // 已有同名条目且非我们写的，跳过不覆盖
+      return { action: "skipped-conflict", file: targetFile, id: cleanId, conflictId: arr[conflict].id, corrupted: false };
+    }
     arr.push(buildWorkbuddyEntry({ id: cleanId, token: cleanToken, port: p }));
     action = "inserted";
   }
@@ -99,6 +124,13 @@ export async function syncToWorkbuddy({ id, token, port, file } = {}) {
   }
   // cleanup tmp if still exists
   try { if (existsSync(tmp)) { const { unlinkSync } = await import("node:fs"); unlinkSync(tmp); } } catch {}
+
+  // 注册 WorkBuddy 别名：/ → -（仅原始 id 含 / 时）
+  if (cleanId.includes("/")) {
+    loadModelAliases();
+    registerModelAlias(wbId, cleanId);
+    persistModelAliases();
+  }
 
   return { action, file: targetFile, id: cleanId, corrupted };
 }

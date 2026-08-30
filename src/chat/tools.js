@@ -50,11 +50,11 @@ export function getToolDefs() {
       type: "function",
       function: {
         name: "run_command",
-        description: "执行一条 mslxdff CLI 命令（不含 mslxdff 前缀）。仅限 cli_help_mini 所列命令，禁止 -uninstall。",
+        description: "执行一条 mslxdff CLI 命令（不含 mslxdff 前缀）。仅限 cli_help_mini 所列命令，禁止 -uninstall；禁止 mslxdff \"hi\" --model X / --model X \"hi\" / -chat --model X 等幻觉命令，探活模型必须用 curl 工具 POST 本机 /v1/chat/completions。",
         parameters: {
           type: "object",
           properties: {
-            command: { type: "string", description: "例如: -model set hy3-free 或 -group list 或 -log 20" },
+            command: { type: "string", description: "例如: -model set hy3-free 或 -group list 或 -log 20；模型探活禁止用此工具，必须用 curl POST http://localhost:8989/v1/chat/completions" },
           },
           required: ["command"],
         },
@@ -79,7 +79,7 @@ export function getToolDefs() {
       type: "function",
       function: {
         name: "curl",
-        description: "网络/HTTP 探活，检测上游或本机服务可用性。支持任意 http(s) URL，返回状态码、耗时、响应头与前几千字符。常用： upstream(上游模型列表)、local/health(本机健康)、local/models(本机模型列表)。简写会自动补全为完整 URL。",
+        description: "网络/HTTP 探活，检测上游或本机服务可用性。支持任意 http(s) URL，返回状态码、耗时、响应头与前几千字符。常用： upstream(上游模型列表)、local/health(本机健康)、local/models(本机模型列表)。探活指定模型必须用 POST http://localhost:8989/v1/chat/completions body {\"model\":\"<provider/模型>\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}。简写会自动补全为完整 URL。",
         parameters: {
           type: "object",
           properties: {

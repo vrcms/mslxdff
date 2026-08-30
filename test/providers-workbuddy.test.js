@@ -111,9 +111,12 @@ test("dispatcher routes workbuddy/hy3 to workbuddy and strips prefix", async () 
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { createProviderDispatcher } = await import("../src/providers/dispatcher.js");
+  const { saveProviderAllowedModels } = await import("../src/state.js");
   function tmpStateFile() { const d=mkdtempSync(join(tmpdir(),"mslxdff-wb-disp-")); return join(d,"state.json"); }
   const file = tmpStateFile();
+  const prev = process.env.MSLXDFF_STATE_FILE;
   process.env.MSLXDFF_STATE_FILE = file;
+  saveProviderAllowedModels("workbuddy", ["hy3"], { file });
   const seen=[];
   const workbuddy = {
     id:"workbuddy",
@@ -127,7 +130,7 @@ test("dispatcher routes workbuddy/hy3 to workbuddy and strips prefix", async () 
   assert.equal(res.status,200);
   assert.deepEqual(seen, ["hy3"]);
   await d.close();
-  delete process.env.MSLXDFF_STATE_FILE;
+  if (prev) process.env.MSLXDFF_STATE_FILE = prev; else delete process.env.MSLXDFF_STATE_FILE;
 });
 
 test("dispatcher filters workbuddy listModels by allowlist", async () => {

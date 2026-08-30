@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
@@ -7,8 +7,30 @@ import os from "node:os";
 export const DEFAULT_PORT = 8989;
 
 export function defaultStateFile() {
-  return process.env.MSLXDFF_STATE_FILE ||
-    join(os.homedir(), ".config", "mslxdff", "state.json");
+  if (process.env.MSLXDFF_STATE_FILE) return process.env.MSLXDFF_STATE_FILE;
+  if (process.argv.includes("--test") || process.env.NODE_ENV === "test") {
+    return join(os.tmpdir(), "mslxdff-test-state.json");
+  }
+  return join(os.homedir(), ".config", "mslxdff", "state.json");
+}
+
+export function tokenFile(file) {
+  if (process.env.MSLXDFF_TOKEN_FILE) return process.env.MSLXDFF_TOKEN_FILE;
+  const sf = file || defaultStateFile();
+  const realDefault = join(os.homedir(), ".config", "mslxdff", "state.json");
+  if (sf !== realDefault) return join(dirname(sf), "token");
+  if (process.argv.includes("--test") || process.env.NODE_ENV === "test") {
+    return join(os.tmpdir(), "mslxdff-test-token");
+  }
+  return join(os.homedir(), ".config", "mslxdff", "token");
+}
+
+function syncTokenFile(token, file) {
+  try {
+    const tf = tokenFile(file);
+    mkdirSync(dirname(tf), { recursive: true });
+    writeFileSync(tf, String(token || "").trim() + "\n", "utf8");
+  } catch {}
 }
 
 export function generateToken() {
@@ -93,7 +115,14 @@ function writeStateImmediate(file, patch) {
     e.timer = null;
   }
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  try {
+    renameSync(tmp, file);
+  } catch {
+    try { writeFileSync(file, JSON.stringify(merged, null, 2), { mode: 0o600 }); } catch {}
+    try { unlinkSync(tmp); } catch {}
+  }
   try {
     e.mtimeMs = statSync(file).mtimeMs;
   } catch {
@@ -174,13 +203,31 @@ export function clearStateCache(file) {
 export async function loadToken({ file = defaultStateFile() } = {}) {
   const state = readState(file);
   if (typeof state.token === "string" && state.token.length > 0) {
+    syncTokenFile(state.token, file);
     return { token: state.token, created: false };
   }
-  return { token: writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token, created: true };
+  if (existsSync(file)) {
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8"));
+      if (typeof raw.token === "string" && raw.token.length > 0) {
+        syncTokenFile(raw.token, file);
+        const e = getEntry(file);
+        e.data = raw;
+        try { e.mtimeMs = statSync(file).mtimeMs; } catch {}
+        return { token: raw.token, created: false };
+      }
+    } catch {}
+  }
+  const tok = generateToken();
+  const saved = writeStateImmediate(file, { token: tok, createdAt: new Date().toISOString() }).token;
+  syncTokenFile(saved, file);
+  return { token: saved, created: true };
 }
 
 export async function refreshToken({ file = defaultStateFile() } = {}) {
-  return writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
+  const tok = writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
+  syncTokenFile(tok, file);
+  return tok;
 }
 
 export function setPort(port, { file = defaultStateFile() } = {}) {
@@ -210,6 +257,16 @@ export function loadModelLatencies({ file = defaultStateFile() } = {}) {
 export function saveModelLatencies(latencies, { file = defaultStateFile() } = {}) {
   writeStateDeferred(file, { modelLatencies: latencies });
   return latencies;
+}
+
+export function loadModelStats({ file = defaultStateFile() } = {}) {
+  const s = readState(file).modelStats;
+  return s && typeof s === "object" && !Array.isArray(s) ? s : {};
+}
+
+export function saveModelStats(stats, { file = defaultStateFile() } = {}) {
+  writeStateDeferred(file, { modelStats: stats });
+  return stats;
 }
 
 export function loadPreferredModel({ file = defaultStateFile() } = {}) {
@@ -487,11 +544,30 @@ export function removeProviderAllowedModels(id, targets = [], opts = {}) {
   return saveProviderAllowedModels(id, next, opts);
 }
 
+function normalizeAllowAny(v, id) {
+  if (typeof v === "boolean") return v;
+  if (String(id || "").toLowerCase() === "opencode") return true;
+  return false;
+}
+export function loadProviderAllowAnyModels(id, { file = defaultStateFile() } = {}) {
+  const cfg = readState(file).providerConfigs?.[id];
+  if (cfg && typeof cfg.allowAnyModels === "boolean") return cfg.allowAnyModels;
+  return normalizeAllowAny(undefined, id);
+}
+export function saveProviderAllowAnyModels(id, allowAny, { file = defaultStateFile() } = {}) {
+  const state = readState(file);
+  const cfgs = { ...(state.providerConfigs || {}) };
+  const cur = cfgs[id] || {};
+  cfgs[id] = { ...cur, allowAnyModels: normalizeAllowAny(allowAny, id) };
+  writeStateImmediate(file, { providerConfigs: cfgs });
+  return cfgs[id].allowAnyModels;
+}
 export function isModelAllowed(id, rawModel, { file = defaultStateFile() } = {}) {
   const raw = String(rawModel || "").trim();
   if (!raw) return true;
   const allowed = loadProviderAllowedModels(id, { file });
-  if (!allowed.length) return true;
+  const allowAny = loadProviderAllowAnyModels(id, { file });
+  if (!allowed.length) return allowAny;
   const norm = normalizeAllowedModel(raw, id);
   return allowed.includes(norm);
 }
