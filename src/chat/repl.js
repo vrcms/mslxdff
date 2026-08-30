@@ -30,6 +30,36 @@ function trace(line) {
   console.log(`\x1b[90m· ${line}\x1b[0m`);
 }
 
+function extractProvFromQuery(text) {
+  const low = String(text || "").toLowerCase();
+  const known = ["workbuddy", "clinebot", "opencode", "bai", "openrouter", "poolside", "z-ai", "deepseek"];
+  for (const k of known) if (low.includes(k)) return k;
+  return null;
+}
+function isModelListQuery(text) {
+  const low = String(text || "").toLowerCase();
+  if (!low.includes("模型")) return false;
+  return low.includes("哪些") || low.includes("可用") || low.includes("支持") || low.includes("列表") || low.includes("有啥") || low.includes("都有") || low.includes("可以") || low.includes("用");
+}
+function formatModelAnswer(prov, models) {
+  const byProv = {};
+  for (const id of models) {
+    const slash = id.indexOf("/");
+    const p = slash > 0 ? id.slice(0, slash) : "opencode";
+    if (!byProv[p]) byProv[p] = [];
+    byProv[p].push(id);
+  }
+  if (prov) {
+    const list = byProv[prov] || models.filter((m) => m.toLowerCase().startsWith(prov.toLowerCase() + "/"));
+    if (!list.length) return `**${prov}** 暂无可用模型（可能未配置或网关未聚合）。可用总量 ${models.length}，按供应商：${Object.entries(byProv).map(([k, v]) => `${k}(${v.length})`).join(" | ")}`;
+    // 更友好：直接列 id 和调用方式
+    return `**${prov}** 可用模型（共 ${list.length} 个，网关已聚合）：\n\n| 模型 id | 调用方式 |\n|:---|:---|\n${list.map((m) => `| \`${m}\` | \`${m}\` |`).join("\n")}\n\n> 提示：直接用 \`${prov}/<模型>\` 调用，例如 \`${list[0]}\``;
+  }
+  // 无指定供应商：按分组汇总
+  const summary = Object.entries(byProv).map(([p, arr]) => `**${p}**(${arr.length})：${arr.slice(0, 8).join(", ")}${arr.length > 8 ? " …" : ""}`).join("\n");
+  return `可用模型总计 ${models.length} 个，按供应商分组：\n\n${summary}\n\n> 查某供应商请说“workbuddy有哪些模型”`;
+}
+
 async function maybeCompress(messages) {
   if (!needsCompress(messages)) return [...messages];
   const sys = messages[0];
@@ -55,6 +85,19 @@ async function maybeCompress(messages) {
 async function runAgentTurn(userText, messages) {
   const tools = getToolDefs();
   messages.push({ role: "user", content: userText });
+  // Fast-path：模型列表类问题本地直答，不走 LLM，避免 “provider list” 幻觉和 6 轮重复
+  if (isModelListQuery(userText)) {
+    const prov = extractProvFromQuery(userText);
+    try {
+      const models = getModelsForPrompt();
+      const answer = formatModelAnswer(prov, models);
+      if (answer) {
+        messages.push({ role: "assistant", content: answer });
+        trace(`[fast] 模型列表直答 prov=${prov || "all"} 共 ${models.length} 个`);
+        return { text: answer, model: "local", latency: 0, usage: null, fallback: false, ok: true, totalMs: 0 };
+      }
+    } catch {}
+  }
   let loops = 0;
   let lastModel = null;
   let lastUsage = null;
@@ -64,6 +107,8 @@ async function runAgentTurn(userText, messages) {
   const turnStart = performance.now();
   // 同轮去重：同一工具+参数只真正执行一次，重复直接复用并提示 LLM
   const seenCalls = new Map(); // key -> { count, firstResult }
+  let duplicateStrikes = 0;
+  let forceNoTools = false;
   trace(`[turn] 开始 "${userText.slice(0, 60)}${userText.length > 60 ? "…" : ""}" · 历史 ${messages.length}条 约 ${estimateChars(messages)}字`);
   while (loops < CHAT_MAX_TOOL_LOOPS) {
     const tLoop = performance.now();
@@ -74,12 +119,19 @@ async function runAgentTurn(userText, messages) {
     messages.length = 0;
     for (const m of cur) messages.push(m);
     const tCall = performance.now();
-    const spinnerLabel = loops === 0 ? "已发送给 AI，等待回复中" : "AI 正在整理回复中";
+    const spinnerLabel = loops === 0 ? "已发送给 AI，等待回复中" : forceNoTools ? "AI 整理回答中（已禁工具）" : "AI 正在整理回复中";
     const spinner = createSpinner(spinnerLabel);
     spinner.start();
     let res;
     try {
-      res = await chatWithFallback({ messages, tools });
+      const activeTools = forceNoTools ? [] : tools;
+      res = await chatWithFallback({ messages, tools: activeTools });
+      if (forceNoTools && res.ok && res.message?.tool_calls?.length) {
+        // LLM 在禁工具模式下仍尝试调工具，视为违规，直接转文本
+        trace(`[guard] 禁工具模式下仍收到 tool_calls，已拦截`);
+        res.message.tool_calls = [];
+        if (!res.message.content) res.message.content = "（已拦截违规工具调用，请基于已有结果直接回答）";
+      }
     } finally {
       const ms = Math.round(performance.now() - tCall);
       spinner.stop(`\x1b[90m✓ AI 已回复 · ${ms}ms\x1b[0m`);
@@ -149,13 +201,18 @@ async function runAgentTurn(userText, messages) {
         console.log(`\x1b[90m→ 执行: mslxdff ${cmd}\x1b[0m`);
         const r = await execCommand(cmd);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output}`;
-        // 查询类命令直接在结果里植入“立即回答”锚点，降低 LLM 再发一次的概率
+        // 查询类命令直接在结果里植入“立即回答”锚点，降低 LLM 再发一次的概率；若用户问模型，则 provider list 不算答案
         const lowCmd = cmd.toLowerCase().replace(/\s+/g, " ").trim();
+        const asksModel = String(userText || "").toLowerCase().includes("模型");
         const isOnceAndDone =
           /^-+(showtoken|status|s|providers?\b|model\b|group\b|log\b|workbuddy\b|free\b|autostart\b|plugins\b)/.test(lowCmd) ||
           lowCmd === "-provider list" || lowCmd === "-providers list";
         if (isOnceAndDone && r.ok) {
-          result += `\n\n[系统提示：此查询已完成，结果即答案，请直接用中文回答用户，禁止再调用相同或同类查询工具]`;
+          if (asksModel && lowCmd.includes("-provider")) {
+            result += `\n\n[提示：此命令仅显示供应商配置，不包含模型列表。用户问的是“有哪些模型”，请用系统提示中的“可用模型”按前缀过滤回答，或调 curl local/models，不要再调 provider list]`;
+          } else {
+            result += `\n\n[系统提示：此查询已完成，结果即答案，请直接用中文回答用户，禁止再调用相同或同类查询工具]`;
+          }
         }
         const dt = Math.round(performance.now() - t1);
         trace(`[tool] run_command "${cmd.slice(0, 40)}" · ${dt}ms · ${r.ok ? "OK" : "FAIL"} ${r.output.length}字`);
@@ -185,10 +242,20 @@ async function runAgentTurn(userText, messages) {
       return { id: c.id, content: result };
     }));
     for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.id, content: tr.content });
-    // 若本轮有 SKIPPED_DUP，额外追加一条系统提示，强制 LLM 基于已有结果回答而不是再调工具
+    // 若本轮有 SKIPPED_DUP，额外追加系统提示并禁用后续工具，强制直接回答
     if (toolResults.some((tr) => String(tr.content).startsWith("SKIPPED_DUP"))) {
-      messages.push({ role: "system", content: "系统提示：你已重复调用相同工具，工具侧已复用首次结果并跳过执行。请直接基于以上工具结果用中文回答用户，不要再发起任何工具调用。" });
-      trace(`[dup] 检测到重复调用，已注入系统提示要求直接回答`);
+      duplicateStrikes++;
+      forceNoTools = true;
+      messages.push({ role: "system", content: "系统提示：你已重复调用相同工具，工具侧已复用首次结果并跳过执行。你已被禁止再调用任何工具，必须立即基于以上工具结果用中文直接回答用户，0 工具调用。" });
+      trace(`[dup] 检测到重复调用 ${duplicateStrikes} 次，已禁用后续工具调用`);
+      if (duplicateStrikes >= 2) {
+        const seen = [...seenCalls.values()].map((v) => v.firstResult).join("\n---\n").slice(0, 6000);
+        const synth = `检测到重复调用已达 ${duplicateStrikes} 次，为避免空转，直接基于已有结果回答：\n\n${seen}`;
+        messages.push({ role: "assistant", content: synth });
+        const totalMs = Math.round(performance.now() - t0);
+        trace(`[turn] 提前结束（重复阈值） 总计 ${totalMs}ms`);
+        return { text: synth, model: lastModel || "local", latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
+      }
     }
     const toolsMs = Math.round(performance.now() - tTools);
     const loopMs = Math.round(performance.now() - tLoop);

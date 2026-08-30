@@ -3,6 +3,7 @@ import { createKeyRing } from "./keyring.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, saveProviderConfig, WORKBUDDY_DEFAULT_BASE_URL } from "../state.js";
 import { writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync, appendFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { getCachedBalance, setCachedBalance } from "./workbuddy-balance.js";
 
 let UndiciAgent = null;
@@ -16,6 +17,14 @@ try {
 function envInt(name, fallback) {
   const v = Number(process.env[name]);
   return Number.isInteger(v) && v > 0 ? v : fallback;
+}
+function isTestEnv() {
+  if (process.env.NODE_ENV === "test") return true;
+  if (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test")) return true;
+  if (process.argv.some((a) => String(a).includes("--test") || String(a).endsWith(".test.js"))) return true;
+  if (Array.isArray(process.execArgv) && process.execArgv.some((a) => String(a).includes("--test"))) return true;
+  if (process.env.NODE_TEST_CONTEXT) return true;
+  return false;
 }
 
 function resolveBaseUrl(baseUrl) {
@@ -143,7 +152,7 @@ export function createWorkbuddyProvider({
   // fallback scan auths/workbuddy-*.json if still empty
   if (!authList.length && !keys.length) {
     try {
-      const authDir = process.env.WORKBUDDY_AUTH_DIR || (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths"));
+      const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
       if (existsSync(authDir)) {
         const files = readdirSync(authDir).filter((f) => f.startsWith("workbuddy-") && f.endsWith(".json"));
         for (const f of files) {
@@ -223,7 +232,7 @@ export function createWorkbuddyProvider({
             saveProviderConfig(id, { baseUrl: resolvedBase, keys: [...keys], auths: [...authList] }, file ? { file } : {});
           } catch {}
           try {
-            const authDir = process.env.WORKBUDDY_AUTH_DIR || (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths"));
+            const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
             mkdirSync(authDir, { recursive: true });
             const expAt = (() => { try { return JSON.parse(Buffer.from(newAt.split(".")[1], "base64").toString()).exp; } catch { return Math.floor(Date.now()/1000)+5184000; } })();
             const doc = { account: { uid, enterpriseId: auth.enterpriseId || "", nickname: "" }, auth: { accessToken: newAt, refreshToken: newRt, expiresAt: expAt, domain: auth.domain || "www.codebuddy.cn" } };

@@ -6,9 +6,19 @@ import os from "node:os";
 
 export const DEFAULT_PORT = 8989;
 
+function isTestEnv() {
+  if (process.env.NODE_ENV === "test") return true;
+  if (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test")) return true;
+  if (process.argv.some((a) => String(a).includes("--test") || String(a).endsWith(".test.js"))) return true;
+  if (Array.isArray(process.execArgv) && process.execArgv.some((a) => String(a).includes("--test"))) return true;
+  // Node test runner sets this
+  if (process.env.NODE_TEST_CONTEXT) return true;
+  return false;
+}
+
 export function defaultStateFile() {
   if (process.env.MSLXDFF_STATE_FILE) return process.env.MSLXDFF_STATE_FILE;
-  if (process.argv.includes("--test") || process.env.NODE_ENV === "test") {
+  if (isTestEnv()) {
     return join(os.tmpdir(), "mslxdff-test-state.json");
   }
   return join(os.homedir(), ".config", "mslxdff", "state.json");
@@ -19,7 +29,7 @@ export function tokenFile(file) {
   const sf = file || defaultStateFile();
   const realDefault = join(os.homedir(), ".config", "mslxdff", "state.json");
   if (sf !== realDefault) return join(dirname(sf), "token");
-  if (process.argv.includes("--test") || process.env.NODE_ENV === "test") {
+  if (isTestEnv()) {
     return join(os.tmpdir(), "mslxdff-test-token");
   }
   return join(os.homedir(), ".config", "mslxdff", "token");
