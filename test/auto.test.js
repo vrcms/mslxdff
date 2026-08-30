@@ -191,7 +191,8 @@ test("slow models use the longer slow cooldown and rank last", () => {
     "c-free": { status: "normal", at: now - 120_000, code: 200, slow: false },
   };
   const ranked = rankModels(ids, errors, { now, cooldownMs: 60_000, slowCooldownMs: 5 * 60_000 });
-  assert.equal(ranked[0], "b-free", "normal cooldown elapsed, healthy first");
+  // c-free 是最近一次成功的模型（NORMAL），应优先于 b-free（旧 error），即使两者都不在冷却
+  assert.equal(ranked[0], "c-free", "last success prioritized");
   assert.equal(ranked[ranked.length - 1], "a-free", "slow model parked last");
 });
 

@@ -30,35 +30,7 @@ function trace(line) {
   console.log(`\x1b[90m· ${line}\x1b[0m`);
 }
 
-function extractProvFromQuery(text) {
-  const low = String(text || "").toLowerCase();
-  const known = ["workbuddy", "clinebot", "opencode", "bai", "openrouter", "poolside", "z-ai", "deepseek"];
-  for (const k of known) if (low.includes(k)) return k;
-  return null;
-}
-function isModelListQuery(text) {
-  const low = String(text || "").toLowerCase();
-  if (!low.includes("模型")) return false;
-  return low.includes("哪些") || low.includes("可用") || low.includes("支持") || low.includes("列表") || low.includes("有啥") || low.includes("都有") || low.includes("可以") || low.includes("用");
-}
-function formatModelAnswer(prov, models) {
-  const byProv = {};
-  for (const id of models) {
-    const slash = id.indexOf("/");
-    const p = slash > 0 ? id.slice(0, slash) : "opencode";
-    if (!byProv[p]) byProv[p] = [];
-    byProv[p].push(id);
-  }
-  if (prov) {
-    const list = byProv[prov] || models.filter((m) => m.toLowerCase().startsWith(prov.toLowerCase() + "/"));
-    if (!list.length) return `**${prov}** 暂无可用模型（可能未配置或网关未聚合）。可用总量 ${models.length}，按供应商：${Object.entries(byProv).map(([k, v]) => `${k}(${v.length})`).join(" | ")}`;
-    // 更友好：直接列 id 和调用方式
-    return `**${prov}** 可用模型（共 ${list.length} 个，网关已聚合）：\n\n| 模型 id | 调用方式 |\n|:---|:---|\n${list.map((m) => `| \`${m}\` | \`${m}\` |`).join("\n")}\n\n> 提示：直接用 \`${prov}/<模型>\` 调用，例如 \`${list[0]}\``;
-  }
-  // 无指定供应商：按分组汇总
-  const summary = Object.entries(byProv).map(([p, arr]) => `**${p}**(${arr.length})：${arr.slice(0, 8).join(", ")}${arr.length > 8 ? " …" : ""}`).join("\n");
-  return `可用模型总计 ${models.length} 个，按供应商分组：\n\n${summary}\n\n> 查某供应商请说“workbuddy有哪些模型”`;
-}
+
 
 async function maybeCompress(messages) {
   if (!needsCompress(messages)) return [...messages];
@@ -85,23 +57,11 @@ async function maybeCompress(messages) {
 async function runAgentTurn(userText, messages) {
   const tools = getToolDefs();
   messages.push({ role: "user", content: userText });
-  // Fast-path：模型列表类问题本地直答，不走 LLM，避免 “provider list” 幻觉和 6 轮重复
-  if (isModelListQuery(userText)) {
-    const prov = extractProvFromQuery(userText);
-    try {
-      const models = getModelsForPrompt();
-      const answer = formatModelAnswer(prov, models);
-      if (answer) {
-        messages.push({ role: "assistant", content: answer });
-        trace(`[fast] 模型列表直答 prov=${prov || "all"} 共 ${models.length} 个`);
-        return { text: answer, model: "local", latency: 0, usage: null, fallback: false, ok: true, totalMs: 0 };
-      }
-    } catch {}
-  }
   let loops = 0;
   let lastModel = null;
   let lastUsage = null;
   let lastFallback = false;
+  let lastFallbackGateway = false;
   let lastLatency = 0;
   const t0 = performance.now();
   const turnStart = performance.now();
@@ -147,6 +107,7 @@ async function runAgentTurn(userText, messages) {
     lastModel = res.model;
     lastUsage = res.usage || null;
     lastFallback = !!res.fallback;
+    lastFallbackGateway = !!res.fallbackGateway || !!res.viaGateway;
     const msg = res.message;
     const toolCalls = msg.tool_calls || [];
     let fallbackCmd = null;
@@ -158,9 +119,11 @@ async function runAgentTurn(userText, messages) {
       const text = String(msg.content || "").trim() || "(空回复)";
       messages.push({ role: "assistant", content: text });
       const totalMs = Math.round(performance.now() - t0);
-      const note = lastFallback ? "\n\x1b[90m[注：mimo 不可用，已用 big-pickle]\x1b[0m" : "";
-      trace(`[turn] 完成 总计 ${totalMs}ms · LLM ${lastLatency}ms · 0 工具`);
-      return { text: text + note, model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
+      let note = "";
+      if (lastFallbackGateway) note = "\n\x1b[90m[注：mimo/big-pickle 均不可用，已自动切本地网关 auto（:8989）]\x1b[0m";
+      else if (lastFallback) note = "\n\x1b[90m[注：mimo 不可用，已用 big-pickle]\x1b[0m";
+      trace(`[turn] 完成 总计 ${totalMs}ms · LLM ${lastLatency}ms · 0 工具${lastFallbackGateway ? " · gateway-fallback" : ""}`);
+      return { text: text + note, model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, fallbackGateway: lastFallbackGateway, ok: true, totalMs };
     }
     const calls = toolCalls.length ? toolCalls : [{ id: "fallback-1", function: { name: "run_command", arguments: JSON.stringify({ command: fallbackCmd }) } }];
     messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: c.function })) });
@@ -262,19 +225,19 @@ async function runAgentTurn(userText, messages) {
     trace(`[loop ${loops}] 工具 ${toolsMs}ms · 本轮总 ${loopMs}ms · 累计 ${Math.round(performance.now() - turnStart)}ms`);
     loops++;
   }
-  return { text: "（工具调用次数已达上限，已停止）", model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: false };
+  return { text: "（工具调用次数已达上限，已停止）", model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, fallbackGateway: lastFallbackGateway, ok: false };
 }
 
-function printFooter({ model, latency, usage, totalMs, fallback }) {
+function printFooter({ model, latency, usage, totalMs, fallback, fallbackGateway, viaGateway }) {
   const dim = "\x1b[90m";
   const rst = "\x1b[0m";
   let gw = null;
   try { gw = collectStats(); } catch {}
-  const modelLabel = model || "—";
+  const modelLabel = model ? (fallbackGateway || viaGateway ? `${model} (gateway auto)` : model) : "—";
   const latLabel = latency ? `${latency}ms` : "—";
   const totalLabel = totalMs ? ` · 总耗时 ${totalMs}ms` : "";
   const tokLabel = usage ? ` · tokens ${usage.prompt_tokens ?? "?"}→${usage.completion_tokens ?? "?"}` : "";
-  const fbLabel = fallback ? " · fallback" : "";
+  const fbLabel = fallbackGateway || viaGateway ? " · gateway-fallback" : fallback ? " · fallback" : "";
   let gwLabel = "";
   let extra = "";
   if (gw) {
