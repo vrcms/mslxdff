@@ -8,6 +8,7 @@ import { loadHistory, saveHistory, clearHistory, histPath, estimateChars, needsC
 import { CHAT_KEEP_RECENT, CHAT_MAX_TOOL_LOOPS, CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
 import { formatBannerLines, formatStatsDetail, collectStats } from "./stats.js";
 import { createSpinner } from "./spinner.js";
+import { normalizeFullId } from "../providers/model-id.js";
 
 const SLASH_HELP = `自然语言直接说，斜杠快捷：
   /help     本帮助
@@ -61,6 +62,8 @@ async function runAgentTurn(userText, messages) {
   let lastLatency = 0;
   const t0 = performance.now();
   const turnStart = performance.now();
+  // 同轮去重：同一工具+参数只真正执行一次，重复直接复用并提示 LLM
+  const seenCalls = new Map(); // key -> { count, firstResult }
   trace(`[turn] 开始 "${userText.slice(0, 60)}${userText.length > 60 ? "…" : ""}" · 历史 ${messages.length}条 约 ${estimateChars(messages)}字`);
   while (loops < CHAT_MAX_TOOL_LOOPS) {
     const tLoop = performance.now();
@@ -116,18 +119,51 @@ async function runAgentTurn(userText, messages) {
       let args = {};
       try { args = JSON.parse(c.function?.arguments || "{}"); } catch {}
       const t1 = performance.now();
+      // 归一化 key：run_command 按命令去重（大小写+空白归一），curl 按 url+method+body，read_file 按 path
+      let dedupKey = `${name}:${JSON.stringify(args)}`;
+      if (name === "run_command") {
+        const cmd = String(args.command || "").trim().toLowerCase().replace(/\s+/g, " ");
+        // -provider list 与 -providers list 等价，归一
+        const norm = cmd.replace(/^-+providers\b/, "-provider").replace(/\s+/g, " ").trim();
+        dedupKey = `run_command:${norm}`;
+      } else if (name === "curl") {
+        const u = String(args.url || "").trim().toLowerCase();
+        const m = String(args.method || "GET").toUpperCase();
+        dedupKey = `curl:${m}:${u}:${String(args.body || "").slice(0, 200)}`;
+      } else if (name === "read_file") {
+        dedupKey = `read_file:${String(args.path || "").trim().toLowerCase()}`;
+      }
+      const seen = seenCalls.get(dedupKey);
+      if (seen) {
+        const dt = Math.round(performance.now() - t1);
+        trace(`[tool] ${name} 重复调用已跳过 · ${dt}ms · 之前 ${seen.count} 次`);
+        console.log(`\x1b[33m→ 跳过重复: ${name} ${JSON.stringify(args).slice(0, 120)}（本轮已执行过）\x1b[0m`);
+        return {
+          id: c.id,
+          content: `SKIPPED_DUP: 此工具调用在本轮已执行过 ${seen.count} 次，结果相同请直接基于已有信息回答用户，不要再重复调用。\n--- 首次结果复用 ---\n${seen.firstResult.slice(0, 6000)}`,
+        };
+      }
       let result;
       if (name === "run_command") {
         const cmd = String(args.command || "").trim();
         console.log(`\x1b[90m→ 执行: mslxdff ${cmd}\x1b[0m`);
         const r = await execCommand(cmd);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output}`;
+        // 查询类命令直接在结果里植入“立即回答”锚点，降低 LLM 再发一次的概率
+        const lowCmd = cmd.toLowerCase().replace(/\s+/g, " ").trim();
+        const isOnceAndDone =
+          /^-+(showtoken|status|s|providers?\b|model\b|group\b|log\b|workbuddy\b|free\b|autostart\b|plugins\b)/.test(lowCmd) ||
+          lowCmd === "-provider list" || lowCmd === "-providers list";
+        if (isOnceAndDone && r.ok) {
+          result += `\n\n[系统提示：此查询已完成，结果即答案，请直接用中文回答用户，禁止再调用相同或同类查询工具]`;
+        }
         const dt = Math.round(performance.now() - t1);
         trace(`[tool] run_command "${cmd.slice(0, 40)}" · ${dt}ms · ${r.ok ? "OK" : "FAIL"} ${r.output.length}字`);
         console.log(r.ok ? `\x1b[32m${r.output.slice(0, 800)}\x1b[0m` : `\x1b[31m${r.output.slice(0, 800)}\x1b[0m`);
       } else if (name === "read_file") {
         const r = await readFileTool(args);
         result = `${r.ok ? "OK" : "FAIL"}: ${r.output.slice(0, 6000)}`;
+        if (r.ok) result += `\n\n[系统提示：文件已读取，请直接基于内容回答，禁止重复读取同一文件]`;
         const dt = Math.round(performance.now() - t1);
         trace(`[tool] read_file ${args.path} · ${dt}ms · ${r.ok ? "OK" : "FAIL"} ${r.output.length}字`);
         console.log(`\x1b[90m→ 读取: ${args.path} ${r.ok ? "OK" : "FAIL"}\x1b[0m`);
@@ -142,9 +178,18 @@ async function runAgentTurn(userText, messages) {
       } else {
         result = `unknown tool ${name}`;
       }
+      // 记录首次结果供复用
+      if (!seenCalls.has(dedupKey)) seenCalls.set(dedupKey, { count: 1, firstResult: result });
+      else seenCalls.get(dedupKey).count++;
+      // 若本轮首次执行后已累积 2 次以上相同调用，下次 LLM 再试会直接命中上面的 SKIPPED_DUP
       return { id: c.id, content: result };
     }));
     for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.id, content: tr.content });
+    // 若本轮有 SKIPPED_DUP，额外追加一条系统提示，强制 LLM 基于已有结果回答而不是再调工具
+    if (toolResults.some((tr) => String(tr.content).startsWith("SKIPPED_DUP"))) {
+      messages.push({ role: "system", content: "系统提示：你已重复调用相同工具，工具侧已复用首次结果并跳过执行。请直接基于以上工具结果用中文回答用户，不要再发起任何工具调用。" });
+      trace(`[dup] 检测到重复调用，已注入系统提示要求直接回答`);
+    }
     const toolsMs = Math.round(performance.now() - tTools);
     const loopMs = Math.round(performance.now() - tLoop);
     trace(`[loop ${loops}] 工具 ${toolsMs}ms · 本轮总 ${loopMs}ms · 累计 ${Math.round(performance.now() - turnStart)}ms`);
@@ -164,13 +209,25 @@ function printFooter({ model, latency, usage, totalMs, fallback }) {
   const tokLabel = usage ? ` · tokens ${usage.prompt_tokens ?? "?"}→${usage.completion_tokens ?? "?"}` : "";
   const fbLabel = fallback ? " · fallback" : "";
   let gwLabel = "";
+  let extra = "";
   if (gw) {
-    const cnt = gw.latencies?.[model]?.count;
-    const ema = gw.latencies?.[model]?.emaMs;
-    const per = cnt ? ` · 网关该模型 ${cnt}次 EMA ${ema}ms` : "";
-    gwLabel = ` · 网关 总${gw.total} 成功${gw.success} 失败${gw.fail}${per}`;
+    const full = (() => { try { return normalizeFullId(model); } catch { return model; } })();
+    const stat = gw.modelStats?.[full] || gw.modelStats?.[model] || null;
+    const cnt = stat?.count ?? gw.latencies?.[model]?.count;
+    const avgTtfb = stat?.avgTtfbMs ?? stat?.emaTtfbMs;
+    const avgTps = stat?.avgTps ?? stat?.emaTps;
+    const per = cnt ? ` · 网关该模型 ${cnt}次` : "";
+    const ttfbLabel = avgTtfb ? ` 平均首字 ${avgTtfb}ms` : (gw.latencies?.[model]?.emaMs ? ` EMA ${gw.latencies[model].emaMs}ms` : "");
+    const tpsLabel = avgTps ? ` · ${avgTps} tok/s` : "";
+    const verbose = stat?.avgCompTok ? ` · 啰嗦 ${stat.avgCompTok}tok/次` : "";
+    gwLabel = ` · 网关 总${gw.total} 成功${gw.success} 失败${gw.fail}${per}${ttfbLabel}${tpsLabel}${verbose}`;
+    // 本次首字/tps（若本次有 usage，估算本次 tps）
+    if (usage?.completion_tokens && latency) {
+      const tpsNow = Math.round(usage.completion_tokens / (latency / 1000));
+      if (Number.isFinite(tpsNow) && tpsNow > 0) extra = ` · 本次首字 ~${latency}ms · ${tpsNow} tok/s`;
+    }
   }
-  console.log(`${dim}─ ${modelLabel}  ${latLabel}${totalLabel}${tokLabel}${fbLabel}${gwLabel}${rst}`);
+  console.log(`${dim}─ ${modelLabel}  ${latLabel}${totalLabel}${tokLabel}${fbLabel}${gwLabel}${extra}${rst}`);
 }
 
 export async function startRepl({ singleShot } = {}) {

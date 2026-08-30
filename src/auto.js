@@ -27,8 +27,8 @@ export function getPreferredModel({ file = defaultStateFile() } = {}) {
 
 export const DEFAULT_AUTO_MODELS = [
   PREFERRED_MODEL,
-  "deepseek-v4-flash-free",
   "mimo-v2.5-free",
+  "deepseek-v4-flash-free",
   "ling-3.0-flash-free",
   "nemotron-3-ultra-free",
   "north-mini-code-free",

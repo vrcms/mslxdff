@@ -61,6 +61,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     exitReason: null,
     upstreamError: null,
     downstreamClosed: false,
+    usage: null,
+    chars: 0,
   };
   let prevChunkAt = t0;
   const onClose = () => {
@@ -125,6 +127,43 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (txt.includes("[DONE]")) detail.sawDone = true;
             const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
             if (m) detail.sawFinishReason = m[1];
+            // 尝试提取 usage（流式末帧）
+            if (txt.includes("\"usage\"") || txt.includes("prompt_tokens")) {
+              try {
+                const lines = txt.split("\n");
+                for (const line of lines) {
+                  const t = line.trim();
+                  if (!t.startsWith("data:")) continue;
+                  const d = t.slice(5).trim();
+                  if (d === "[DONE]" || !d) continue;
+                  const j = JSON.parse(d);
+                  if (j && j.usage && typeof j.usage === "object") {
+                    const u = j.usage;
+                    const pt = Number(u.prompt_tokens ?? u.promptTokens ?? u.input_tokens);
+                    const ct = Number(u.completion_tokens ?? u.completionTokens ?? u.output_tokens);
+                    const tt = Number(u.total_tokens ?? u.totalTokens);
+                    const cur = {};
+                    if (Number.isFinite(pt)) cur.prompt_tokens = pt;
+                    if (Number.isFinite(ct)) cur.completion_tokens = ct;
+                    if (Number.isFinite(tt)) cur.total_tokens = tt;
+                    if (Object.keys(cur).length) detail.usage = cur;
+                    // 兜底 chars：从 choices 文本长度累加
+                    const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.message?.content || "";
+                    if (delta) detail.chars += String(delta).length;
+                  }
+                }
+              } catch {}
+            } else {
+              // 非 usage 的普通 delta 也累 chars
+              try {
+                const txt2 = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+                const ms = txt2.match(/"content"\s*:\s*"([^"]*)"/g);
+                if (ms) for (const mm of ms) {
+                  const c = JSON.parse(`{${mm}}`);
+                  if (c.content) detail.chars += String(c.content).length;
+                }
+              } catch {}
+            }
           } catch { /* ignore */ }
           if (timedOut || stalled || tooLong) break;
           if (first) {
@@ -190,14 +229,32 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const text = await upRes.text();
   detail.receivedBytes = Buffer.byteLength(text);
   detail.exitReason = "normal-non-stream";
+  // 非流式 usage 与 chars 提取
   try {
     const parsed = JSON.parse(text);
+    const u = parsed.usage;
+    if (u && typeof u === "object") {
+      const pt = Number(u.prompt_tokens ?? u.promptTokens ?? u.input_tokens);
+      const ct = Number(u.completion_tokens ?? u.completionTokens ?? u.output_tokens);
+      const tt = Number(u.total_tokens ?? u.totalTokens);
+      const cur = {};
+      if (Number.isFinite(pt)) cur.prompt_tokens = pt;
+      if (Number.isFinite(ct)) cur.completion_tokens = ct;
+      if (Number.isFinite(tt)) cur.total_tokens = tt;
+      if (Object.keys(cur).length) detail.usage = cur;
+      if (parsed.choices?.[0]?.message?.content) detail.chars = String(parsed.choices[0].message.content).length;
+      else if (parsed.choices?.[0]?.text) detail.chars = String(parsed.choices[0].text).length;
+    }
     const enriched = enrichNonStreamJson(parsed, fallback);
     json(res, upRes.status, enriched);
   } catch {
     res.statusCode = upRes.status;
     res.setHeader("Content-Type", contentType || "text/plain");
     res.end(text);
+    // 纯文本时按长度估 chars
+    try { detail.chars = text.length; } catch {}
   }
-  return { status: upRes.status, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted: false, detail };
+  // 非流式 ttf 视为 total（一次性返回）
+  const totalMs = Math.round(performance.now() - t0);
+  return { status: upRes.status, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, detail };
 }

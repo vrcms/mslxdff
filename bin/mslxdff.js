@@ -8,7 +8,8 @@ import { DEFAULT_PORT, defaultStateFile } from "../src/state.js";
 import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createModelsService } from "../src/models.js";
-import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey, loadProviderKeys, loadProviderAuths, loadProviderConfigs as loadProviderConfigsState } from "../src/state.js";
+import { homedir } from "node:os";
+import { loadToken, refreshToken, setPort, getPort, loadGroupsJoined, saveGroupsJoined, loadModelErrors, savePreferredModel, loadPreferredModel, loadModelPicks, saveModelPicks, loadProviderKey, loadProviderKeys, loadProviderAuths, loadProviderConfigs as loadProviderConfigsState, loadModelStats, loadModelLatencies, loadProviderConfigs, loadProviderAllowedModels, loadProviderShareKeys, loadProviderBaseUrl } from "../src/state.js";
 import { getPreferredModel } from "../src/auto.js";
 import { normalizeModel } from "../src/reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../src/sync-workbuddy.js";
@@ -305,7 +306,36 @@ if (args.includes("-model") || args.includes("-models")) {
     const pickedIds = loadModelPicks();
     const mark = (id) => (pickedIds.includes(id) ? "*" : " ");
     console.log(`${ids.length} free model(s)${at} (${pickedIds.length} picked, * = picked):`);
-    for (const id of ids) console.log(`  ${mark(id)} ${id}`);
+    // 加载别名映射，显示原始名+别名
+    let aliasMap = {};
+    let fullAliases = {};
+    try {
+      const { loadModelAliases, getAliasForModel } = await import("../src/providers/model-id.js");
+      loadModelAliases();
+      for (const id of ids) {
+        const alias = getAliasForModel(id);
+        if (alias) aliasMap[id] = alias;
+      }
+      // 读取完整 alias 表（用于展示本地别名，如 clinebot/*）
+      try {
+        const aliasesFile = join(homedir(), ".config", "mslxdff", "model-aliases.json");
+        const raw = JSON.parse(readFileSync(aliasesFile, "utf8"));
+        if (raw && typeof raw === "object") fullAliases = raw;
+      } catch {}
+    } catch {}
+    for (const id of ids) {
+      const alias = aliasMap[id];
+      const aliasStr = alias ? `  (alias: ${alias})` : "";
+      console.log(`  ${mark(id)} ${id}${aliasStr}`);
+    }
+    // 额外展示本地别名（不在上游列表中的，如 clinebot/*）
+    const aliasEntries = Object.entries(fullAliases).filter(([alias, canonical]) => !ids.includes(canonical));
+    if (aliasEntries.length) {
+      console.log(`\nlocal aliases (${aliasEntries.length}):`);
+      for (const [alias, canonical] of aliasEntries) {
+        console.log(`  ${canonical}  =>  ${alias}`);
+      }
+    }
     console.log(`\npicked only constrains auto; manage with: mslxdff -models (TTY) | mslxdff -model pick <id> | mslxdff -model unpick <id> | mslxdff -model pick clear`);
   } catch (err) {
     console.error(`could not fetch models: ${String(err?.message || err)}`);
@@ -543,6 +573,41 @@ if (args.includes("-workbuddy") || args.includes("--workbuddy") || args.includes
   }
 }
 
+// -enable-autostart / -disable-autostart / -autostart status : 开机自启（Windows schtasks / Linux systemd user）
+if (args.includes("-enable-autostart") || args.includes("--enable-autostart") || args.includes("-disable-autostart") || args.includes("--disable-autostart") || args.includes("-autostart") || args.includes("--autostart")) {
+  const { enableAutostart, disableAutostart, getAutostartStatus, autostartHelp } = await import("../src/autostart.js");
+  if (args.includes("-enable-autostart") || args.includes("--enable-autostart")) {
+    const r = await enableAutostart();
+    if (r.ok) {
+      console.log(`autostart 已启用 · ${r.method || autostartHelp()}`);
+      console.log(`验证: mslxdff -autostart status`);
+    } else {
+      console.error(`启用自启失败: ${r.error || "unknown"}`);
+      console.error(`提示: Windows 需允许任务计划，Linux 需 systemd --user`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+  if (args.includes("-disable-autostart") || args.includes("--disable-autostart")) {
+    const r = await disableAutostart();
+    if (r.ok) console.log(`autostart 已禁用`);
+    else { console.error(`禁用失败: ${r.error}`); process.exit(1); }
+    process.exit(0);
+  }
+  // -autostart / -autostart status
+  const idx = args.findIndex((x) => x === "-autostart" || x === "--autostart");
+  const sub = args[idx + 1];
+  if (!sub || sub === "status" || sub === "list") {
+    const s = await getAutostartStatus();
+    console.log(`autostart: ${s.enabled ? "已启用" : "未启用"} · ${s.detail || autostartHelp()}`);
+    if (s.taskToRun) console.log(`  task: ${s.taskToRun}`);
+    if (s.unit) console.log(`  unit: ${s.unit}`);
+    process.exit(0);
+  }
+  console.error("usage: mslxdff -enable-autostart | mslxdff -disable-autostart | mslxdff -autostart status");
+  process.exit(1);
+}
+
 // -free / -free-check / --free / -free-watch : V2EX 限免白嫖雷达（仅 V2EX 单源）
 if (args.includes("-free") || args.includes("--free") || args.includes("-free-check") || args.includes("--free-check") || args.includes("-free-watch") || args.includes("--free-watch")) {
   const isWatch = args.includes("-free-watch") || args.includes("--free-watch");
@@ -614,34 +679,40 @@ if (args.includes("-providers") || args.includes("--providers")) {
       }
     } catch {}
     const list = [];
+    const { loadProviderAllowAnyModels: _la0 } = await import("../src/state.js");
+    const opAllowAny = _la0("opencode");
+    const orAllowAny = _la0("openrouter");
     const opAllowed = loadProviderAllowedModels("opencode");
-    list.push({ id: "opencode", enabled: opencodeEnabled, baseUrl: opencodeBase, keys: [], share: false, allowed: opAllowed, note: "built-in, no key, cannot share" });
-    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, allowed: orAllowed, note: orKeys.length ? "" : "no keys" });
+    list.push({ id: "opencode", enabled: opencodeEnabled, baseUrl: opencodeBase, keys: [], share: false, allowed: opAllowed, allowAny: opAllowAny, note: "built-in, no key, cannot share" });
+    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, allowed: orAllowed, allowAny: orAllowAny, note: orKeys.length ? "" : "no keys" });
     for (const gid of [...genericIds].sort()) {
       const cfg = configs[gid];
       const keys = loadProviderKeys(gid);
       const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || "";
       const share = loadProviderShareKeys(gid);
       const allowed = loadProviderAllowedModels(gid);
+      const allowAny = _la0(gid);
       const enabled = Boolean(baseUrl && keys.length);
       let note = "";
-      if (!baseUrl && !keys.length && !allowed.length) note = "no baseUrl, no keys";
-      else if (!baseUrl && !allowed.length) note = "missing baseUrl";
-      else if (!keys.length && !allowed.length) note = "no keys";
+      if (!baseUrl && !keys.length && !allowed.length && allowAny === false) note = "no baseUrl, no keys, BLOCKED (allowAny OFF)";
+      else if (!baseUrl && !keys.length && !allowed.length) note = "no baseUrl, no keys";
+      else if (!baseUrl && !allowed.length && !allowAny) note = "missing baseUrl, BLOCKED";
+      else if (!keys.length && !allowed.length && !allowAny) note = "no keys, BLOCKED";
       else if (!baseUrl) note = "missing baseUrl";
       else if (!keys.length) note = "no keys";
-      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, allowed, note });
+      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, allowed, allowAny, note });
     }
     console.log(`providers (${list.length}):`);
     for (const p of list) {
       const state = p.enabled ? "enabled " : "disabled";
       const keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}` : "0 keys";
       const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
-      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 3).join(",")}${p.allowed.length > 3 ? "..." : ""})` : "allow=all";
+      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 3).join(",")}${p.allowed.length > 3 ? "..." : ""})` : (p.allowAny ? "allow=all" : "allow=none(BLOCKED)");
       const note = p.note ? `  (${p.note})` : "";
       console.log(`  ${p.id.padEnd(12)} ${state}  ${keysInfo.padEnd(28)}  ${allowInfo.padEnd(22)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
     }
     console.log(`\nuse: mslxdff -provider <id> list  to inspect one,  mslxdff -provider <id> allowlist set <model...>  to restrict`);
+    console.log(`     mslxdff -provider <id> allowAny on|off  (empty allowlist = block or allow all)`);
     process.exit(0);
   }
   console.error("usage: mslxdff -providers list");
@@ -656,14 +727,15 @@ if (args.includes("-provider") || args.includes("--provider")) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url|allowlist]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url|allowlist|allowAny]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
     console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
     console.error("            mslxdff -provider openrouter set-url https://api.example.com/v1");
-    console.error("            mslxdff -provider openrouter allowlist set gpt-4 gpt-3.5  manage allowed models (empty=allow all)");
+    console.error("            mslxdff -provider openrouter allowlist set gpt-4 gpt-3.5  manage allowed models (empty=block unless allowAny ON)");
+    console.error("            mslxdff -provider openrouter allowAny on|off     empty allowlist = allow all or block all (default OFF, secure)");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx   add generic OpenAI-compatible provider");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4  add with allowlist");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
@@ -779,7 +851,14 @@ if (args.includes("-provider") || args.includes("--provider")) {
         try { const { renameSync, unlinkSync, existsSync } = await import("node:fs"); if (existsSync(fp)) unlinkSync(fp); renameSync(fp + ".tmp", fp); } catch { writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 }); }
       } catch {}
     } else {
-      keys = [...new Set([...(cur.keys || []), String(gKey).trim()].filter(Boolean))];
+      const trimmed = String(gKey).trim();
+      const already = (cur.keys || []).some((k) => String(k).trim() === trimmed);
+      if (already) {
+        console.log(`key already exists for ${nid} (${trimmed.slice(0, 4)}…${trimmed.slice(-4)}), skipped — still ${cur.keys.length} key(s)`);
+        console.log(`  use: mslxdff -provider ${nid} list  to see keys`);
+        process.exit(0);
+      }
+      keys = [...new Set([...(cur.keys || []), trimmed].filter(Boolean))];
       auths = undefined;
       saveProviderConfig(nid, { baseUrl, keys, allowedModels });
     }
@@ -787,12 +866,14 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.log(`  baseUrl: ${String(gBase).trim().replace(/\/+$/, "")}`);
     console.log(`  keys: ${keys.length} (${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")})`);
     if (allowedModels.length) console.log(`  allowedModels: ${allowedModels.length} (${allowedModels.join(", ")})`);
-    else console.log(`  allowedModels: (none — allow all, set via: mslxdff -provider ${nid} allowlist set <model...>)`);
+    else console.log(`  allowedModels: (none — BLOCKED, otherwise unusable)  → mslxdff -provider ${nid} allowlist set <model...>  OR  mslxdff -provider ${nid} allowAny on (allow all)`);
     console.log(`  share: ${loadProviderShareKeys(nid) ? "ON" : "off"}   (mslxdff -provider ${nid} share on|off)`);
+    console.log(`  allowAny: OFF (secure, empty allowlist = 403 block before upstream) — enable via: mslxdff -provider ${nid} allowAny on`);
     console.log(`  use as: ${nid}/<model-id>  — restart daemon to activate`);
+    console.log(`  NOTE: empty allowlist = 403 before upstream, no cost — must set allowlist to use`);
     process.exit(0);
   }
-  if ((id === "opencode" || id === "oc") && sub !== "allowlist" && sub !== "allow" && sub !== "allowed" && sub !== "whitelist" && sub !== "list" && sub !== "status") {
+  if ((id === "opencode" || id === "oc") && sub !== "allowlist" && sub !== "allow" && sub !== "allowed" && sub !== "whitelist" && sub !== "list" && sub !== "status" && sub !== "allowAny" && sub !== "allow-any" && sub !== "allow_any" && sub !== "allowany") {
     console.log("opencode is the default (bare) provider — it needs no API key and can never be shared with peers");
     console.log("(its IP-based rate limit is spread by peer forwarding itself)");
     console.log(`  allowlist: mslxdff -provider opencode allowlist [list|set|add|remove|clear]  — restrict models (empty=allow all)`);
@@ -839,9 +920,28 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.log(`share keys to peers: ${state ? "ON" : "off"} — restart daemon to activate`);
     process.exit(0);
   }
-  // allowlist 管理：白名单为空 = 不限；非空 = 仅名单内可用（防昂贵模型）
+  // allowAnyModels 开关：默认关闭（安全），空 allowlist 时直接 403（防扣费）
+  if (sub === "allowAny" || sub === "allow-any" || sub === "allow_any" || sub === "allowany") {
+    const { loadProviderAllowAnyModels, saveProviderAllowAnyModels } = await import("../src/state.js");
+    const on = rest[1];
+    if (!on) {
+      const cur = loadProviderAllowAnyModels(id);
+      console.log(`allowAnyModels: ${cur ? "ON (allow all when allowlist empty)" : "OFF (empty allowlist = block all)"}`);
+      console.log(`  set: mslxdff -provider ${id} allowAny on|off`);
+      process.exit(0);
+    }
+    if (!["on", "off", "1", "0", "true", "false"].includes(String(on).toLowerCase())) {
+      console.error(`usage: mslxdff -provider ${id} allowAny on|off`);
+      process.exit(1);
+    }
+    const state = ["on", "1", "true"].includes(String(on).toLowerCase());
+    saveProviderAllowAnyModels(id, state);
+    console.log(`allowAnyModels: ${state ? "ON (empty allowlist = allow all)" : "OFF (empty allowlist = block all)"} — takes effect immediately (hot-reloaded)`);
+    process.exit(0);
+  }
+  // allowlist 管理：默认关闭，白名单为空 = 禁止（需显式 allowAny:true 才放行）；非空 = 仅名单内可用（防昂贵模型）
   if (sub === "allowlist" || sub === "allow" || sub === "allowed" || sub === "whitelist") {
-    const { loadProviderAllowedModels, saveProviderAllowedModels, loadProviderConfig } = await import("../src/state.js");
+    const { loadProviderAllowedModels, saveProviderAllowedModels, loadProviderConfig, loadProviderAllowAnyModels } = await import("../src/state.js");
     const action = rest[1];
     const rawTargets = rest.slice(2);
     // 兼容：mslxdff -provider <id> allowlist  （无 action）→ list
@@ -849,22 +949,30 @@ if (args.includes("-provider") || args.includes("--provider")) {
       const list = loadProviderAllowedModels(id);
       const cfg = loadProviderConfig(id);
       const baseUrl = cfg?.baseUrl || "";
+      const allowAny = loadProviderAllowAnyModels(id);
       console.log(`provider: ${id}${baseUrl ? `  baseUrl: ${baseUrl}` : ""}`);
       if (!list.length) {
-        console.log(`  allowedModels: (none — allow all)`);
-        console.log(`  set via: mslxdff -provider ${id} allowlist set <model1> <model2> ...`);
-        console.log(`  add:     mslxdff -provider ${id} allowlist add <model>`);
+        if (allowAny) {
+          console.log(`  allowedModels: (none — allow all, because allowAny=ON)`);
+          console.log(`  to secure: mslxdff -provider ${id} allowAny off  or  mslxdff -provider ${id} allowlist set <model1> <model2> ...`);
+        } else {
+          console.log(`  allowedModels: (none — BLOCK ALL, provider disabled until allowlist set or allowAny ON)`);
+          console.log(`  set via: mslxdff -provider ${id} allowlist set <model1> <model2> ...`);
+          console.log(`  or:      mslxdff -provider ${id} allowAny on   (allow all when allowlist empty)`);
+        }
       } else {
         console.log(`  allowedModels: ${list.length} model${list.length > 1 ? "s" : ""} (only these can be used)`);
         list.forEach((m, i) => console.log(`  [${i + 1}]  ${m}`));
         console.log(`  manage: mslxdff -provider ${id} allowlist add <model> | remove <model> | set <m1> <m2> ... | clear`);
+        console.log(`  allowAny: ${allowAny ? "ON" : "OFF"} (empty list behavior) — mslxdff -provider ${id} allowAny on|off`);
       }
-      console.log(`  NOTE: empty allowlist = allow all (hot-reloaded, no restart needed)`);
+      console.log(`  NOTE: empty allowlist + allowAny OFF = 403 block (hot-reloaded, no restart needed)`);
       process.exit(0);
     }
     if (action === "clear") {
       saveProviderAllowedModels(id, []);
-      console.log(`cleared ${id} allowlist (now allow all) — takes effect immediately (hot-reloaded)`);
+      const allowAny = loadProviderAllowAnyModels(id);
+      console.log(`cleared ${id} allowlist (now ${allowAny ? "allow all (allowAny ON)" : "BLOCK ALL (allowAny OFF)"}) — takes effect immediately (hot-reloaded)`);
       process.exit(0);
     }
     if (action === "set") {
@@ -903,17 +1011,21 @@ if (args.includes("-provider") || args.includes("--provider")) {
       const set = new Set(flat);
       const next = cur.filter((m) => !set.has(m));
       saveProviderAllowedModels(id, next);
-      console.log(`removed ${cur.length - next.length} model${cur.length - next.length !== 1 ? "s" : ""} from ${id} allowlist (now ${next.length ? next.join(", ") : "(allow all)"}) — takes effect immediately (hot-reloaded)`);
+      const { loadProviderAllowAnyModels: _la } = await import("../src/state.js");
+      const _allowAny = _la(id);
+      console.log(`removed ${cur.length - next.length} model${cur.length - next.length !== 1 ? "s" : ""} from ${id} allowlist (now ${next.length ? next.join(", ") : (_allowAny ? "(allow all)" : "(BLOCK ALL)")}) — takes effect immediately (hot-reloaded)`);
       process.exit(0);
     }
     console.error(`usage: mslxdff -provider ${id} allowlist [list|set|add|remove|clear] [models...]`);
+    console.error(`       mslxdff -provider ${id} allowAny on|off   (empty allowlist = block or allow all)`);
     process.exit(1);
   }
   if (sub === "list" || sub === "status") {
     const keys = loadProviderKeys(id);
     const cfg = loadProviderConfig(id);
-    const { loadProviderAllowedModels } = await import("../src/state.js");
+    const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("../src/state.js");
     const allowed = loadProviderAllowedModels(id);
+    const allowAny = loadProviderAllowAnyModels(id);
     const baseUrl = cfg?.baseUrl || "";
     if (baseUrl) console.log(`provider: ${id}  baseUrl: ${baseUrl}`);
     else console.log(`provider: ${id}${id === "openrouter" ? " (built-in baseUrl: https://openrouter.ai/api/v1)" : ""}`);
@@ -925,8 +1037,9 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.log(`  keys: (no keys configured)`);
     }
     console.log(`  share keys to peers:   ${loadProviderShareKeys(id) ? "ON" : "off"}   (mslxdff -provider ${id} share on|off)`);
+    console.log(`  allowAnyModels: ${allowAny ? "ON (empty allowlist = allow all)" : "OFF (empty allowlist = BLOCK ALL)"}  (mslxdff -provider ${id} allowAny on|off)`);
     if (allowed.length) console.log(`  allowedModels: ${allowed.length} (${allowed.join(", ")})  — only these can be used`);
-    else console.log(`  allowedModels: (none — allow all)  (mslxdff -provider ${id} allowlist set <model...>)`);
+    else console.log(`  allowedModels: (none — ${allowAny ? "allow all" : "BLOCK ALL"})  (mslxdff -provider ${id} allowlist set <model...>  or  allowAny on)`);
     if (baseUrl) console.log(`  set url: mslxdff -provider ${id} set-url <baseUrl>`);
     console.log(`  NOTE: opencode is the default provider and can never be shared`);
     process.exit(0);
@@ -937,11 +1050,18 @@ if (args.includes("-provider") || args.includes("--provider")) {
       console.error("usage: mslxdff -provider openrouter add <key>");
       process.exit(1);
     }
+    const trimmed = String(key).trim();
+    const curKeys = loadProviderKeys(id);
+    if (curKeys.some((k) => String(k).trim() === trimmed)) {
+      console.log(`key already exists for ${id} (${trimmed.slice(0, 4)}…${trimmed.slice(-4)}), skipped — still ${curKeys.length} key(s)`);
+      console.log(`  use: mslxdff -provider ${id} list  to see keys`);
+      process.exit(0);
+    }
     // 通用供应商：keys 存 providerConfigs，需保留 baseUrl
     const configs = loadProviderConfigs();
     if (configs[id]) {
       const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
-      const keys = [...new Set([...(cur.keys || []), String(key).trim()].filter(Boolean))];
+      const keys = [...new Set([...(cur.keys || []), trimmed].filter(Boolean))];
       saveProviderConfig(id, { baseUrl: cur.baseUrl || "", keys });
       console.log(`added ${id} API key (now ${keys.length} total) — restart daemon to activate`);
     } else {
@@ -1712,6 +1832,13 @@ const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshol
 
 const isDebug = process.env.MSLXDFF_DEBUG === "1";
 const bus = createEventBus();
+
+// 加载 WorkBuddy 别名映射（clinebot-z-ai → clinebot/z-ai）
+try {
+  const { loadModelAliases } = await import("../src/providers/model-id.js");
+  loadModelAliases();
+} catch {}
+
 const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus, plugins: loadedPlugins });
 const listenHost = effectiveHost();
 const srv = startServer({
@@ -2081,7 +2208,7 @@ function printHelp() {
 Usage:
   mslxdff                          start as a background daemon and exit (status + help if one is already running)
   mslxdff -d                       start as a background daemon
-  mslxdff -status                  show current status (daemon, models, recent calls, last error)
+  mslxdff -status                  show current status (daemon/health/port/config, upstream providers, models + metrics/体检表, autostart/plugins, groups/peers, recent calls with ttfb/tps, last error)
   mslxdff -log [N]                 show last N events (default 10, e.g. -log 100)
   mslxdff -models                interactive picker: ↑/↓ select a model, Enter sets it as the default (non-TTY: plain list)
   mslxdff -model list            list the free models this proxy serves (cached)
@@ -2112,6 +2239,9 @@ Usage:
   mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
   mslxdff -free                    V2EX 白嫖雷达（仅 V2EX 单源：latest+hot 按 白嫖|限免|免费额度|注册送|羊毛 过滤）
   mslxdff -free-watch              V2EX 白嫖雷达 watch 模式（每 5 分钟轮询）
+  mslxdff -enable-autostart        开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起）
+  mslxdff -disable-autostart       关闭开机自启
+  mslxdff -autostart status        查看自启状态
   mslxdff -chat ["prompt"]       chat REPL（mimo-v2.5-free 优先/big-pickle 兜底，自然语言转命令，模糊匹配由模型完成，历史持久化，超长自动压缩，仅拦 -uninstall，daemon 重启不影响）
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -help                    show this help
@@ -2140,11 +2270,210 @@ Environment:
 
 async function printStatus() {
   const daemon = readPid();
+  const alive = daemon ? isPidAlive(daemon) : false;
   const port = getPort() || resolvePort();
+  const persisted = getPort();
+  const portSrc = persisted != null ? "persisted" : (process.env.MSLXDFF_PORT ? "env MSLXDFF_PORT" : "default 8989");
+  const stateFile = defaultStateFile();
+  const dir = logDir();
+  // daemon uptime from pid file mtime
+  let upStr = "";
+  if (daemon && alive) {
+    try {
+      const st = statSync(pidFile());
+      const ms = Date.now() - st.mtimeMs;
+      upStr = `, up ${fmtUptime(ms)}`;
+    } catch {}
+  }
+  const verNote = daemon && alive ? (() => { const v = readPidVersion(); return v === VERSION ? "version ok" : (v ? `version ${v} → ${VERSION} (restart pending)` : ""); })() : "";
   console.log(`mslxdff v${VERSION}`);
-  console.log(`daemon:    ${daemon ? `running (pid ${daemon})` : "not running"}`);
-  console.log(`endpoint:  http://localhost:${port}/v1`);
-  console.log(`log dir:   ${logDir()}`);
+  console.log(`daemon:    ${daemon ? (alive ? `running (pid ${daemon}${upStr})` : `stale pid ${daemon} (not alive)`) : "not running"}${verNote ? `  [${verNote}]` : ""}`);
+  // local health probe — 1.2s timeout, 显示端到端可用性
+  let healthLine = "";
+  try {
+    const t0 = Date.now();
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1200) });
+    const ms = Date.now() - t0;
+    healthLine = r.ok ? `health ok ${ms}ms` : `health HTTP ${r.status} ${ms}ms`;
+  } catch (e) {
+    healthLine = daemon && alive ? `health fail (${String(e?.message || e).slice(0, 60)})` : "health — (daemon not running)";
+  }
+  console.log(`endpoint:  http://localhost:${port}/v1  ·  ${healthLine}`);
+  console.log(`config:    port ${port} (${portSrc}) · state ${stateFile} · log ${dir}`);
+  try {
+    const host = process.env.MSLXDFF_HOST || process.env.MSLXDFF_BIND_HOST || "0.0.0.0";
+    if (host !== "0.0.0.0") console.log(`bind:      ${host}`);
+  } catch {}
+
+  // ---- upstream providers（用户最想要的一块）----
+  try {
+    const configs = loadProviderConfigs();
+    const upstreamBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
+    const providerRows = [];
+    // opencode 恒 enabled
+    const opAllowed = loadProviderAllowedModels("opencode");
+    providerRows.push({ id: "opencode", enabled: true, baseUrl: upstreamBase, keys: [], allowed: opAllowed, share: false, note: "built-in, no key, cannot share" });
+    // collect generic ids (configs + legacy providerKeys + env)
+    const genericIds = new Set(Object.keys(configs).filter((id) => id !== "opencode"));
+    try {
+      const raw = JSON.parse(readFileSync(stateFile, "utf8"));
+      const pk = raw.providerKeys || {};
+      for (const id of Object.keys(pk)) if (id !== "opencode") genericIds.add(id);
+      const cfgRaw = raw.providerConfigs || {};
+      for (const id of Object.keys(cfgRaw)) if (id !== "opencode") genericIds.add(id);
+    } catch {}
+    for (const k of Object.keys(process.env)) {
+      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
+      if (m) {
+        const id = m[1].toLowerCase().replace(/__/g, "-");
+        if (id !== "opencode") genericIds.add(id);
+      }
+    }
+    for (const gid of [...genericIds].sort()) {
+      const cfg = configs[gid];
+      const keys = loadProviderKeys(gid);
+      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : "");
+      const share = loadProviderShareKeys(gid);
+      const allowed = loadProviderAllowedModels(gid);
+      let enabled = Boolean(baseUrl && keys.length) || (gid === "openrouter" && keys.length > 0);
+      const auths = gid === "workbuddy" ? (loadProviderAuths(gid) || []) : [];
+      let note = "";
+      // 检测测试桩：workbuddy 的 k-new / 127.0.0.1 / 短 key 均视为未真实配置
+      const isWorkbuddyStub = gid === "workbuddy" && (keys.includes("k-new") || baseUrl.includes("127.0.0.1") || (keys.length === 1 && keys[0].length < 20));
+      if (isWorkbuddyStub) {
+        enabled = false;
+        note = "测试桩 (key=k-new, baseUrl=127.0.0.1) — 请重跑 node workbuddy-token-auto.js 写入真实 JWT";
+      } else if (!enabled) {
+        if (!baseUrl && !keys.length) note = "no baseUrl, no keys";
+        else if (!baseUrl) note = "missing baseUrl";
+        else if (!keys.length) note = "no keys";
+      } else if (gid === "workbuddy" && auths.length && auths.length !== keys.length) {
+        note = `${auths.length} auth(s) / ${keys.length} key(s) — 数量不一致请重跑 workbuddy-token-auto.js`;
+      }
+      providerRows.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, allowed, share, note, authCount: auths.length });
+    }
+    const enabledCount = providerRows.filter((r) => r.enabled).length;
+    console.log(`\nupstream providers (${providerRows.length}, ${enabledCount} enabled)  —  mslxdff -providers list 查看详情`);
+    for (const p of providerRows) {
+      const dot = p.enabled ? "●" : "○";
+      const state = p.enabled ? "enabled " : "disabled";
+      let keysInfo;
+      if (p.id === "opencode") keysInfo = "无需 key (内置)";
+      else keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 3)}…${k.slice(-3)}`).join(", ")}` : "0 keys";
+      const authInfo = p.authCount ? ` ${p.authCount} acc` : "";
+      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 2).join(",")}${p.allowed.length > 2 ? "…" : ""})` : "allow=all";
+      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
+      const note = p.note ? `  (${p.note})` : "";
+      console.log(`  ${dot} ${p.id.padEnd(12)} ${state}  ${keysInfo}${authInfo}  ${allowInfo.padEnd(18)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
+    }
+    if (enabledCount === 1 && providerRows.length === 1) {
+      console.log(`  (仅 opencode 内置免费通道；按需加：mslxdff -provider add bai https://api.b.ai/v1 <key>  或  node workbuddy-token-auto.js)`);
+    }
+  } catch (e) {
+    console.log(`\nupstream providers: (unavailable — ${String(e?.message || e).slice(0, 80)})`);
+  }
+
+  // ---- models：preferred + picks + 免费缓存 + 体检表 ----
+  try {
+    const statuses = loadModelErrors();
+    const stats = loadModelStats();
+    const picks = loadModelPicks();
+    const preferred = getPreferredModel();
+    const modelsFile = join(dir, "models.json");
+    let freeIds = [];
+    let cachedAt = null;
+    let cacheErr = null;
+    if (existsSync(modelsFile)) {
+      try {
+        const cached = JSON.parse(readFileSync(modelsFile, "utf8"));
+        freeIds = (cached.data || []).map((m) => m.id).filter(Boolean);
+        cachedAt = cached.cachedAt || null;
+      } catch (err) { cacheErr = String(err?.message || err).slice(0, 60); }
+    }
+    const ageStr = cachedAt ? (() => { const ms = Date.now() - cachedAt; const h = Math.floor(ms / 3600000); const m = Math.floor((ms % 3600000) / 60000); return h ? `${h}h${m}m ago` : `${m}m ago`; })() : "";
+    const cacheLine = freeIds.length ? `${freeIds.length} free${cachedAt ? ` (cached ${fmtShanghaiYMDHM(cachedAt)} · ${ageStr})` : ""}` : (cacheErr ? `cache unreadable (${cacheErr})` : "not cached yet (daemon 拉取后出现)");
+    const prefStat = preferred ? (stats[preferred] || stats[`opencode/${preferred}`] || null) : null;
+    const prefErr = preferred ? statuses[preferred] : null;
+    const prefStatus = prefErr ? (typeof prefErr === "number" ? "error" : (prefErr?.status || "error")) : (prefStat ? "normal" : "");
+    const prefLine = preferred ? `${preferred}${prefStatus ? ` [${prefStatus}]` : ""}` : "(none)";
+    const picksLine = picks.length ? `${picks.length} (*${picks.slice(0, 4).join(", *")}${picks.length > 4 ? ` …+${picks.length - 4}` : ""})` : "(空=全量 auto)";
+    console.log(`\nmodels: ${cacheLine}  —  mslxdff -model status 查看详情`);
+    const prefTtfbDisp = prefStat ? (() => { const v = prefStat.avgTtfbMs ?? prefStat.emaTtfbMs; return v != null && v >= 10 ? `首字 ${v}ms` : (v != null && v < 10 ? "首字 — (测试数据)" : ""); })() : "";
+    const prefTotDisp = prefStat?.avgTotalMs && prefStat.avgTotalMs >= 10 ? `总 ${prefStat.avgTotalMs}ms` : "";
+    const prefTpsDisp = prefStat?.avgTps && prefStat.avgTps >= 1 ? `${prefStat.avgTps} tok/s` : "";
+    const prefExtra = prefStat ? `  ${[prefTtfbDisp, prefTotDisp, prefTpsDisp].filter(Boolean).join("  ")}  ${prefStat.count || 0}次` : "";
+    console.log(`  preferred: ${prefLine}${prefExtra}`);
+    console.log(`  picks: ${picksLine}  ${picks.length ? "auto 仅在勾选内" : "auto 用全量免费池"}`);
+    if (freeIds.length) {
+      const ids = freeIds;
+      console.log(`  free list:`);
+      for (const id of ids) {
+        const st = fmtStatus(id, statuses);
+        const full = id.includes("/") ? id : `opencode/${id}`;
+        const ms = stats[full] || stats[id];
+        let extra = "";
+        if (ms) {
+          const v = ms.avgTtfbMs ?? ms.emaTtfbMs;
+          const vStr = v != null ? (v >= 10 ? `avg首字 ${v}ms` : (v < 10 ? "avg首字 —" : "")) : "";
+          const tpsStr = ms.avgTps && ms.avgTps >= 1 ? ` ${ms.avgTps} tok/s` : "";
+          const cntStr = ms.count ? ` ${ms.count}次` : "";
+          extra = `  ${vStr}${tpsStr}${cntStr}`;
+        }
+        console.log(`    ${id}${st ? `  [${st}]` : ""}${extra}`);
+      }
+    }
+    // 体检表 Top（按样本数）—— 来自 modelStats，更能反映“跑得快不快/啰不啰嗦”
+    const allStatIds = Object.keys(stats);
+    if (allStatIds.length) {
+      const sorted = allStatIds.map((full) => ({ full, s: stats[full] })).filter((x) => x.s && x.s.count).sort((a, b) => (b.s.count - a.s.count) || ((b.s.avgTps || 0) - (a.s.avgTps || 0))).slice(0, 7);
+      if (sorted.length) {
+        console.log(`  模型体检 Top${sorted.length}（样本>0, 按次数）：`);
+        console.log(`    ${"模型".padEnd(28)}  ${"首字".padEnd(7)}  ${"总耗时".padEnd(7)}  ${"速度".padEnd(10)}  ${"啰嗦".padEnd(7)}  ${"样本".padEnd(5)}  状态`);
+        for (const { full, s } of sorted) {
+          const ttfb = s.avgTtfbMs ?? s.emaTtfbMs;
+          const total = s.avgTotalMs ?? s.emaTotalMs;
+          const tps = s.avgTps ?? s.emaTps;
+          const verbose = s.avgCompTok != null ? `${s.avgCompTok}tok` : "—";
+          const st = statuses[full] || statuses[full.split("/").slice(1).join("/")] || null;
+          const statusStr = st ? (typeof st === "number" ? "error" : (st.status || "normal")) : "normal";
+          const p95 = s.p95Ttfb && s.p95Ttfb >= 10 ? ` p95:${s.p95Ttfb}ms` : "";
+          const ttfbStr = ttfb != null ? (ttfb >= 10 ? ttfb + "ms" : "—") : "—";
+          const totalStr = total != null ? (total >= 10 ? total + "ms" : "—") : "—";
+          const tpsStr = tps != null && tps >= 1 ? tps + " tok/s" : "—";
+          console.log(`    ${full.padEnd(28)}  ${ttfbStr.padEnd(7)}  ${totalStr.padEnd(7)}  ${tpsStr.padEnd(10)}  ${verbose.padEnd(7)}  ${String(s.count).padEnd(5)}  ${statusStr}${p95}`);
+        }
+      }
+    } else if (!freeIds.length) {
+      console.log(`  (暂无模型样本 — 发一次 mslxdff -chat 后出现，100次后均值更稳)`);
+    }
+  } catch (e) {
+    console.log(`\nmodels: (unavailable — ${String(e?.message || e).slice(0, 80)})`);
+  }
+
+  // ---- autostart + plugins（运维一眼可见）----
+  try {
+    const { getAutostartStatus } = await import("../src/autostart.js");
+    const a = await getAutostartStatus();
+    const detail = a.detail || (a.enabled ? "已启用" : "未启用");
+    // detail 已含“已启用/未启用”，避免重复
+    const label = detail.startsWith("已启用") || detail.startsWith("未启用") ? detail : `${a.enabled ? "已启用" : "未启用"} · ${detail}`;
+    console.log(`\nautostart: ${label}  —  mslxdff -autostart status`);
+    if (a.taskToRun) console.log(`  task: ${a.taskToRun.slice(0, 120)}`);
+    if (a.unit) console.log(`  unit: ${a.unit}`);
+  } catch {}
+  try {
+    const { resolvePluginDirs, loadPlugins } = await import("../src/plugins.js");
+    const pkgRoot = dirname(fileURLToPath(import.meta.url)) + "/..";
+    const dirs = resolvePluginDirs({ pkgRoot });
+    const { plugins, errors } = await loadPlugins({ dirs });
+    if (plugins.length || errors.length) {
+      console.log(`plugins: ${plugins.length} loaded${errors.length ? `, ${errors.length} error(s)` : ""}  —  mslxdff -plugins`);
+      for (const p of plugins) console.log(`  ${p.name}${p.version ? `@${p.version}` : ""}  [${Object.keys(p.hooks || {}).join(", ") || "no hooks"}]`);
+      for (const e of errors) console.log(`  ! ${e.file} — ${e.error}`);
+    } else {
+      console.log(`plugins: (none)  —  放 *.mjs 到 ${dirs[dirs.length - 1] || "~/.config/mslxdff/plugins"} 启用`);
+    }
+  } catch {}
 
   const groups = createGroupsService({});
   const joined = loadGroupsJoined();
@@ -2215,6 +2544,8 @@ async function printStatus() {
       const tag = tags.length ? `  [${tags.join(", ")}]` : "";
       console.log(`  ${p.name || p.url}  ${p.url}${tag}`);
     }
+  } else {
+    console.log(`\nfailover: (none — 加组后自动出现，mslxdff -group list)`);
   }
 
   const groupNames = Object.keys(groups.list());
@@ -2223,44 +2554,43 @@ async function printStatus() {
     for (const n of groupNames) console.log(`  ${n}`);
   }
 
-  const modelsFile = join(logDir(), "models.json");
-  const statuses = loadModelErrors();
-  if (existsSync(modelsFile)) {
-    try {
-      const cached = JSON.parse(readFileSync(modelsFile, "utf8"));
-      const ids = (cached.data || []).map((m) => m.id).filter(Boolean);
-      console.log(`\nmodels (${ids.length} free):`);
-      for (const id of ids) {
-        const st = fmtStatus(id, statuses);
-        console.log(`  ${id}${st ? `  [${st}]` : ""}`);
-      }
-    } catch {
-      console.log("\nmodels: cache unreadable");
-    }
-  } else {
-    console.log("\nmodels: not cached yet (runs once the server has fetched the upstream list)");
-  }
-
-  console.log("\nrecent calls:");
+  // recent calls — 补首字/tok/s 信息，原来只看 duration
+  console.log("\nrecent calls: (gateway 持久化，最近5条，含首字/tok/s)");
   const calls = recentCalls(5);
   if (calls.length) {
+    let sumDur = 0, sumTps = 0, tpsN = 0;
     for (const c of calls) {
-      console.log(`  ${fmtTs(c.ts)}  ${c.model || "-"}  ${c.status}  ${c.durationMs ?? "?"}ms${c.auto ? "  auto" : ""}`);
+      if (Number.isFinite(c.durationMs)) sumDur += c.durationMs;
+      else if (Number.isFinite(c.totalMs)) sumDur += c.totalMs;
+      if (Number.isFinite(c.tps)) { sumTps += c.tps; tpsN++; } else if (Number.isFinite(c.charsPerSec)) { sumTps += c.charsPerSec; tpsN++; }
+    }
+    const avgDur = calls.length ? Math.round(sumDur / calls.length) : null;
+    const avgTps = tpsN ? Math.round(sumTps / tpsN) : null;
+    console.log(`  avg ${avgDur ? avgDur + "ms" : "—"}${avgTps ? ` · ${avgTps} tok/s` : ""}  —  mslxdff -log 20 查看详情`);
+    for (const c of calls) {
+      const dur = c.totalMs ?? c.durationMs;
+      const ttfb = c.ttfbMs != null ? ` 首字${c.ttfbMs}ms` : "";
+      const tps = c.tps != null ? ` ${c.tps}tok/s` : (c.charsPerSec ? ` ${c.charsPerSec}ch/s` : "");
+      const tok = c.usage?.completion_tokens != null ? ` tok${c.usage.completion_tokens}` : (c.chars ? ` ch${c.chars}` : "");
+      const tm = fmtTs(c.ts);
+      console.log(`  ${tm}  ${(c.model || "-").padEnd(28)}  ${String(c.status || "-").padEnd(4)}  ${dur ? dur + "ms" : ""}${ttfb}${tps}${tok}${c.auto ? "  auto" : ""}`);
     }
   } else {
-    console.log("  (none yet)");
+    console.log("  (none yet — 发一次请求后出现，mslxdff -chat hi)");
   }
 
   console.log("\nlast error:");
   const err = lastError();
   if (err) {
     console.log(`  ${fmtTs(err.ts)}  ${err.model || "-"}  ${err.status}  ${err.message || ""}`);
+    if (err.stack) console.log(`  ${String(err.stack).slice(0, 200)}`);
   } else {
-    console.log("  (none)");
+    console.log("  (none — 暂无错误，挺好)");
   }
 
-  if (daemon) console.log(`\nauth token: use \`mslxdff -showtoken\``);
-  else console.log(`\nnot running — start with: mslxdff -d`);
+  if (daemon && alive) console.log(`\nauth token: use \`mslxdff -showtoken\`  ·  health: http://127.0.0.1:${port}/health`);
+  else console.log(`\nnot running — start with: mslxdff -d  ·  查看日志 mslxdff -log 20`);
+  console.log(`hints: mslxdff -providers list · mslxdff -model status · mslxdff -group list · mslxdff -autostart status`);
 }
 
 function fmtStatus(id, statuses) {
@@ -2275,6 +2605,18 @@ function fmtStatus(id, statuses) {
 function fmtDur(ms) {
   if (!Number.isFinite(ms)) return "?";
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtUptime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d) return `${d}d${h % 24}h`;
+  if (h) return `${h}h${m % 60}m`;
+  return `${m}m${s % 60}s`;
 }
 
 function fmtEvent(e) {

@@ -16,8 +16,8 @@
 |---|---|---|
 | 无参启动 | `mslxdff` | 已有 daemon 显示 status，否则后台启动 |
 | daemon | `-d` / `--daemon` | 后台启动 |
-| 状态 | `-status` / `--status` / `-s` | 打印 daemon/群组/模型/调用 |
-| 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10 |
+| 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/share）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(含首字/tps)/last error/autostart/plugins — 全量聚合体检 |
+| 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10（含首字/tps/tok 详情） |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
 | 停止 | `-stop` / `--stop` | 停 daemon |
@@ -34,7 +34,8 @@
 | 模型去勾 | `-model unpick <id>` | 从 picks 移除 |
 | 模型查勾 | `-model picks` | 列 picks |
 | 模型清空 | `-model pick clear` | 清空 picks |
-| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单；`workbuddy`除外，见下方“WorkBuddy 接入”） |
+| 模型探活（必用 curl） | `curl` POST `http://localhost:8989/v1/chat/completions` body `{"model":"<id>","messages":[{"role":"user","content":"hi"}]}` | 测试指定模型是否通，**禁止** `mslxdff "hi" --model X` / `mslxdff --model X "hi"` 等幻觉命令 |
+| 供应商新增 | `-provider add <id> <baseUrl> <key> [allowedModel...]` | 一键添加通用 OpenAI 兼容供应商（末尾可带白名单；默认 `allowAny OFF` 空名单=禁用，需 `allowlist set` 或 `allowAny on` 否则 `403`；`workbuddy`除外） |
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
@@ -42,7 +43,8 @@
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
 | 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
-| 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=不限，非空仅名单内可用（防昂贵模型） |
+| 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=阻塞除非 `allowAny on`，非空仅名单内可用（防昂贵模型） |
+| 空名单开关 | `-provider <id> allowAny on\|off` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |
 | WorkBuddy 接入（禁手填） | `禁止直接 -provider add workbuddy` | 用户说“接入/配置/登录 workbuddy / key哪里来 / 怎么用workbuddy”时**禁止**让用户手填`<key>`或执行`-provider add workbuddy ...`，必须**直接文字回复**（不调工具）：`请在项目根目录执行 node workbuddy-token-auto.js（前提已装 WorkBuddy 5.3.14 并浏览器登录 https://copilot.tencent.com 一次），脚本会自动抓 token、写 auths/workbuddy-*.json + state.json、自动签到`；仅当用户已贴出以`eyJ`开头的JWT时才可用`-provider add workbuddy https://copilot.tencent.com <贴的key>` |
 | WorkBuddy 多号追加（路径A） | `node workbuddy-token-auto.js` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：① 文字提示“请先在 WorkBuddy 桌面退出当前账号，用新账号重新登录 https://copilot.tencent.com（能对话即成功）”② 待用户回复“已登录/好了”后`run_command: "node workbuddy-token-auto.js"`（whistle :8899 自动追加 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，并行签到）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径B） |
@@ -64,6 +66,9 @@
 | 解封禁 | `-resetban [ip]` / `--resetban [ip]` | 清加组封禁 |
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
+| 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
+| 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启 |
+| 自启状态 | `-autostart status` / `--autostart status` | 查看自启状态 |
 | 帮助 | `-help` / `--help` / `-h` | 打印帮助 |
 
 ## 模型说明
@@ -76,9 +81,12 @@
 
 - 时机：用户意图明确需执行命令时，调用 `run_command`；需查看文件时调用 `read_file`；需探活网络/服务时调用 `curl`。
 - `run_command` 参数：`command: "-model set hy3-free"`（不含 mslxdff 前缀）；`-showtoken` 仅用户明确要求看 token 时才用，查模型/供应商禁止用。
+- **严禁幻觉命令**：`mslxdff "hi" --model X` / `mslxdff --model X "hi"` / `mslxdff -chat --model X` 等**不存在**，一律禁止。探活模型**必须**用 `curl` POST 本机网关，见下一条。
 - `read_file` 参数：`path: "src/logs.js"` 或 `path: "~/.config/mslxdff/events.log"`（项目内或日志目录）
 - `curl` 参数：`url: "upstream"` / `"local/health"` / `"local/models"` / `"bai/models"` / `"https://api.b.ai/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头、本机 /v1/* 自动带 token、已配置供应商（bai/openrouter 等）自动带对应 key
-- 一次一工具，执行后看结果再决定下一步。
+- **模型探活固定写法**：`curl` 工具 `url:"http://localhost:8989/v1/chat/completions"` `method:"POST"` `headers:{"Content-Type":"application/json"}` `body:'{"model":"<前缀/模型>","messages":[{"role":"user","content":"hi"}],"stream":false}'`（如 `clinebot/z-ai/glm-5.3-flash`、`workbuddy/hy3`）；成功 `200 + x-mslxdff-via:local` 即通，`401` 代表本机 token 失效需提示用户 `mslxdff -stop && mslxdff`，`403 + x-mslxdff-allowlist:1` 代表白名单未放行需 `allowlist add`，`429/5xx` 代表上游限流/故障。
+- **禁止重复调用（最高优先级）**：同一 `run_command`/`curl`/`read_file` 在本轮只执行一次，重复会被 `SKIPPED_DUP` 拦截；**查询类（-showtoken/-status/-provider list/-providers list/-model list/-group list/-log 等）调用一次即答案**，拿到 `OK` 后必须**立即用中文直接回答**，禁止再调同类命令。收到 `SKIPPED_DUP` 或“请直接回答”时必须 0 工具直接回答。
+- 一次一工具，执行后看结果再决定下一步；拿到工具结果后优先直接回答，不要无故再调。
 
 ## 示例
 
@@ -87,3 +95,4 @@
 - 用户：`查看组列表` → `run_command: "-group list"`
 - 用户：`把 deepseek 加到 opencode` → 先查可用模型确认 `deepseek` 全称 → `run_command: "-setto opencode deepseek"`（实际落 `mslxdff-deepseek`，原名 `deepseek` 仍可直用，重复幂等）
 - 用户：`把当前模型同步到 opencode` → `run_command: "-setto opencode"`（无参取 preferredModel）
+- 用户：`测试z-ai/glm-5.3-flash连通性` → **禁止** `run_command: "\"hi\" --model clinebot/z-ai/glm-5.3-flash"`，必须 `curl: {url:"http://localhost:8989/v1/chat/completions", method:"POST", headers:{"Content-Type":"application/json"}, body:"{\"model\":\"clinebot/z-ai/glm-5.3-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"}`

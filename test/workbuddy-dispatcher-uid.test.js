@@ -12,6 +12,14 @@ function urlOf(srv){ return `http://127.0.0.1:${srv.address().port}`; }
 async function closeSrv(srv){ await new Promise(r=>srv.close(r)); srv.closeAllConnections?.(); }
 
 test("dispatcher workbuddy/<uid>:model 剥 uid 并透传 workbuddyUid", async()=>{
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { saveProviderAllowedModels } = await import("../src/state.js");
+  const file=mkdtempSync(join(tmpdir(),"mslxdff-wb-uid-"))+"/state.json";
+  const prev=process.env.MSLXDFF_STATE_FILE;
+  process.env.MSLXDFF_STATE_FILE=file;
+  saveProviderAllowedModels("workbuddy",["hy3"],{file});
   let seenUid=null, seenModel=null;
   const wbSrv = await stub((req,res,body)=>{
     seenUid=req.headers["x-user-id"];
@@ -29,10 +37,18 @@ test("dispatcher workbuddy/<uid>:model 剥 uid 并透传 workbuddyUid", async()=
     assert.equal(seenModel,"hy3");
     assert.equal(res.headers.get("x-mslxdff-workbuddy-uid"),"uidB");
     await d.close();
-  } finally { await closeSrv(wbSrv); }
+  } finally { await closeSrv(wbSrv); if(prev) process.env.MSLXDFF_STATE_FILE=prev; else delete process.env.MSLXDFF_STATE_FILE; }
 });
 
 test("dispatcher header x-mslxdff-workbuddy-uid 优先于 model 前缀", async()=>{
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { saveProviderAllowedModels } = await import("../src/state.js");
+  const file=mkdtempSync(join(tmpdir(),"mslxdff-wb-uid-"))+"/state.json";
+  const prev=process.env.MSLXDFF_STATE_FILE;
+  process.env.MSLXDFF_STATE_FILE=file;
+  saveProviderAllowedModels("workbuddy",["hy3"],{file});
   let seenUid=null;
   const wbSrv = await stub((req,res)=>{
     seenUid=req.headers["x-user-id"];
@@ -47,7 +63,7 @@ test("dispatcher header x-mslxdff-workbuddy-uid 优先于 model 前缀", async()
     const res=await d.chat({model:"workbuddy/uidA:hy3", messages:[]}, {workbuddyUid:"uidB"});
     assert.equal(seenUid,"uidB");
     await d.close();
-  } finally { await closeSrv(wbSrv); }
+  } finally { await closeSrv(wbSrv); if(prev) process.env.MSLXDFF_STATE_FILE=prev; else delete process.env.MSLXDFF_STATE_FILE; }
 });
 
 test("dispatcher workbuddy allowlist 仍对剥后 raw 生效", async()=>{

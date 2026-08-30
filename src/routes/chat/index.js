@@ -11,6 +11,7 @@ import { handleLocalRelay } from "./local-handler.js";
 import { handlePeerRelay } from "./peer-handler.js";
 import { handleBroadbandRelay } from "./broadband-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "./exhausted-handler.js";
+import { normalizeFullId, getModelAlias } from "../../providers/model-id.js";
 
 export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHops, groups, bus, token, plugins }) {
   let body;
@@ -40,7 +41,13 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
   const workbuddyUid = (req.headers["x-mslxdff-workbuddy-uid"] || req.headers["x-workbuddy-uid"] || "").toString().trim();
   const lockModel = req.headers["x-mslxdff-model-lock"] || "";
   const rawModel = body.model || "";
-  const normalizedRequested = normalizeModel(lockModel || rawModel || "");
+  let normalizedRequested = normalizeModel(lockModel || rawModel || "");
+  // WorkBuddy 别名还原：clinebot-z-ai-glm-5.3-flash → clinebot/z-ai/glm-5.3-flash
+  const aliasResolved = getModelAlias(normalizedRequested);
+  if (aliasResolved) {
+    normalizedRequested = aliasResolved;
+    body = { ...body, model: aliasResolved };
+  }
   // alias 还原：mslxdff-deepseek -> deepseek（原名仍兼容，双向支持 mslxdff/mslxdff-deepseek 与裸 mslxdff-deepseek/裸 deepseek）
   let requested = normalizedRequested;
   let aliasInfo = null;
@@ -118,7 +125,7 @@ export async function chatHandler({ req, res, upstream, auto, logs, peers, maxHo
     for (const e of sel.errors) evt("plugin-hook-error", { reqId, hook: "model:select", plugin: e.plugin, error: e.error });
   }
 
-  const handlerCtx = { reqId, model: null, body, hops, peers, plugins, evt, logError, logCall };
+  const handlerCtx = { reqId, model: null, body, hops, peers, plugins, evt, logError, logCall, logs };
 
   let lastErr = null;
   for (let idx = 0; idx < order.length; idx++) {

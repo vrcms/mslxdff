@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.58",
+  "version": "0.1.60",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node bin/mslxdff.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "docs:check": "node scripts/docs-check.js"
   },
   "engines": {

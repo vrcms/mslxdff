@@ -1,5 +1,5 @@
 import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
-import { isModelAllowed, loadProviderAllowedModels } from "../state.js";
+import { isModelAllowed, loadProviderAllowedModels, loadProviderAllowAnyModels } from "../state.js";
 
 // 多供应商 dispatcher：把多个 Provider 聚合成一个 `upstream` 形状（chat/preheat/close），
 // 按 body.model 的前缀路由到对应供应商，转发上游前剥掉前缀只发原始 id。
@@ -59,7 +59,10 @@ export function createProviderDispatcher(providers = []) {
         list = [];
       }
       const allowed = loadProviderAllowedModels(p.id);
+      const allowAny = loadProviderAllowAnyModels(p.id);
       const allowedSet = allowed.length ? new Set(allowed) : null;
+      // 空名单且不允许任意模型 => 该供应商不暴露任何模型（安全默认）
+      if (!allowedSet && !allowAny) continue;
       for (const m of list) {
         if (!m || !m.id) continue;
         if (seen.has(m.id)) continue;
