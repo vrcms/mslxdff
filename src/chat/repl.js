@@ -59,6 +59,7 @@ async function runAgentTurn(userText, messages) {
   messages.push({ role: "user", content: userText });
   let loops = 0;
   let lastModel = null;
+  let lastProvider = null;
   let lastUsage = null;
   let lastFallback = false;
   let lastFallbackGateway = false;
@@ -105,6 +106,7 @@ async function runAgentTurn(userText, messages) {
       return { text: err, model: null, latency: lastLatency, usage: null, fallback: false, ok: false };
     }
     lastModel = res.model;
+    lastProvider = res.provider || null;
     lastUsage = res.usage || null;
     lastFallback = !!res.fallback;
     lastFallbackGateway = !!res.fallbackGateway || !!res.viaGateway;
@@ -123,7 +125,7 @@ async function runAgentTurn(userText, messages) {
       if (lastFallbackGateway) note = "\n\x1b[90m[注：mimo/big-pickle 均不可用，已自动切本地网关 auto（:8989）]\x1b[0m";
       else if (lastFallback) note = "\n\x1b[90m[注：mimo 不可用，已用 big-pickle]\x1b[0m";
       trace(`[turn] 完成 总计 ${totalMs}ms · LLM ${lastLatency}ms · 0 工具${lastFallbackGateway ? " · gateway-fallback" : ""}`);
-      return { text: text + note, model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, fallbackGateway: lastFallbackGateway, ok: true, totalMs };
+      return { text: text + note, model: lastModel, provider: lastProvider, latency: lastLatency, usage: lastUsage, fallback: lastFallback, fallbackGateway: lastFallbackGateway, ok: true, totalMs };
     }
     const calls = toolCalls.length ? toolCalls : [{ id: "fallback-1", function: { name: "run_command", arguments: JSON.stringify({ command: fallbackCmd }) } }];
     messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: c.function })) });
@@ -217,7 +219,7 @@ async function runAgentTurn(userText, messages) {
         messages.push({ role: "assistant", content: synth });
         const totalMs = Math.round(performance.now() - t0);
         trace(`[turn] 提前结束（重复阈值） 总计 ${totalMs}ms`);
-        return { text: synth, model: lastModel || "local", latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
+        return { text: synth, model: lastModel || "local", provider: lastProvider, latency: lastLatency, usage: lastUsage, fallback: lastFallback, ok: true, totalMs };
       }
     }
     const toolsMs = Math.round(performance.now() - tTools);
@@ -228,12 +230,14 @@ async function runAgentTurn(userText, messages) {
   return { text: "（工具调用次数已达上限，已停止）", model: lastModel, latency: lastLatency, usage: lastUsage, fallback: lastFallback, fallbackGateway: lastFallbackGateway, ok: false };
 }
 
-function printFooter({ model, latency, usage, totalMs, fallback, fallbackGateway, viaGateway }) {
+function printFooter({ model, provider, latency, usage, totalMs, fallback, fallbackGateway, viaGateway }) {
   const dim = "\x1b[90m";
   const rst = "\x1b[0m";
   let gw = null;
   try { gw = collectStats(); } catch {}
-  const modelLabel = model ? (fallbackGateway || viaGateway ? `${model} (gateway auto)` : model) : "—";
+  const prov = provider && provider !== "opencode" ? `${provider}/` : "";
+  const baseLabel = model ? `${prov}${model}` : "—";
+  const modelLabel = model ? (fallbackGateway || viaGateway ? `${baseLabel} (gateway auto)` : baseLabel) : "—";
   const latLabel = latency ? `${latency}ms` : "—";
   const totalLabel = totalMs ? ` · 总耗时 ${totalMs}ms` : "";
   const tokLabel = usage ? ` · tokens ${usage.prompt_tokens ?? "?"}→${usage.completion_tokens ?? "?"}` : "";

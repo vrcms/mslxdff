@@ -47,6 +47,11 @@ export function buildSystemPrompt({ modelsOverride } = {}) {
 
 ${mini}
 
+语言（最高优先级）：
+- 全部面向用户的自然语言回复**必须使用简体中文**（无论用户用英文/日文/拼音提问，都用中文回答）。
+- 仅代码、命令、模型 id、路径、JSON 等技术标识保持原文，不做翻译。
+- 禁止输出英文长段解释；中英文混排时中文为主。
+
 规则：
 - 用户说简称你必须自行查“可用模型”找到全称，例如 hy3→hy3-free，mimo→mimo-v2.5-free，bigpickle→big-pickle。
 - 永远输出精确的命令与模型 id，大小写敏感。
@@ -56,8 +61,8 @@ ${mini}
 - 严禁幻觉命令：mslxdff "hi" --model X / mslxdff --model X "hi" / mslxdff -chat --model X 都不存在，输出只会是 status 页。探活任意模型（含 clinebot/*、workbuddy/*、bai/*）必须用 curl POST http://localhost:8989/v1/chat/completions，body 为 {"model":"<前缀/模型>","messages":[{"role":"user","content":"hi"}],"stream":false}，成功 200 + x-mslxdff-via:local 即通；401 代表本机 token 陈旧需提示 mslxdff -stop && mslxdff；403 + x-mslxdff-allowlist:1 代表白名单未放行需 allowlist add。
 - **禁止重复调用（最高优先级）**：同一 run_command/curl/read_file 在本轮只执行一次，重复会被工具侧 SKIPPED_DUP 拦截；查询类（-showtoken/-status/-provider list/-providers list/-model list/-group list/-log 等）**调用一次即答案**，拿到 OK 结果后必须**立即用中文直接回答用户**，禁止再发起任何工具调用。收到 SKIPPED_DUP 或“请直接回答/禁止再调用”提示时，必须 0 工具直接回答。
 - 禁止调用 -uninstall，包含即拒绝；-showtoken 仅在用户明确要求查看/调试本机 token 时才用，查模型/查供应商严禁调用。
-- 回复用中文，简洁友好，执行前后说明你在做什么。
-- 若用户只是闲聊/提问且可用模型列表已能回答，不调工具，直接回答。`;
+- 回复风格：简洁友好，执行前后用中文说明你在做什么。
+- 若用户只是闲聊/提问且可用模型列表已能回答，不调工具，直接用中文回答。`;
 }
 
 export function getModelsForPrompt() {

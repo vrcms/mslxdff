@@ -1313,7 +1313,7 @@ if (args.includes("-provider") || args.includes("--provider")) {
     console.error(`       mslxdff -provider ${id} allowAny on|off   (empty allowlist = block or allow all)`);
     process.exit(1);
   }
-  if (sub === "models" || sub === "list-models" || sub === "ls") {
+  if (sub === "models" || sub === "show-models" || sub === "list-models" || sub === "ls") {
     const wantsJson = args.includes("--json") || args.includes("-json");
     const cfg = loadProviderConfig(id);
     // opencode: use aggregated cache + provider-specific? For opencode, show bare ids from cache
@@ -1354,20 +1354,57 @@ if (args.includes("-provider") || args.includes("--provider")) {
         provider = createGenericProvider({ id, baseUrl, apiKeys: keys, file: defaultStateFile() });
       }
       const all = await provider.listModels();
-      // apply allowlist filtering mirroring dispatcher
-      const filtered = all.filter((m) => {
-        const raw = String(m.id || "").includes("/") ? String(m.id).split("/").slice(1).join("/") : String(m.id);
-        // for workbuddy, raw is like hy3, for generic it's raw id without prefix? joinModelId adds prefix, so need to extract raw
-        const checkRaw = m.id.startsWith(`${id}/`) ? m.id.slice(id.length + 1) : raw;
+      // show 全部上游模型，仅标注是否被 allowlist 放行（不拦截展示）
+      const markAllowed = (mid) => {
+        const raw = String(mid || "").includes("/") ? String(mid).split("/").slice(1).join("/") : String(mid);
+        const checkRaw = mid.startsWith(`${id}/`) ? mid.slice(id.length + 1) : raw;
         return isModelAllowed(id, checkRaw);
-      });
+      };
       if (wantsJson) {
+        // --json 仍按 allowlist 过滤（给脚本消费可用模型）
+        const filtered = all.filter((m) => markAllowed(m.id));
         console.log(JSON.stringify({ object: "list", data: filtered }, null, 2));
       } else {
-        console.log(`${id} models (${filtered.length}${filtered.length !== all.length ? `/${all.length}` : ""}):`);
-        for (const m of filtered) console.log(`  ${m.id}`);
-        if (!filtered.length && all.length) console.log(`  (all ${all.length} filtered by allowlist — use: mslxdff -provider ${id} allowlist list)`);
+        const allowedCount = all.filter((m) => markAllowed(m.id)).length;
+        console.log(`${id} models (${all.length} total, ${allowedCount} ✓ allowed${allowedCount !== all.length ? `, ${all.length - allowedCount} x blocked by allowlist` : ""}):`);
+        const fmtPrice = (m) => {
+          const c = String(m.credits || "").trim();
+          if (c) {
+            // "x0.00 credits" / "x0.00" → 统一成 "x0.00"
+            const m0 = c.match(/x\s*([\d.]+)/i);
+            if (m0) return `x${m0[1]}`;
+            return c.replace(/\s*credits\s*/gi, "").trim().replace(/\s+/g, " ");
+          }
+          if (m.pricing && typeof m.pricing === "object") {
+            const p = m.pricing.prompt ?? m.pricing.input ?? m.pricing.completion ?? "";
+            if (p) return String(p);
+          }
+          if (m.price != null && String(m.price).trim()) return String(m.price).trim();
+          if (String(m.id).endsWith("/auto")) return "浮动";
+          return "—";
+        };
+        const fmtBadge = (m) => {
+          const tags = Array.isArray(m.tags) ? m.tags : [];
+          const b = tags.find((t) => String(t).includes("限时免费") || String(t).toLowerCase().includes("free"));
+          if (!b) return "";
+          const part = String(b).split(":")[1];
+          return part ? ` [${part}]` : ` [${b}]`;
+        };
+        // 按 credits 升序已在 provider 排好序，展示时对齐价格列便于分辨
+        const idW = Math.max(22, ...all.map((m) => String(m.id).length)) + 2;
+        const priceW = Math.max(6, ...all.map((m) => fmtPrice(m).length)) + 2;
+        for (const m of all) {
+          const ok = markAllowed(m.id);
+          const price = fmtPrice(m);
+          const badge = fmtBadge(m);
+          const name = m.name ? ` ${m.name}` : "";
+          const blocked = ok ? "" : "  [blocked — allowlist]";
+          const line = `  ${ok ? "✓" : "x"} ${String(m.id).padEnd(idW)}${String(price).padEnd(priceW)}${name}${badge}${blocked}`;
+          console.log(line);
+        }
         if (!all.length) console.log(`  (no models — check baseUrl/keys or try: curl ${baseUrl}/models)`);
+        else if (allowedCount === 0) console.log(`  tip: all blocked — mslxdff -provider ${id} allowAny on  或  allowlist set <model...>`);
+        else if (allowedCount !== all.length) console.log(`  tip: blocked 仅影响 /v1/chat 调用，展示已全量列出`);
       }
       try { await provider.close?.(); } catch {}
     } catch (e) {
