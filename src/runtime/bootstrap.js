@@ -14,9 +14,9 @@ import { logDir, appendCall, appendError, appendEvent } from "../logs.js";
 import { loadPlugins, runHook, resolvePluginDirs } from "../plugins.js";
 import { createOpenCodeProvider } from "../providers/opencode.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderConfigs } from "../state.js";
-import { effectiveHost, refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerHeatMs, maxHopsValue, groupSyncIntervalMs, autoUpdateIntervalMs, banWindowMs, banThreshold } from "./policy.js";
-import { fmtEvent } from "./format.js";
-import { errMsg, npmCmd, run } from "./util.js";
+import { effectiveHost, refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerHeatMs, maxHopsValue, groupSyncIntervalMs, autoUpdateIntervalMs, banWindowMs, banThreshold } from "../cli/policy.js";
+import { fmtEvent } from "../cli/format.js";
+import { errMsg, npmCmd, run } from "../cli/util.js";
 import { loadGroupsJoined } from "../state.js";
 import { writePid } from "../daemon.js";
 import { resolvePort } from "../server.js";
@@ -230,7 +230,7 @@ export async function startDaemonMain(VERSION) {
   } catch {}
 
   // group sync
-  const { syncAllJoinedGroups } = await import("./group-helpers.js");
+  const { syncAllJoinedGroups } = await import("../cli/group-helpers.js");
   syncAllJoinedGroups({ peers, groups })
     .then((results) => {
       for (const r of results) {
@@ -379,7 +379,7 @@ export async function startDaemonMain(VERSION) {
       emitAutoUpdate("auto-update-noop", { current: VERSION, latest });
       return;
     }
-    const { compareSemver } = await import("./policy.js");
+    const { compareSemver } = await import("../cli/policy.js");
     if (compareSemver(latest, VERSION) <= 0) {
       emitAutoUpdate("auto-update-noop", { current: VERSION, latest, reason: "not newer" });
       return;
@@ -397,7 +397,7 @@ export async function startDaemonMain(VERSION) {
     emitAutoUpdate("auto-update-restarting", { current: VERSION, latest });
     const { stopDaemon, startDaemon } = await import("../daemon.js");
     try { stopDaemon(); } catch (e) { emitAutoUpdate("auto-update-stop-failed", { error: errMsg(e) }); }
-    const { waitForHealth } = await import("./policy.js");
+    const { waitForHealth } = await import("../cli/policy.js");
     const newPid = startDaemon([]);
     await waitForHealth(resolvePort(), 8000);
     console.log(`auto-update: restarted as v${latest} (pid ${newPid})`);
