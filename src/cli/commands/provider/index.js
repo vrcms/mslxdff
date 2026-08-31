@@ -181,6 +181,8 @@ export async function handleProvider(args) {
     console.log(`  allowlist: mslxdff -provider opencode allowlist [list|set|add|remove|clear]  — restrict models (empty=allow all)`);
     process.exit(0);
   }
+  const { handleClineLogin } = await import("./cline-login.js");
+  if (await handleClineLogin(id, sub)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");

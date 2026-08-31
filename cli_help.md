@@ -65,6 +65,7 @@
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
+| `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -574,6 +575,18 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider workbuddy bench
   mslxdff -provider workbuddy bench --json | jq .
   mslxdff -provider myapi bench --prompt "hi" --max-tokens 32 --timeout 30000
+  ```
+
+#### `mslxdff -provider clinebot login`（Cline 免 403：WorkOS 设备授权拿 refreshToken）
+
+- **语法**：`mslxdff -provider clinebot login`（别名 `auth`/`oauth`；`cline` 同）
+- **作用**：`clinebot` 供应商默认直连 `api.cline.bot` 用 `Bearer sk_xxx` 会遇 `403 only available via Cline product surfaces`（服务端强校验 Cline 客户端指纹）。本命令走 Cline 官方 WorkOS 设备授权流：打印浏览器授权链接 → 你登录一次 → 自动 `POST /api/v1/auth/register` 换 `refreshToken` → **落盘 `providerConfigs.{cline,clinebot}.keys`**。此后 `clinebot` 所有请求自动走：`refreshToken → POST /api/v1/auth/refresh → workos:accessToken` + 完整指纹头（`User-Agent: Cline/3.0.47`、`X-CLIENT-TYPE: cline-sdk`、`X-PLATFORM: terminal`、`X-Task-ID` 等），`deepseek/deepseek-v4-flash` 不再 403；免费通道自动强制 `stream:true` 并聚合返回（避免 `500 empty response content`）。
+- **多账号**：重复 `login` 追加；`429 Daily free limit reached`/空响应自动解析冷却（`Try again in Xh Xm`）并切换下一账号，800ms 串行队列防并发空响应。
+- **示例**：
+  ```bash
+  mslxdff -provider clinebot login        # 浏览器授权 → token 落盘
+  mslxdff -restart                         # 重启使新账号生效
+  mslxdff -provider clinebot bench --json  # 测速 deepseek-v4-flash 是否 200
   ```
 
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）

@@ -44,7 +44,7 @@ export function formatReport(results, { json = false } = {}) {
     else if (r.charsPerSec != null) speed = `${r.charsPerSec} 字/秒`;
     speed = pad(speed, 11, "right");
     const tok = r.tokens?.completion != null ? String(r.tokens.completion) : r.chars != null ? String(r.chars) : "—";
-    const note = r.ok ? "" : (r.error || "").slice(0, 28);
+    const note = r.ok ? "" : (r.error || "").slice(0, 50);
     lines.push(`${mark}${id} ${label} ${ttfb} ${total} ${speed} ${pad(tok, 6, "right")}  ${note}`);
   }
   lines.push("─".repeat(84));
