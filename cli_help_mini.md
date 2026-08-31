@@ -42,6 +42,7 @@
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
 | 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`--json` 供脚本） |
+| 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测已勾选 allowlist 的模型速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |

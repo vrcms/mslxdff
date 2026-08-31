@@ -1,0 +1,68 @@
+import { joinUrl } from "../providers/base.js";
+
+function normalizeModelsPayload(json) {
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.data)) return json.data;
+  if (Array.isArray(json.models)) return json.models;
+  if (json.data && typeof json.data === "object" && Array.isArray(json.data.data)) return json.data.data;
+  return [];
+}
+
+function toModelId(m) {
+  if (!m) return "";
+  if (typeof m === "string") return m;
+  if (typeof m.id === "string") return m.id;
+  if (typeof m.model === "string") return m.model;
+  if (typeof m.name === "string") return m.name;
+  return "";
+}
+
+export async function probeModels({
+  baseUrl,
+  modelsPath,
+  chatPath,
+  headers = {},
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 8000,
+} = {}) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  if (!base) return { ok: false, error: "missing baseUrl", tried: [], data: [] };
+  const candidates = [];
+  const seen = new Set();
+  const push = (p) => {
+    const s = String(p || "").trim();
+    if (!s) return;
+    const norm = s.startsWith("/") ? s : `/${s}`;
+    if (!seen.has(norm)) { seen.add(norm); candidates.push(norm); }
+  };
+  if (modelsPath) push(modelsPath);
+  // 通用回退：/v1/models 与 /models
+  push("/v1/models");
+  push("/models");
+  // workbuddy 异形已在 defaultModelsPath 注入，若仍未命中则 candidates 已含
+  const tried = [];
+  let lastError = "";
+  for (const p of candidates) {
+    const url = joinUrl(base, p);
+    tried.push(url);
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(new Error(`probe timeout ${timeoutMs}ms`)), timeoutMs);
+      let res;
+      try {
+        res = await fetchImpl(url, { headers, signal: controller.signal });
+      } finally { clearTimeout(t); }
+      if (res instanceof Error) { lastError = res.message || String(res); continue; }
+      if (!res.ok) { lastError = `HTTP ${res.status}`; continue; }
+      let json = {};
+      try { json = await res.json(); } catch { json = {}; }
+      const raw = normalizeModelsPayload(json);
+      const data = raw.map((m) => ({ id: toModelId(m), raw: m })).filter((x) => x.id).map((x) => ({ id: x.id, ...x.raw }));
+      return { ok: true, data, tried, url, rawCount: raw.length };
+    } catch (e) {
+      lastError = e?.message || String(e);
+    }
+  }
+  return { ok: false, error: lastError || "all probes failed", tried, data: [] };
+}
