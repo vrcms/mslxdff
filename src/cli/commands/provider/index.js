@@ -187,6 +187,8 @@ export async function handleProvider(args) {
   if (await handleProviderAllowlist(id, sub, rest)) return true;
   const { handleProviderModels } = await import("./models.js");
   if (await handleProviderModels(id, sub, args, rest)) return true;
+  const { handleProviderBench } = await import("./bench.js");
+  if (await handleProviderBench(id, sub, rest, args)) return true;
   const { handleProviderKeys } = await import("./keys.js");
   await handleProviderKeys(id, sub, rest, args);
   return true;

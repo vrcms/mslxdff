@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.63`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查）。最后更新：2026-08-30。
+> 适用版本：`>=0.1.68`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速）。最后更新：2026-08-31。
 
 ## 目录
 
@@ -64,6 +64,7 @@
 | `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
+| `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -537,6 +538,41 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider workbuddy models          # 28 个 workbuddy/hy3 ...
   mslxdff -provider clinebot models --json | jq .data[].id
   mslxdff -model list --provider workbuddy    # 同义（见 5. 模型管理）
+  ```
+
+#### `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]`（评估已勾选模型速度，防误烧）
+
+- **语法**：`mslxdff -provider workbuddy bench` / `mslxdff -provider myapi bench --json` / `mslxdff -provider workbuddy bench --prompt hi --max-tokens 32 --timeout 30000`
+- **作用**：**只测已勾选的 `allowlist` 模型**，逐个发最小 `POST <baseUrl><chatPath>` 探针，采集 `TTFB/总耗时/TPS(或字/秒)/tokens/状态` 并表格排序标 `*最快`；空 `allowlist` 时**不发任何 chat**，仅 `GET <baseUrl>/v1/models → GET <baseUrl>/models` 探活并提示 `mslxdff -provider <id> allowlist set <model>`，避免全量 60 个误扣费。`--json` 输出 `[{id, ok, ttfbMs, totalMs, tps, charsPerSec, tokens, error, label}]` 供脚本。
+- **行为**：串行（防 429），`30s` 超时（`AbortSignal.timeout`），`401` 鉴权失败/`402` 余额不足/`429` 限流/`超时` 人话且不中断其余模型，`workbuddy` 自动带 `X-User-Id/X-Domain` 等特化头，通用供应商仅 `Bearer`。
+- **输出**：
+  ```
+  bench workbuddy: 共 2 个已勾选模型，逐个测速（串行，30000ms 超时）...
+    [1/2] hy3 ... OK  TTFB 120ms  总 800ms  42.3 t/s
+    [2/2] hy4-preview ... FAIL 余额不足 (insufficient balance)
+
+  模型                          状态     TTFB   总耗时  速度        tokens  备注
+  ────────────────────────────────────────────────────────────────────────────────
+   * hy3                        成功      120ms    800ms   42.3 t/s      10
+     hy4-preview                余额不足    80ms    200ms        —       —  insufficient balance
+  ────────────────────────────────────────────────────────────────────────────────
+  最快：hy3  TTFB 120ms  总 800ms  42.3 t/s
+  完成：2 个，成功 1，失败 1
+  ```
+  空 allowlist 时：
+  ```
+  provider workbuddy: 未设置 allowlist（allowAny=OFF），不发起测速，仅探活模型列表...
+  尝试：GET https://copilot.tencent.com/console/enterprises/personal/models → ...
+  发现 28 个模型：
+    - hy3
+    - hy4-preview
+  下一步：mslxdff -provider workbuddy allowlist set hy3 hy4-preview
+  ```
+- **示例**：
+  ```bash
+  mslxdff -provider workbuddy bench
+  mslxdff -provider workbuddy bench --json | jq .
+  mslxdff -provider myapi bench --prompt "hi" --max-tokens 32 --timeout 30000
   ```
 
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
