@@ -74,6 +74,7 @@
 | 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
 | 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启 |
 | 自启状态 | `-autostart status` / `--autostart status` | 查看自启状态 |
+| 时区 | `-timezone [set <tz>\|clear\|status]` / `-tz` | 时区配置，默认 `Asia/Shanghai`，可设 `UTC` 等（`MSLXDFF_TZ` 覆盖） |
 | 帮助 | `-help` / `--help` / `-h` | 打印帮助 |
 
 ## 模型说明

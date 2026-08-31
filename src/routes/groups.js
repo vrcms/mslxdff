@@ -1,11 +1,12 @@
 import { clientIp, json, readBody, errMsg } from "./helpers.js";
+import { fmtShanghaiYMDHMS } from "../time.js";
 
 export async function joinHandler({ req, res, groups, token, bans }) {
   if (!groups) return json(res, 501, { error: "Groups service not configured" });
   const ip = clientIp(req);
   const banned = bans?.isBanned(ip);
   if (banned) {
-    return json(res, 403, { error: `banned until ${new Date(banned.until).toISOString()}` });
+    return json(res, 403, { error: `banned until ${fmtShanghaiYMDHMS(banned.until)}` });
   }
   let body;
   try {

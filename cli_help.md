@@ -80,6 +80,7 @@
 | `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
 | `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
+| `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
 | `mslxdff -setto opencode [modelId]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
@@ -703,6 +704,33 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 
 ---
 
+### `-timezone` / `--timezone` / `-tz` / `--tz`（时区配置，默认 Asia/Shanghai）
+
+- **语法**：
+  ```bash
+  mslxdff -timezone                 # 查看当前时区（state + env）
+  mslxdff -timezone set Asia/Shanghai  # 设为上海时间（落盘 state.json）
+  mslxdff -timezone set UTC            # 设为 UTC
+  mslxdff -timezone Asia/Tokyo         # 直接设（set 可省略）
+  mslxdff -timezone clear              # 恢复默认 Asia/Shanghai
+  MSLXDFF_TZ=UTC mslxdff -status       # 临时用 UTC（env 覆盖，不落盘）
+  ```
+- **作用**：统一所有时间展示（`logs`/`rotation.log`/`banned until`/`token createdAt`/`-log`/`-status`/`free` 等）所用时区。`state.json: timezone` 持久化，`MSLXDFF_TZ`（或 `MSLXDFF_TIMEZONE`/`TZ`）环境变量临时覆盖且优先级最高。
+- **校验**：`isValidTimezone` 用 `Intl.DateTimeFormat` 校验，非法则 `无效时区` 并 `exit 1`，示例：`Asia/Shanghai, UTC, America/New_York, Europe/London, Asia/Tokyo`。
+- **生效**：`saveTimezone` 原子写 `state.json`（`0600`），即时生效（下次 `fmtShanghai*` 调用即用新时区）；`clear` 删 `timezone` 字段回退默认。
+- **实现**：`src/state/schemas/timezone.js`（`DEFAULT_TZ=Asia/Shanghai`）+ `src/time.js`（`getTimezone()`→`loadTimezone()`，所有 `fmt*` 统一走 `tzParts`），`src/logs.js`/`rotation-log.js`/`groups.js`/`token.js`/`system.js` 均已改用 `fmtShanghaiYMDHMS/HMS`。
+- **示例**：
+  ```bash
+  mslxdff -timezone
+  # → timezone: Asia/Shanghai
+  #     state: Asia/Shanghai (默认 Asia/Shanghai)
+  #     env  : (未设 MSLXDFF_TZ)
+  mslxdff -timezone set America/New_York
+  # → timezone 已设为: America/New_York
+  ```
+
+---
+
 ## 7. 外部同步（WorkBuddy / opencode）
 
 ### `-setto opencode [modelId]` / `--setto opencode [modelId]`
@@ -941,6 +969,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_PORT` | `8989` | 监听端口（`state.json port` 优先于它；裸 `PORT` 忽略） |
 | `MSLXDFF_HOST` / `MSLXDFF_BIND_HOST` | `0.0.0.0`（宽带成员自动 `127.0.0.1`） | 绑定 host（`src/server.js effectiveHost()`） |
 | `MSLXDFF_STATE_FILE` | `~/.config/mslxdff/state.json` | state 持久化路径 |
+| `MSLXDFF_TZ` / `MSLXDFF_TIMEZONE` / `TZ` | `Asia/Shanghai` | 时区（`state.json: timezone` 持久化，env 临时覆盖，`Intl` 校验；所有时间展示统一走此时区） |
 | `MSLXDFF_DAEMON_DIR` | 随 state 派生（`dirname(stateFile)`） | daemon pid/log/models 目录 |
 | `MSLXDFF_STATE_FLUSH_MS` | `500` | 热数据批量刷盘间隔，`0` 则同步刷（测试用） |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | 默认供应商上游 |
@@ -1013,7 +1042,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   ```jsonc
   {
     "token": "64 hex",
-    "createdAt": "2026-08-27T00:00:00.000Z",
+    "createdAt": "2026-08-27 08:00:00",
+    "timezone": "Asia/Shanghai",
     "port": 8989,
     "preferredModel": "big-pickle",
     "modelPicks": ["big-pickle", "openrouter/..."],

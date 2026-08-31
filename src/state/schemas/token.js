@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { defaultStateFile, tokenFile, generateToken, readState, writeStateImmediate, getEntry } from "../store.js";
+import { fmtShanghaiYMDHMS } from "../../time.js";
 
 function syncTokenFile(token, file) {
   try {
@@ -29,13 +30,13 @@ export async function loadToken({ file = defaultStateFile() } = {}) {
     } catch {}
   }
   const tok = generateToken();
-  const saved = writeStateImmediate(file, { token: tok, createdAt: new Date().toISOString() }).token;
+  const saved = writeStateImmediate(file, { token: tok, createdAt: fmtShanghaiYMDHMS(new Date()) }).token;
   syncTokenFile(saved, file);
   return { token: saved, created: true };
 }
 
 export async function refreshToken({ file = defaultStateFile() } = {}) {
-  const tok = writeStateImmediate(file, { token: generateToken(), createdAt: new Date().toISOString() }).token;
+  const tok = writeStateImmediate(file, { token: generateToken(), createdAt: fmtShanghaiYMDHMS(new Date()) }).token;
   syncTokenFile(tok, file);
   return tok;
 }
