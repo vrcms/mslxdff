@@ -13,6 +13,7 @@ import { refreshGroupMembers } from "../groups.js";
 import { fmtShanghaiYMDHM } from "../time.js";
 import { fmtStatus, fmtUptime, fmtTs } from "./format.js";
 import { compareSemver } from "./policy.js";
+import { buildProviderRows, formatProviderRow } from "./provider-row.js";
 
 export async function printStatus(VERSION) {
   const daemon = readPid();
@@ -50,61 +51,11 @@ export async function printStatus(VERSION) {
   } catch {}
 
   try {
-    const configs = loadProviderConfigs();
-    const upstreamBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
-    const providerRows = [];
-    const opAllowed = loadProviderAllowedModels("opencode");
-    providerRows.push({ id: "opencode", enabled: true, baseUrl: upstreamBase, keys: [], allowed: opAllowed, share: false, note: "built-in, no key, cannot share" });
-    const genericIds = new Set(Object.keys(configs).filter((id) => id !== "opencode"));
-    try {
-      const raw = JSON.parse(readFileSync(stateFile, "utf8"));
-      const pk = raw.providerKeys || {};
-      for (const id of Object.keys(pk)) if (id !== "opencode") genericIds.add(id);
-      const cfgRaw = raw.providerConfigs || {};
-      for (const id of Object.keys(cfgRaw)) if (id !== "opencode") genericIds.add(id);
-    } catch {}
-    for (const k of Object.keys(process.env)) {
-      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
-      if (m) {
-        const id = m[1].toLowerCase().replace(/__/g, "-");
-        if (id !== "opencode") genericIds.add(id);
-      }
-    }
-    for (const gid of [...genericIds].sort()) {
-      const cfg = configs[gid];
-      const keys = loadProviderKeys(gid);
-      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : "");
-      const share = loadProviderShareKeys(gid);
-      const allowed = loadProviderAllowedModels(gid);
-      let enabled = Boolean(baseUrl && keys.length) || (gid === "openrouter" && keys.length > 0);
-      const auths = gid === "workbuddy" ? (loadProviderAuths(gid) || []) : [];
-      let note = "";
-      const isWorkbuddyStub = gid === "workbuddy" && (keys.includes("k-new") || baseUrl.includes("127.0.0.1") || (keys.length === 1 && keys[0].length < 20));
-      if (isWorkbuddyStub) {
-        enabled = false;
-        note = "测试桩 (key=k-new, baseUrl=127.0.0.1) — 请重跑 node workbuddy-token-auto.js 写入真实 JWT";
-      } else if (!enabled) {
-        if (!baseUrl && !keys.length) note = "no baseUrl, no keys";
-        else if (!baseUrl) note = "missing baseUrl";
-        else if (!keys.length) note = "no keys";
-      } else if (gid === "workbuddy" && auths.length && auths.length !== keys.length) {
-        note = `${auths.length} auth(s) / ${keys.length} key(s) — 数量不一致请重跑 workbuddy-token-auto.js`;
-      }
-      providerRows.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, allowed, share, note, authCount: auths.length });
-    }
+    const providerRows = buildProviderRows({});
     const enabledCount = providerRows.filter((r) => r.enabled).length;
     console.log(`\nupstream providers (${providerRows.length}, ${enabledCount} enabled)  —  mslxdff -providers list 查看详情`);
     for (const p of providerRows) {
-      const dot = p.enabled ? "●" : "○";
-      const state = p.enabled ? "enabled " : "disabled";
-      let keysInfo;
-      if (p.id === "opencode") keysInfo = "无需 key (内置)";
-      else keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 3)}…${k.slice(-3)}`).join(", ")}` : "0 keys";
-      const authInfo = p.authCount ? ` ${p.authCount} acc` : "";
-      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 2).join(",")}${p.allowed.length > 2 ? "…" : ""})` : "allow=all";
-      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
-      const note = p.note ? `  (${p.note})` : "";
-      console.log(`  ${dot} ${p.id.padEnd(12)} ${state}  ${keysInfo}${authInfo}  ${allowInfo.padEnd(18)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
+      console.log(formatProviderRow(p));
     }
     if (enabledCount === 1 && providerRows.length === 1) {
       console.log(`  (仅 opencode 内置免费通道；按需加：mslxdff -provider add bai https://api.b.ai/v1 <key>  或  node workbuddy-token-auto.js)`);

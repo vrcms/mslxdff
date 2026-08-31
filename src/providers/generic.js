@@ -29,6 +29,7 @@ export function createGenericProvider({
   },
   fetchImpl,
   headers: extraHeaders,
+  mapModel,
   noAgent = false,
   file,
 } = {}) {
@@ -79,6 +80,7 @@ export function createGenericProvider({
   const { listModels } = createListModelsRunner({
     id, ring, dispatcher, fetchImpl,
     getUrl: () => joinUrl(resolvedBase, resolvedModelsPath),
+    mapModel,
   });
 
   const { preheat } = createPreheatRunner({
