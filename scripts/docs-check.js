@@ -56,5 +56,17 @@ if (existsSync(agFile)) {
   else fail("AGENTS.md 未声明 ARCHITECTURE.md 变更契约或 npm run docs:check");
 }
 
+// 4. 体积检查：>20KB 强制失败，>10KB 警告（先拆后写）
+// docs:check 主流程不因体积直接失败（避免阻塞未拆完的增量交付），但会高亮提醒；
+// 直接跑 node scripts/check-file-size.js 仍以 exit 1 强拦 CI。
+try {
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(process.execPath, [join(root, "scripts", "check-file-size.js")], { stdio: "inherit" });
+  if (r.status === 0) ok("体积检查通过（src/**/*.js >20KB 零容忍）");
+  else console.warn("⚠ 体积检查有超标（>20KB 必须拆，>10KB 建议拆）— 见上，下版优先，暂不阻塞 docs:check");
+} catch (e) {
+  fail(`体积检查执行失败: ${String(e?.message || e)}`);
+}
+
 console.log(failures ? `\n${failures} 项检查失败 — 请同步文档（见 docs/ARCHITECTURE.md §1 变更契约）` : "\n文档就绪检查全部通过");
 process.exit(failures ? 1 : 0);
