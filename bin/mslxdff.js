@@ -62,6 +62,35 @@ if (args.includes("-stop") || args.includes("--stop")) {
   process.exit(0);
 }
 
+if ((args.includes("-restart") || args.includes("--restart")) && !process.env.MSLXDFF_DAEMON) {
+  const pid = readPid();
+  const alive = pid ? isPidAlive(pid) : false;
+  if (alive) {
+    console.log(`restarting daemon (pid ${pid})...`);
+    stopDaemon();
+    await new Promise((r) => setTimeout(r, 300));
+  } else if (pid) {
+    console.log(`daemon pid ${pid} is stale (not running) — starting fresh...`);
+    try { stopDaemon(); } catch {}
+  } else {
+    console.log(`daemon not running — starting...`);
+  }
+  const port = effectivePort();
+  const spawnedPid = startDaemon([]);
+  await waitForHealth(port, 4000);
+  let ok = false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1200) });
+    ok = r.ok;
+  } catch {}
+  if (ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);
+  else console.log(`mslxdff v${VERSION} restarted (pid ${spawnedPid}) — health check pending (http://127.0.0.1:${port}/health)`);
+  console.log(`endpoint:   http://localhost:${port}/v1`);
+  console.log(`log:        ${logFile()}`);
+  console.log(`pid:        ${pidFile()}`);
+  process.exit(0);
+}
+
 if (args.includes("-uninstall") || args.includes("--uninstall")) {
   const { stopped, pid } = stopDaemon();
   if (stopped) console.log(`mslxdff daemon stopped (pid ${pid})`);
@@ -2015,9 +2044,8 @@ async function syncAllJoinedGroups({ peers, groups }) {
   return results;
 }
 
-// Upgrade-aware handling of a running daemon: keep it when it already runs
-// our version, otherwise stop it so the spawn below takes over. Cleans up
-// stale pid files (daemon died without -stop).
+// Upgrade-aware handling of a running daemon: only upgrade, never downgrade.
+// Keeps a newer daemon running — low-version CLI won't clobber a higher daemon.
 function stopDaemonIfOutdated() {
   const pid = readPid();
   if (!pid) return;
@@ -2026,12 +2054,18 @@ function stopDaemonIfOutdated() {
     return;
   }
   const runningVersion = readPidVersion();
+  if (!runningVersion) {
+    console.log(`daemon version unknown — restarting with v${VERSION}...`);
+    stopDaemon();
+    return;
+  }
   if (runningVersion === VERSION) return;
-  console.log(
-    runningVersion
-      ? `daemon running v${runningVersion} — upgrading to v${VERSION}, restarting...`
-      : `daemon version unknown — restarting with v${VERSION}...`
-  );
+  const cmp = compareSemver(VERSION, runningVersion);
+  if (cmp <= 0) {
+    console.log(`daemon running v${runningVersion} — keeping v${runningVersion} (local v${VERSION} is lower, not downgrading)`);
+    return;
+  }
+  console.log(`daemon running v${runningVersion} — upgrading to v${VERSION}, restarting...`);
   stopDaemon();
 }
 
@@ -2063,6 +2097,16 @@ if (args.includes("-d") || args.includes("--daemon")) {
     // foreground: spawn the detached background instance, then wait for health
     const port = effectivePort();
     stopDaemonIfOutdated();
+    // if a newer daemon was kept alive, reuse it instead of spawning a downgrade
+    const keptPid = readPid();
+    if (keptPid && isPidAlive(keptPid)) {
+      const rv = readPidVersion();
+      if (rv && compareSemver(rv, VERSION) > 0) {
+        await printStatus();
+        console.log(`daemon already running newer v${rv} — not starting v${VERSION}`);
+        process.exit(0);
+      }
+    }
     const spawnedPid = startDaemon(args.filter((a) => a !== "-d" && a !== "--daemon"));
     await waitForHealth(port, 4000);
     console.log(`mslxdff daemon started (pid ${spawnedPid})`);
@@ -2075,15 +2119,30 @@ if (args.includes("-d") || args.includes("--daemon")) {
 
 // Bare run: show status + help when the daemon is already up; otherwise spawn it
 // as a background daemon and exit — never holds the terminal (npx-friendly).
+// Only reuses daemon when its version >= local (never auto-downgrade).
 if (!process.env.MSLXDFF_DAEMON) {
   const pid = readPid();
-  if (pid && isPidAlive(pid) && readPidVersion() === VERSION) {
-    await printStatus();
-    printHelp();
-    process.exit(0);
+  if (pid && isPidAlive(pid)) {
+    const rv = readPidVersion();
+    if (rv && compareSemver(rv, VERSION) >= 0) {
+      await printStatus();
+      printHelp();
+      process.exit(0);
+    }
+    // rv null/older → fall through to stopDaemonIfOutdated → upgrade path
   }
   const port = effectivePort();
   stopDaemonIfOutdated();
+  // after stopDaemonIfOutdated, daemon may still be alive (newer version kept) — reuse it
+  const pid2 = readPid();
+  if (pid2 && isPidAlive(pid2)) {
+    const rv2 = readPidVersion();
+    if (rv2 && compareSemver(rv2, VERSION) >= 0) {
+      await printStatus();
+      printHelp();
+      process.exit(0);
+    }
+  }
   const spawnedPid = startDaemon([]);
   await waitForHealth(port, 4000);
   console.log(`mslxdff v${VERSION} started as a background daemon (pid ${spawnedPid})`);
@@ -2611,6 +2670,7 @@ Usage:
   mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
   mslxdff -stop                    stop the running daemon
+  mslxdff -restart                 restart the daemon
   mslxdff -uninstall               stop the daemon and delete all state/log files
   mslxdff -port N                  persist the listen port (restarts the daemon on it if running)
   mslxdff -update                  update mslxdff to the latest published version
@@ -2679,7 +2739,7 @@ async function printStatus() {
       upStr = `, up ${fmtUptime(ms)}`;
     } catch {}
   }
-  const verNote = daemon && alive ? (() => { const v = readPidVersion(); return v === VERSION ? "version ok" : (v ? `version ${v} → ${VERSION} (restart pending)` : ""); })() : "";
+  const verNote = daemon && alive ? (() => { const v = readPidVersion(); if (!v) return ""; if (v === VERSION) return "version ok"; const cmp = compareSemver(VERSION, v); if (cmp > 0) return `version ${v} → ${VERSION} (upgrade pending)`; if (cmp < 0) return `version ${v} (newer than local ${VERSION}, keeping)`; return "version ok"; })() : "";
   console.log(`mslxdff v${VERSION}`);
   console.log(`daemon:    ${daemon ? (alive ? `running (pid ${daemon}${upStr})` : `stale pid ${daemon} (not alive)`) : "not running"}${verNote ? `  [${verNote}]` : ""}`);
   // local health probe — 1.2s timeout, 显示端到端可用性
