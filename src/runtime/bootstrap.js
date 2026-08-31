@@ -76,24 +76,28 @@ export async function startDaemonMain(VERSION) {
     const genericConfigs = loadProviderConfigs();
     for (const [gid, cfg] of Object.entries(genericConfigs)) {
       if (gid === "opencode" || gid === "openrouter") continue;
-      if (gid === "workbuddy") {
-        const base = String(cfg?.baseUrl || "").trim() || "https://copilot.tencent.com";
-        const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
-        const auths = Array.isArray(cfg?.auths) ? cfg.auths : [];
-        if (!keys.length) continue;
+      const base = String(cfg?.baseUrl || "").trim();
+      const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
+      const auths = Array.isArray(cfg?.auths) ? cfg.auths : [];
+      // 可扩展：优先走注册表定制 provider（如 workbuddy、cline），新增供应商仅需在 registry.js 注册
+      const { getCustomProviderFactory } = await import("../providers/registry.js");
+      const customFactory = await getCustomProviderFactory(gid, base);
+      if (customFactory) {
+        if (gid === "workbuddy" && !keys.length) continue;
+        if (gid !== "workbuddy" && (!base || !keys.length)) continue;
         try {
-          const { createWorkbuddyProvider } = await import("../providers/workbuddy.js");
-          providers.push(createWorkbuddyProvider({ baseUrl: base, apiKeys: keys, auths }));
-          console.log(`provider enabled: workbuddy (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base}`);
-          appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base });
+          const provider = gid === "workbuddy"
+            ? await customFactory({ baseUrl: base || "https://copilot.tencent.com", apiKeys: keys, auths })
+            : await customFactory({ id: gid, baseUrl: base, apiKeys: keys });
+          providers.push(provider);
+          console.log(`provider enabled: ${gid} (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base || provider.baseUrl} [custom]`);
+          appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base || provider.baseUrl });
         } catch (err) {
           console.log(`provider ${gid} failed: ${err?.message || err}`);
           appendEvent({ ts: Date.now(), type: "provider-error", provider: gid, error: String(err?.message || err) });
         }
         continue;
       }
-      const base = String(cfg?.baseUrl || "").trim();
-      const keys = Array.isArray(cfg?.keys) ? cfg.keys.filter((k) => typeof k === "string" && k.trim()) : [];
       if (!base || !keys.length) continue;
       try {
         const { createGenericProvider } = await import("../providers/generic.js");
