@@ -31,7 +31,10 @@ export async function runOne({
   if (!model) return { id: model, ok: false, error: "missing model", label: "配置错误", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   if (!apiKey) return { id: model, ok: false, error: "missing apiKey", label: "未配置 Key", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   const url = joinUrl(String(baseUrl).replace(/\/+$/, ""), chatPath);
-  const body = { model: String(model).split("/").pop(), stream: false, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens };
+  let rawModel = String(model || "").trim();
+  // allowlist 已是 raw（如 z-ai/glm-5.3-flash），仅当带供应商前缀时才剥
+  if (providerId && rawModel.startsWith(`${providerId}/`)) rawModel = rawModel.slice(providerId.length + 1);
+  const body = { model: rawModel, stream: false, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens };
   // workbuddy 需额外 workbuddy 透传头由调用方 headers 注入；此处直接透传
   const finalHeaders = { "Content-Type": "application/json", Accept: "application/json", ...headers };
   if (apiKey && !finalHeaders.Authorization) finalHeaders.Authorization = `Bearer ${apiKey}`;

@@ -237,7 +237,8 @@ function printFooter({ model, provider, latency, usage, totalMs, fallback, fallb
   try { gw = collectStats(); } catch {}
   const prov = provider && provider !== "opencode" ? `${provider}/` : "";
   const baseLabel = model ? `${prov}${model}` : "—";
-  const modelLabel = model ? (fallbackGateway || viaGateway ? `${baseLabel} (gateway auto)` : baseLabel) : "—";
+  const via = provider && !baseLabel.startsWith(`${provider}/`) ? `: ${provider}` : "";
+  const modelLabel = model ? (fallbackGateway || viaGateway ? `${baseLabel} (gateway auto${via})` : baseLabel) : "—";
   const latLabel = latency ? `${latency}ms` : "—";
   const totalLabel = totalMs ? ` · 总耗时 ${totalMs}ms` : "";
   const tokLabel = usage ? ` · tokens ${usage.prompt_tokens ?? "?"}→${usage.completion_tokens ?? "?"}` : "";

@@ -1,7 +1,16 @@
 import { joinUrl } from "../providers/base.js";
+import { getCustomNormalizer } from "../providers/registry.js";
 
-function normalizeModelsPayload(json) {
+function normalizeModelsPayload(json, baseUrl = "") {
   if (!json) return [];
+  // 可扩展：优先走注册表的定制化解析（如 cline.bot 仅 free）
+  try {
+    const custom = getCustomNormalizer(baseUrl);
+    if (custom) {
+      const v = custom(json);
+      if (Array.isArray(v)) return v;
+    }
+  } catch {}
   if (Array.isArray(json)) return json;
   if (Array.isArray(json.data)) return json.data;
   if (Array.isArray(json.models)) return json.models;
