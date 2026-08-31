@@ -39,13 +39,14 @@
 
 | 命令 | 别名 | 作用一句话 | 是否写 state | 是否需 daemon 运行 |
 |---|---|---|---|---|
-| `mslxdff` | — | 无参：daemon 已在且版本一致→显示 status+help；否则以后台 daemon 启动并退出（npx 友好） | 否 | 否 |
-| `mslxdff -d` | `--daemon` | 以 detached 后台进程启动 daemon，等待 `/health` | 否 | 否 |
+| `mslxdff` | — | 无参：daemon 已在且版本 ≥ 本地→直接显示 status+help（**只升不降**，低版本不会覆盖高版本）；否则以后台 daemon 启动并退出（npx 友好） | 否 | 否 |
+| `mslxdff -d` | `--daemon` | 以 detached 后台进程启动 daemon，同裸跑有“只升不降”保护（高版本已在跑时不会被低版本覆盖） | 否 | 否 |
 | `mslxdff -status` | `--status`, `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/share）、models（free 缓存/preferred/picks + 体检表 avg首字/tps/啰嗦/p95）、autostart/plugins、群组/failover、recent calls(含 ttfb/tps/tok)、last error | 否 | 否（未运行时也打印，health 显示 fail） |
 | `mslxdff -log [N]` | `--log`, `-logs`, `--logs` | 显示最近 N 条事件（默认 10），并提示其他日志路径 | 否 | 否 |
 | `mslxdff -debug` | `--debug` | 停掉后台 daemon，前台运行并实时打印事件流；Ctrl+C 恢复后台 | 清空旧日志 | 会停旧 daemon |
 | `mslxdff -plugins` | `--plugins` | 列出插件目录与已识别插件及其 hooks，不启动 daemon | 否 | 否 |
 | `mslxdff -stop` | `--stop` | 停止 daemon | 否 | 需运行 |
+| `mslxdff -restart` | `--restart` | 重启 daemon | 否 | 有则重启，无则拉起 |
 | `mslxdff -uninstall` | `--uninstall` | 停 daemon 并删除 state/pid/log/calls/errors/events 文件，提示 `npm uninstall -g` | 删文件 | — |
 | `mslxdff -port N` | `--port N` | 持久化监听端口到 state，运行中则重启 daemon | 是（`port`） | 重启 |
 | `mslxdff -showtoken` | `--showtoken` | 打印当前 Bearer token | 首次会生成 | 否 |
@@ -99,9 +100,9 @@
 ### `mslxdff`（无参）
 
 - **语法**：`mslxdff`
-- **作用**：最常用的“裸跑”入口。行为分两支：
-  1. 若 daemon 已在运行且版本一致（`pidFile` 存在、`isPidAlive(pid)` 且 `readPidVersion() === VERSION`）：打印 `printStatus()` + `printHelp()` 后退出，不另起进程。
-  2. 否则：以后台 detached 进程启动 daemon（`startDaemon([])`），等待 `/health` 就绪（4s），打印 `vX.Y.Z started as a background daemon`、`endpoint`、`log`、`pid` 后退出。**绝不驻留终端**，npx 友好。
+- **作用**：最常用的“裸跑”入口。**只升不降**：
+  1. 若 daemon 已在运行且版本 ≥ 本地（`isPidAlive(pid)` 且 `compareSemver(runningVersion, VERSION) >=0`）：直接复用，打印 `printStatus()` + `printHelp()` 后退出，不另起进程（低版本不会覆盖高版本，提示 `keeping vX (not downgrading)`）。
+  2. 若 daemon 版本 < 本地或未运行：以后台 detached 进程启动/升级 daemon（`stopDaemonIfOutdated()` 仅当 `VERSION > runningVersion` 才停旧），等待 `/health` 就绪（4s），打印 `vX.Y.Z started as a background daemon`、`endpoint`、`log`、`pid` 后退出。**绝不驻留终端**，npx 友好。
 - **示例**：
   ```bash
   mslxdff
@@ -111,7 +112,7 @@
 ### `-d` / `--daemon`
 
 - **语法**：`mslxdff -d` 或 `mslxdff --daemon`
-- **作用**：显式以后台 daemon 启动。会先执行 `stopDaemonIfOutdated()`（版本不一致则停旧 daemon），`spawn detached` 后等待健康检查。
+- **作用**：显式以后台 daemon 启动。同样 **只升不降**：先 `stopDaemonIfOutdated()`（仅 `VERSION > runningVersion` 才停旧），若已在跑更高版本则 `keeping` 并复用，不另起降级。`spawn detached` 后等待健康检查。
 - **环境**：子进程带 `MSLXDFF_DAEMON=1` 标记；父进程等待后打印 `daemon started (pid XXX)`、`log`、`pid`。
 - **与其他参数混用**：`startDaemon` 会过滤掉 `-d/--daemon` 再透传其余参数（如 `-port 8989`）。
 - **示例**：
@@ -143,6 +144,12 @@
   - 成功：`mslxdff daemon stopped (pid XXX)`
   - 未运行：`mslxdff daemon not running`（若有原因则带 `reason`）。
 - **示例**：`mslxdff -stop`
+
+### `-restart` / `--restart`
+
+- **语法**：`mslxdff -restart`
+- **作用**：重启 daemon（`stopDaemon()` → `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`。
+- **示例**：`mslxdff -restart`
 
 ### `-uninstall` / `--uninstall`
 

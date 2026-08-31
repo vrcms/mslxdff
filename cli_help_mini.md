@@ -15,12 +15,13 @@
 | 命令 | 语法 | 说明 |
 |---|---|---|
 | 无参启动 | `mslxdff` | 已有 daemon 显示 status，否则后台启动 |
-| daemon | `-d` / `--daemon` | 后台启动 |
+| daemon | `-d` / `--daemon` | 后台启动（只升不降，低版本不覆盖高版本） |
 | 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/share）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(含首字/tps)/last error/autostart/plugins — 全量聚合体检 |
 | 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10（含首字/tps/tok 详情） |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
 | 停止 | `-stop` / `--stop` | 停 daemon |
+| 重启 | `-restart` / `--restart` | 重启 daemon |
 | 端口 | `-port N` / `--port N` | 持久化端口，运行中重启 |
 | token 读 | `-showtoken` / `--showtoken` | 打印 Bearer token |
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
