@@ -1,10 +1,24 @@
 import { joinUrl } from "../providers/base.js";
 import { computeMetrics, extractUsageFromJson } from "../metrics.js";
 
+function extractInnerMessage(bodyText) {
+  const t = String(bodyText || "");
+  try {
+    const j = JSON.parse(t);
+    const m = j?.error?.message || j?.error || j?.message || j?.data?.error || "";
+    if (typeof m === "string" && m.trim()) return m.trim().slice(0, 300);
+    if (typeof j?.error === "string") return j.error.slice(0, 300);
+  } catch {}
+  return t.slice(0, 300);
+}
+
 function classifyError(status, bodyText) {
-  const t = String(bodyText || "").slice(0, 300);
+  const t = String(bodyText || "").slice(0, 500);
+  const low = t.toLowerCase();
   if (status === 401) return { label: "鉴权失败", retryable: false };
   if (status === 402 || /insufficient balance/i.test(t)) return { label: "余额不足", retryable: false };
+  if (low.includes("only available via cline")) return { label: "仅 Cline 客户端可用", retryable: false };
+  if (low.includes("invalid model format")) return { label: "模型格式错误", retryable: false };
   if (status === 403) return { label: /insufficient/i.test(t) ? "余额不足" : "鉴权失败", retryable: false };
   if (status === 429) return { label: "限流", retryable: true };
   if (status >= 500) return { label: `上游错误 ${status}`, retryable: true };
@@ -55,7 +69,8 @@ export async function runOne({
       let txt = "";
       try { txt = await res.text(); } catch {}
       const cls = classifyError(res.status, txt);
-      return { id: model, providerId, ok: false, status: res.status, error: txt.slice(0, 300) || `HTTP ${res.status}`, label: cls.label, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+      const msg = extractInnerMessage(txt) || `HTTP ${res.status}`;
+      return { id: model, providerId, ok: false, status: res.status, error: msg, label: cls.label, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
     }
     let json = {};
     let txt = "";
