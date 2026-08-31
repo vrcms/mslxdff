@@ -4,6 +4,8 @@
  * 仅将 persist 层替换为 Map<file, {json, mtimeMs}>，不触 `node:fs`。
  * 用于 `—test-concurrency>1` 并行与单测快速路径。
  */
+import { mergeState, COLD_WINS } from "./merge.js";
+
 const memCache = new Map(); // file -> { data, dirty, timer, mtimeMs }
 const memDisk = new Map(); // file -> { obj, mtimeMs }
 
@@ -31,27 +33,6 @@ function atomicWriteSyncMem(file, data) {
   const mtime = now <= prev ? prev + 1 : now;
   memDisk.set(file, { obj: structuredClone(data), mtimeMs: mtime });
   return mtime;
-}
-
-const COLD_WINS = new Set([
-  "providerConfigs",
-  "providerKeys",
-  "providerShareKeys",
-  "port",
-  "token",
-  "preferredModel",
-  "modelPicks",
-  "peers",
-  "groups",
-  "groupsJoined",
-  "bans",
-  "createdAt",
-]);
-
-function mergeState(disk, mem) {
-  const merged = { ...disk, ...mem };
-  for (const k of COLD_WINS) if (disk[k] !== undefined) merged[k] = disk[k];
-  return merged;
 }
 
 function readState(file) {

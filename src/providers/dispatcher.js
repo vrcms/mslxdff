@@ -1,10 +1,22 @@
 import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
-import { isModelAllowed, loadProviderAllowedModels, loadProviderAllowAnyModels } from "../state.js";
+import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
 
 // 多供应商 dispatcher：把多个 Provider 聚合成一个 `upstream` 形状（chat/preheat/close），
 // 按 body.model 的前缀路由到对应供应商，转发上游前剥掉前缀只发原始 id。
-export function createProviderDispatcher(providers = []) {
+// 纯化：第二参可注入纯函数 isAllowed/getAllowed/getAllowAny，便于单测不读盘
+export function createProviderDispatcher(providers = [], opts = {}) {
   const byId = new Map(providers.map((p) => [p.id, p]));
+  // 纯化注入：第二参可为 {isAllowed, getAllowedModels, getAllowAny} 或直接函数 isAllowed
+  let isAllowedFn, getAllowedFn, getAllowAnyFn;
+  if (typeof opts === "function") {
+    isAllowedFn = opts;
+    getAllowedFn = stateLoadAllowed;
+    getAllowAnyFn = stateLoadAllowAny;
+  } else {
+    isAllowedFn = opts.isAllowed || stateIsAllowed;
+    getAllowedFn = opts.getAllowedModels || stateLoadAllowed;
+    getAllowAnyFn = opts.getAllowAny || stateLoadAllowAny;
+  }
 
   function resolve(model) {
     const split = splitModelId(model, providers.map((p) => p.id));
@@ -29,8 +41,8 @@ export function createProviderDispatcher(providers = []) {
         raw = modelPart;
       }
     }
-    if (!isModelAllowed(provider.id, raw)) {
-      const allowed = loadProviderAllowedModels(provider.id);
+    if (!isAllowedFn(provider.id, raw)) {
+      const allowed = getAllowedFn(provider.id) || [];
       const msg = `model not allowed for provider "${provider.id}": "${raw}" — allowed: ${allowed.join(", ") || "(none)"} (use: mslxdff -provider ${provider.id} allowlist add <model>)`;
       return new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json", "x-mslxdff-allowlist": "1" } });
     }
@@ -58,8 +70,8 @@ export function createProviderDispatcher(providers = []) {
       } catch {
         list = [];
       }
-      const allowed = loadProviderAllowedModels(p.id);
-      const allowAny = loadProviderAllowAnyModels(p.id);
+      const allowed = getAllowedFn(p.id) || [];
+      const allowAny = getAllowAnyFn(p.id);
       const allowedSet = allowed.length ? new Set(allowed) : null;
       // 空名单且不允许任意模型 => 该供应商不暴露任何模型（安全默认）
       if (!allowedSet && !allowAny) continue;

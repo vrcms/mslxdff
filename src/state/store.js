@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import { loadFromDisk, atomicWriteSync, getMtimeMs, ensureDir } from "./persist.js";
+import { mergeState, COLD_WINS } from "./merge.js";
 
 export const DEFAULT_PORT = 8989;
 
@@ -51,34 +52,7 @@ function getEntry(file) {
   return e;
 }
 
-// ---- 合并规则：coldWins 以 disk 为准，hotWins 以 mem 为准 ----
-const COLD_WINS = new Set([
-  "providerConfigs",
-  "providerKeys",
-  "providerShareKeys",
-  "port",
-  "token",
-  "preferredModel",
-  "modelPicks",
-  "peers",
-  "groups",
-  "groupsJoined",
-  "bans",
-  "createdAt",
-]);
-
-function mergeState(disk, mem) {
-  const merged = { ...disk, ...mem };
-  for (const k of COLD_WINS) {
-    if (disk[k] !== undefined) merged[k] = disk[k];
-    else if (!(k in disk) && k in mem) {
-      // deletion on disk: respect deletion by removing from merged if disk intentionally lacks key?
-      // Preserve original behavior: keep mem's stale value (do not delete).
-      // Uncomment to support true deletion: delete merged[k];
-    }
-  }
-  return merged;
-}
+// 合并规则已抽至 merge.js 单一真相
 
 function readState(file) {
   const e = getEntry(file);
