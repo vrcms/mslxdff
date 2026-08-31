@@ -1,22 +1,49 @@
-const TZ = "Asia/Shanghai";
+import { loadTimezone } from "./state/schemas/timezone.js";
 
-function shanghaiParts(d) {
-  const date = d instanceof Date ? d : new Date(d);
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(date);
-  const m = {};
-  for (const p of parts) m[p.type] = p.value;
-  return m; // {year, month, day, hour, minute, second}
+const DEFAULT_TZ = "Asia/Shanghai";
+
+function getTimezone() {
+  try { return loadTimezone() || DEFAULT_TZ; } catch { return DEFAULT_TZ; }
 }
+
+function tzParts(d, tz) {
+  const zone = tz || getTimezone();
+  const date = d instanceof Date ? d : new Date(d);
+  try {
+    const fmt = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(date);
+    const m = {};
+    for (const p of parts) m[p.type] = p.value;
+    return m; // {year, month, day, hour, minute, second}
+  } catch {
+    // 回退上海
+    const fmt = new Intl.DateTimeFormat("en-GB", {
+      timeZone: DEFAULT_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(date);
+    const m = {};
+    for (const p of parts) m[p.type] = p.value;
+    return m;
+  }
+}
+
+function shanghaiParts(d) { return tzParts(d, getTimezone()); }
 
 // "MM-DD HH:mm:ss" e.g. "08-27 15:07:14"
 export function fmtShanghai(isoOrTs) {
@@ -71,3 +98,9 @@ export function nowShanghaiYMDHM() {
 export function fmtTsShanghai(iso) {
   return fmtShanghai(iso);
 }
+
+export { getTimezone };
+// 通用别名（实际已可配置，不再仅限上海）
+export const fmtYMDHMS = fmtShanghaiYMDHMS;
+export const fmtYMDHM = fmtShanghaiYMDHM;
+export const fmtHMS = fmtShanghaiHMS;

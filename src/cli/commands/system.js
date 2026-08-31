@@ -6,6 +6,7 @@ import { loadToken, refreshToken } from "../../state.js";
 import { stopDaemon, pidFile, logFile } from "../../daemon.js";
 import { logDir, eventsFile, callsFile, errorsFile, recentEvents } from "../../logs.js";
 import { fmtEvent } from "../format.js";
+import { fmtShanghaiYMDHMS, fmtShanghaiHMS } from "../../time.js";
 import { printHelp } from "../help.js";
 import { printStatus } from "../status.js";
 import { loadPlugins, resolvePluginDirs } from "../../plugins.js";
@@ -178,7 +179,7 @@ export async function handleFree(args) {
   const { fetchV2exFree } = await import("../../free-watcher.js");
   const show = async () => {
     const hits = await fetchV2exFree({ timeoutMs: 6000 });
-    const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const ts = fmtShanghaiYMDHMS(new Date());
     console.log(`[V2EX] free check @ ${ts} — ${hits.length} hit(s)`);
     if (!hits.length) {
       console.log("(暂无命中 — 关键词：白嫖|限免|免费额度|注册送|羊毛，来源：/api/topics/latest.json + hot.json)");
@@ -192,7 +193,7 @@ export async function handleFree(args) {
   }
   console.log("V2EX 白嫖雷达 watch 模式 — 每 5 分钟拉一次 Ctrl+C 退出");
   const run = async () => {
-    try { await show(); } catch (err) { console.error(`[${new Date().toISOString().slice(11,19)}] 拉取失败: ${err?.message || err}`); }
+    try { await show(); } catch (err) { console.error(`[${fmtShanghaiHMS(new Date())}] 拉取失败: ${err?.message || err}`); }
     console.log("---");
   };
   await run();

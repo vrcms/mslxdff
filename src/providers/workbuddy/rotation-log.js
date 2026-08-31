@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fmtShanghaiYMDHMS } from "../../time.js";
 
 function defaultDirs() {
   const dirs = new Set();
@@ -22,7 +23,7 @@ export function appendRotationLog({ uid, model, totalMs, balanceHit, error, cloc
   const useFs = fsOverride || { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync, join };
   const useDirs = dirsOverride || defaultDirs();
   try {
-    const line = `${new Date(clock()).toISOString()} uid=${uid} model=${model || "-"} totalMs=${totalMs} balanceHit=${balanceHit ? 1 : 0}${error ? ` error=${String(error).slice(0, 120)}` : ""}\n`;
+    const line = `${fmtShanghaiYMDHMS(new Date(clock()))} uid=${uid} model=${model || "-"} totalMs=${totalMs} balanceHit=${balanceHit ? 1 : 0}${error ? ` error=${String(error).slice(0, 120)}` : ""}\n`;
     for (const dir of useDirs) {
       try {
         useFs.mkdirSync(dir, { recursive: true });

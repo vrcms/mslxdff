@@ -3,6 +3,7 @@ import { appendFile, stat, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import { defaultStateFile } from "./state.js";
+import { fmtShanghaiYMDHMS } from "./time.js";
 
 const MAX_CALLS = 500;
 const MAX_ERRORS = 200;
@@ -73,7 +74,7 @@ function shouldSync(file) {
 
 function appendLine(file, entry) {
   ensureDir(dirname(file));
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+  const line = JSON.stringify({ ts: fmtShanghaiYMDHMS(new Date()), ...entry }) + "\n";
   if (shouldSync(file)) {
     appendFileSync(file, line);
     trimIfOversized(file);

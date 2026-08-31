@@ -12,6 +12,8 @@ export async function run(args = process.argv.slice(2)) {
   if (await handleUpdate(args, VERSION)) return;
   if (await handleRefreshToken(args)) return;
   if (await handleShowToken(args)) return;
+  const { handleTimezone } = await import("./commands/timezone.js");
+  if (await handleTimezone(args)) return;
 
   const { handleStop, handleRestart } = await import("./commands/daemon.js");
   if (await handleStop(args)) return;
