@@ -6,25 +6,8 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { getCachedBalance, setCachedBalance } from "./workbuddy-balance.js";
 
-let UndiciAgent = null;
-let UndiciFetch = null;
-try {
-  const mod = await import("undici");
-  UndiciAgent = mod.Agent;
-  UndiciFetch = mod.fetch;
-} catch {}
-
-function joinUrl(base, path) {
-  const b = String(base || "").trim().replace(/\/+$/, "");
-  const p = String(path || "").trim();
-  if (!p) return b;
-  const pp = p.startsWith("/") ? p : `/${p}`;
-  return `${b}${pp}`;
-}
-function envInt(name, fallback) {
-  const v = Number(process.env[name]);
-  return Number.isInteger(v) && v > 0 ? v : fallback;
-}
+import { envInt, joinUrl, getUndici, createAgent } from "./base.js";
+const { UndiciAgent, UndiciFetch } = getUndici();
 function isTestEnv() {
   if (process.env.NODE_ENV === "test") return true;
   if (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test")) return true;
@@ -210,19 +193,11 @@ export function createWorkbuddyProvider({
 
   let ring = createKeyRing(keys, { cooldownMs });
 
-  let dispatcher = null;
-  let agent = null;
-  if (UndiciAgent) {
-    try {
-      agent = new UndiciAgent({
-        keepAliveTimeout: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_TIMEOUT", 30_000),
-        keepAliveMaxTimeout: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_MAX_TIMEOUT", 60_000),
-        connections: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_CONNECTIONS", 20),
-        pipelining: 1,
-      });
-      dispatcher = agent;
-    } catch {}
-  }
+  const { agent, dispatcher } = createAgent({
+    keepAliveTimeout: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_TIMEOUT", 30_000),
+    keepAliveMaxTimeout: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_MAX_TIMEOUT", 60_000),
+    connections: envInt("MSLXDFF_WORKBUDDY_KEEPALIVE_CONNECTIONS", 20),
+  });
 
   function authForKey(key) {
     const idx = keys.indexOf(key);
