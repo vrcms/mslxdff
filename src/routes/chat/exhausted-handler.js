@@ -1,6 +1,6 @@
-import { performance } from "node:perf_hooks";
-import { json } from "../helpers.js";
 import { relay } from "../stream.js";
+import { json } from "../helpers.js";
+import { performance } from "node:perf_hooks";
 
 export async function handleExhaustedLocal({ res, body, lastErr, order, handlerCtx, evt, logCall, mark, perf0, stages, done, requested, useAuto }) {
   const model = lastErr?.model ?? handlerCtx.model;
