@@ -124,28 +124,9 @@ export function createChatGateway({ upstream, auto, logs, peers, maxHops, groups
           if (Number.isInteger(v) && v > 0) return Math.min(v, nonCoolingOrder.length);
           return Math.min(nonCoolingOrder.length, 5);
         })();
-        const raceModels = nonCoolingOrder.slice(0, concLimit);
-        evt("auto-concurrent-race", { reqId, models: raceModels, skippedFaulty: order.length - nonCoolingOrder.length, limit: concLimit });
-        const raceStart = performance.now();
-        const attempts = raceModels.map(async (m) => {
-          const fwd = { ...injectReasoningContent(m, body), model: m };
-          let r = null;
-          try {
-            const chatOpts = {};
-            if (Object.keys(shareKeys).length) chatOpts.shareKeys = shareKeys;
-            if (workbuddyUid) chatOpts.workbuddyUid = workbuddyUid;
-            r = await upstream.chat(fwd, Object.keys(chatOpts).length ? chatOpts : undefined);
-          } catch (err) {
-            return { model: m, ok: false, error: errMsg(err), status: 502, timing: err?._t ?? null };
-          }
-          if (r && r.status >= 400) {
-            const isAllow = r.status === 403 && r.headers?.get?.("x-mslxdff-allowlist") === "1";
-            if (isAllow) return { model: m, ok: false, error: "allowlist", status: 403, allowlist: true };
-            return { model: m, ok: false, error: `upstream ${r.status}`, status: r.status, res: r, timing: r._t ?? null };
-          }
-          if (r instanceof Error) return { model: m, ok: false, error: errMsg(r), status: 502 };
-          return { model: m, ok: true, res: r, status: r.status, timing: r._t ?? null };
-        });
+        let raceModels=nonCoolingOrder.slice(0,concLimit);
+        if(plugins?.length){const k=[];for(const m of raceModels){const b=await runHook(plugins,"model:beforeTry",{reqId,requested,model:m,hops});if(b.value===false||b.value?.skip)continue;k.push(m);}raceModels=k;}
+        if(!raceModels.length){order=order.filter(m=>!new Set(nonCoolingOrder.slice(0,concLimit)).has(m));if(!order.length){await handleExhaustedAll({res,body,lastErr:{model:requested,status:502,message:"all concurrent candidates skipped by plugin"},order:nonCoolingOrder.slice(0,concLimit),requested,handlerCtx:{...handlerCtx,reqId,startedAt},evt,logCall,mark,perf0,stages});return;}}else{evt("auto-concurrent-race",{reqId,models:raceModels,skippedFaulty:order.length-nonCoolingOrder.length,limit:concLimit});const raceStart=performance.now();const attempts=raceModels.map(async m=>{let f={...injectReasoningContent(m,body),model:m};if(plugins?.length){const u=await runHook(plugins,"upstream:request",{reqId,requested,model:m,payload:f,stream:Boolean(body.stream)});if(u.changed&&u.value?.payload) f=u.value.payload;}let r=null;try{const o={};if(Object.keys(shareKeys).length)o.shareKeys=shareKeys;if(workbuddyUid)o.workbuddyUid=workbuddyUid;r=await upstream.chat(f,Object.keys(o).length?o:undefined);}catch(e){if(plugins?.length)runHook(plugins,"upstream:response",{reqId,requested,model:m,status:null,ok:false,error:errMsg(e),timing:e?._t??null}).catch(()=>{});return{model:m,ok:false,error:errMsg(e),status:502,timing:e?._t??null};}if(plugins?.length)runHook(plugins,"upstream:response",{reqId,requested,model:m,status:r instanceof Error?null:r?.status??null,ok:!(r instanceof Error)&&r?r.status<400:false,error:r instanceof Error?errMsg(r):null,timing:r?._t??null}).catch(()=>{});if(r&&r.status>=400){const a=r.status===403&&r.headers?.get?.("x-mslxdff-allowlist")==="1";if(a)return{model:m,ok:false,error:"allowlist",status:403,allowlist:true};return{model:m,ok:false,error:`upstream ${r.status}`,status:r.status,res:r,timing:r._t??null};}if(r instanceof Error)return{model:m,ok:false,error:errMsg(r),status:502};return{model:m,ok:true,res:r,status:r.status,timing:r._t??null};});
         const results = await Promise.allSettled(attempts);
         const okList = results.map((r, i) => ({ r, i, model: raceModels[i] }))
           .filter(({ r }) => r.status === "fulfilled" && r.value?.ok)
@@ -185,10 +166,13 @@ export function createChatGateway({ upstream, auto, logs, peers, maxHops, groups
         const triedSet = new Set(raceModels);
         order = order.filter((m) => !triedSet.has(m));
         if (!order.length) {
-          const last = { model: raceModels[0] || requested, status: 502, message: "all concurrent candidates failed" };
+          const failedStatuses = results.map((r) => (r.status === "fulfilled" ? r.value?.status : null)).filter((s) => Number.isInteger(s));
+          const lastStatus = failedStatuses[failedStatuses.length - 1] || failedStatuses[0] || 502;
+          const last = { model: raceModels[0] || requested, status: lastStatus, message: "all concurrent candidates failed" };
           await handleExhaustedAll({ res, body, lastErr: last, order: raceModels, requested, handlerCtx: { ...handlerCtx, reqId, startedAt }, evt, logCall, mark, perf0, stages });
           return;
         }
+        } // close else (raceModels not empty)
       }
     }
 

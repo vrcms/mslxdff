@@ -33,7 +33,9 @@ async function boot({ pluginCode, upstreamHandler }) {
   const { plugins } = await loadPlugins({ dir });
   const up = await stubUpstream(upstreamHandler);
   const client = createUpstreamClient({ baseUrl: `http://127.0.0.1:${up.address().port}`, retry: {} });
-  const auto = createAutoSelector({ loadCandidates: async () => ["m-one-free", "m-two-free"], errors: {} });
+  // 使用临时 state 并注入 dummy normal，禁用并发择优，保持串行以便 plugin hook（model:beforeTry / upstream:response）可按预期触发
+  const file = mkdtempSync(join(tmpdir(), "mslxdff-plug-state-")) + "/state.json";
+  const auto = createAutoSelector({ loadCandidates: async () => ["m-one-free", "m-two-free"], errors: { "_dummy": { status: "normal", at: 1, code: 200, slow: false } }, file });
   const srv = startServer(
     { router: createRouter({ token: TOKEN, upstream: client, auto, plugins }), models: null },
     0
