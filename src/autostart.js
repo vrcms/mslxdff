@@ -127,7 +127,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${node} ${script}
+Environment=MSLXDFF_DAEMON=1
+ExecStart=${node} ${script} --daemon
 Restart=always
 RestartSec=3
 
