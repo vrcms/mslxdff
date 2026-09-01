@@ -191,7 +191,46 @@ export async function startDaemonMain(VERSION) {
     process.on("SIGTERM", restore2);
   }
 
-  await srv.ready();
+  // Robust ready: if EADDRINUSE (bare daemon still holds port), kill holders and retry once
+  try {
+    await srv.ready();
+  } catch (err) {
+    const msg = String(err?.message || err);
+    const code = err?.code || "";
+    if (code === "EADDRINUSE" || msg.includes("EADDRINUSE")) {
+      console.log(`port ${resolvePort()} in use — freeing stale holder and retrying...`);
+      try {
+        const { execFile } = await import("node:child_process");
+        const execAsync2 = (f, a) => new Promise((res) => execFile(f, a, { windowsHide: true, timeout: 4000 }, (e, so, se) => res({ e, so: String(so||""), se: String(se||"") })));
+        const port = resolvePort();
+        // kill via ss parse (same as autostart)
+        const ss1 = await execAsync2("ss", ["-lptn", `sport = :${port}`]);
+        const out = ss1.so || "";
+        const pids = new Set();
+        let m;
+        const re = /pid=(\d+)/g;
+        while ((m = re.exec(out))) pids.add(Number(m[1]));
+        if (!pids.size) {
+          const ss2 = await execAsync2("ss", ["-lptn"]);
+          for (const line of (ss2.so||"").split("\n")) {
+            if (!line.includes(`:${port}`)) continue;
+            let m2; const re2 = /pid=(\d+)/g;
+            while ((m2 = re2.exec(line))) pids.add(Number(m2[1]));
+          }
+        }
+        for (const p of pids) { if (p !== process.pid) try { process.kill(p, "SIGTERM"); } catch {} }
+        if (pids.size) await new Promise((r2) => setTimeout(r2, 600));
+        for (const p of pids) try { const { isPidAlive } = await import("../daemon.js"); if (isPidAlive(p)) process.kill(p, "SIGKILL"); } catch {}
+        try { await execAsync2("fuser", ["-k", `${port}/tcp`]); } catch {}
+        for (let i=0;i<10;i++) {
+          const chk = await execAsync2("ss", ["-ltn"]);
+          if (!chk.so.includes(`:${port}`)) break;
+          await new Promise((r2)=>setTimeout(r2,200));
+        }
+      } catch {}
+      await srv.ready();
+    } else throw err;
+  }
 
   if (loadedPlugins.length) {
     runHook(loadedPlugins, "server:start", { port: srv.server.address()?.port, host: listenHost, version: VERSION }).catch(() => {});
@@ -232,6 +271,26 @@ export async function startDaemonMain(VERSION) {
     const hd = hedgeDelayMs();
     console.log(`hedge:      ${hd ? `${hd}ms` : "off"} (MSLXDFF_HEDGE_DELAY_MS)`);
   } catch {}
+
+  // best-effort: ensure autostart on Linux (so daemon survives reboot/SSH disconnect without manual cmd)
+  if (process.platform === "linux" && !process.env.MSLXDFF_NO_AUTOSTART) {
+    setTimeout(async () => {
+      try {
+        const { getAutostartStatus, enableAutostart } = await import("../autostart.js");
+        const st = await getAutostartStatus();
+        if (!st.enabled) {
+          const r = await enableAutostart();
+          if (r.ok) {
+            console.log(`autostart auto-enabled: ${r.method}${r.linger ? ` linger=${r.linger}` : ""}`);
+            try { bus?.emit({ ts: Date.now(), type: "autostart-auto-enabled", method: r.method }); } catch {}
+            try { appendEvent({ ts: Date.now(), type: "autostart-auto-enabled", method: r.method }); } catch {}
+          } else {
+            console.log(`autostart auto-enable failed: ${r.error || "unknown"} (run mslxdff -enable-autostart manually)`);
+          }
+        }
+      } catch {}
+    }, 2500).unref?.();
+  }
 
   // group sync
   const { syncAllJoinedGroups } = await import("../cli/group-helpers.js");
@@ -329,84 +388,8 @@ export async function startDaemonMain(VERSION) {
     console.log(`broadband relay: heartbeat 30s + poll 1s for ${broadbandGroups().length} group(s)`);
   }
 
-  const autoUpdateMs = autoUpdateIntervalMs();
-  function emitAutoUpdate(type, data = {}) {
-    const entry = { ts: Date.now(), type, ...data };
-    try { bus?.emit(entry); } catch {}
-    try { logs?.appendEvent?.(entry); } catch {}
-    const line = `[auto-update] ${type} ${JSON.stringify(data)}`;
-    console.log(line);
-  }
-  if (autoUpdateMs) {
-    console.log(`auto-update enabled: checking every ${Math.round(autoUpdateMs / 60000)}m`);
-    emitAutoUpdate("auto-update-enabled", { intervalMs: autoUpdateMs, current: VERSION });
-    setTimeout(() => {
-      emitAutoUpdate("auto-update-check", { current: VERSION });
-      checkAndAutoUpdate().catch((err) => {
-        console.log(`auto-update check failed: ${errMsg(err)}`);
-        emitAutoUpdate("auto-update-failed", { error: errMsg(err) });
-      });
-    }, 30_000).unref?.();
-    const autoUpdateTimer = setInterval(() => {
-      emitAutoUpdate("auto-update-check", { current: VERSION });
-      checkAndAutoUpdate().catch((err) => {
-        console.log(`auto-update check failed: ${errMsg(err)}`);
-        emitAutoUpdate("auto-update-failed", { error: errMsg(err) });
-      });
-    }, autoUpdateMs);
-    autoUpdateTimer.unref();
-  } else {
-    console.log(`auto-update disabled (set MSLXDFF_AUTO_UPDATE=1 to enable hourly)`);
-    emitAutoUpdate("auto-update-disabled", { current: VERSION });
-  }
-
-  async function checkAndAutoUpdate() {
-    emitAutoUpdate("auto-update-query", { current: VERSION });
-    const info = await run(npmCmd(), ["view", "mslxdff", "dist-tags.latest", "--json"]);
-    if (info.err) {
-      emitAutoUpdate("auto-update-query-failed", { error: info.err.message || String(info.stderr || "").slice(0, 500) });
-      throw new Error(info.err.message || String(info.stderr || "").slice(0, 500));
-    }
-    let latest = "";
-    try {
-      latest = JSON.parse(String(info.stdout || "").trim());
-      if (Array.isArray(latest)) latest = latest[latest.length - 1];
-      latest = String(latest || "").replace(/^v/, "").trim();
-    } catch {
-      const raw = String(info.stdout || "").trim();
-      const m = raw.match(/(\d+\.\d+\.\d+[^\s'"]*)/);
-      latest = m ? m[1] : raw.split(/\s+/).pop()?.replace(/['"]/g, "") || "";
-    }
-    latest = latest.replace(/['"]/g, "").trim();
-    emitAutoUpdate("auto-update-queried", { current: VERSION, latest, stdout: String(info.stdout || "").trim().slice(0, 200) });
-    if (!latest || latest === VERSION) {
-      emitAutoUpdate("auto-update-noop", { current: VERSION, latest });
-      return;
-    }
-    const { compareSemver } = await import("../cli/policy.js");
-    if (compareSemver(latest, VERSION) <= 0) {
-      emitAutoUpdate("auto-update-noop", { current: VERSION, latest, reason: "not newer" });
-      return;
-    }
-    emitAutoUpdate("auto-update-found", { current: VERSION, latest });
-    console.log(`auto-update: v${VERSION} -> v${latest}, installing...`);
-    emitAutoUpdate("auto-update-installing", { current: VERSION, latest });
-    const up = await run(npmCmd(), ["install", "-g", `mslxdff@${latest}`]);
-    if (up.err) {
-      emitAutoUpdate("auto-update-install-failed", { current: VERSION, latest, error: up.err.message || String(up.stderr || "").slice(0, 500) });
-      throw new Error(up.err.message || String(up.stderr || "").slice(0, 500));
-    }
-    emitAutoUpdate("auto-update-installed", { current: VERSION, latest, stdout: String(up.stdout || "").slice(0, 500) });
-    console.log(`auto-update: installed v${latest}, restarting daemon...`);
-    emitAutoUpdate("auto-update-restarting", { current: VERSION, latest });
-    const { stopDaemon, startDaemon } = await import("../daemon.js");
-    try { stopDaemon(); } catch (e) { emitAutoUpdate("auto-update-stop-failed", { error: errMsg(e) }); }
-    const { waitForHealth } = await import("../cli/policy.js");
-    const newPid = startDaemon([]);
-    await waitForHealth(resolvePort(), 8000);
-    console.log(`auto-update: restarted as v${latest} (pid ${newPid})`);
-    emitAutoUpdate("auto-update-restarted", { current: VERSION, latest, newPid });
-  }
+  const { setupAutoUpdate } = await import("./auto-update.js");
+  setupAutoUpdate({ VERSION, bus, logs });
 }
 
 

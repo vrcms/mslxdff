@@ -159,6 +159,8 @@ async function linuxEnable() {
   // stop bare detached daemon that may hold the port, let systemd take over (best-effort, wait for port free)
   try {
     const { isPidAlive, stopDaemon } = await import("../daemon.js");
+    const { resolvePort } = await import("../server.js");
+    const port = resolvePort();
     const pidFile = join(homedir(), ".config", "mslxdff", "daemon.pid");
     const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");
     let pidToWait = null;
@@ -177,16 +179,50 @@ async function linuxEnable() {
         await new Promise((r2) => setTimeout(r2, 200));
       } else break;
     }
-    // best-effort: fuser kill port if still held (some pid without pid file)
-    try { await execAsync("fuser", ["-k", "8989/tcp"]); } catch {}
-    // stop any leftover systemd instance before start
+    // robust: scan ss for any holder of :port (covers stale pidFile, fuser not installed)
+    const killHolders = async () => {
+      let killed = 0;
+      try {
+        const r = await execAsync("ss", ["-lptn", `sport = :${port}`]);
+        const out = r.stdout || "";
+        const re = /pid=(\d+)/g;
+        let m;
+        const pids = new Set();
+        while ((m = re.exec(out))) pids.add(Number(m[1]));
+        // fallback: full ss if sport filter empty (busybox ss)
+        if (!pids.size) {
+          const r2 = await execAsync("ss", ["-lptn"]);
+          const out2 = r2.stdout || "";
+          // only consider lines containing :port
+          for (const line of out2.split("\n")) {
+            if (!line.includes(`:${port}`)) continue;
+            const re2 = /pid=(\d+)/g;
+            let m2;
+            while ((m2 = re2.exec(line))) pids.add(Number(m2[1]));
+          }
+        }
+        for (const p of pids) {
+          if (p === process.pid) continue;
+          try { process.kill(p, "SIGTERM"); killed++; } catch {}
+        }
+        if (killed) await new Promise((r2) => setTimeout(r2, 400));
+        for (const p of pids) {
+          try { if (isPidAlive(p)) process.kill(p, "SIGKILL"); } catch {}
+        }
+      } catch {}
+      // fuser as extra best-effort (may not exist)
+      try { await execAsync("fuser", ["-k", `${port}/tcp`]); } catch {}
+      return killed;
+    };
+    await killHolders();
+    // stop any leftover systemd instance before start (avoid double)
     try { await execAsync("systemctl", ["--user", "stop", SERVICE_NAME]); } catch {}
-    // wait for :8989 to be free
-    for (let i = 0; i < 15; i++) {
+    // wait for :port to be free (ss probe)
+    for (let i = 0; i < 20; i++) {
       const chk = await execAsync("ss", ["-ltn"]);
-      if (!chk.stdout.includes(":8989")) break;
-      await new Promise((r2) => setTimeout(r2, 200));
-      if (i === 8) try { await execAsync("fuser", ["-k", "8989/tcp"]); } catch {}
+      if (!chk.stdout.includes(`:${port}`)) break;
+      if (i === 6 || i === 12) await killHolders();
+      await new Promise((r2) => setTimeout(r2, 250));
     }
   } catch {}
   let r = await execAsync("systemctl", ["--user", "daemon-reload"]);
