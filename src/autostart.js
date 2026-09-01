@@ -156,21 +156,37 @@ async function linuxEnable() {
       lingerRes = lr.err ? (lr.stderr || lr.stdout || lr.err.message || "").slice(0, 200) : "ok";
     }
   } catch {}
-  // stop bare detached daemon that may hold the port, let systemd take over (best-effort)
+  // stop bare detached daemon that may hold the port, let systemd take over (best-effort, wait for port free)
   try {
-    const { readPid, isPidAlive } = await import("../daemon.js");
-    const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");
-    // Only stop if pid exists and is alive and not already managed by systemd
+    const { isPidAlive, stopDaemon } = await import("../daemon.js");
     const pidFile = join(homedir(), ".config", "mslxdff", "daemon.pid");
-    if (exists2(pidFile)) {
-      const raw = read2(pidFile, "utf8").trim().split("\n")[0];
-      const pid = Number(raw);
-      if (Number.isInteger(pid) && pid > 0) {
-        try { if (isPidAlive(pid)) { const { stopDaemon } = await import("../daemon.js"); stopDaemon(); await new Promise((r2) => setTimeout(r2, 600)); } } catch {}
+    const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");
+    let pidToWait = null;
+    try {
+      if (exists2(pidFile)) {
+        const raw = read2(pidFile, "utf8").trim().split("\n")[0];
+        const n = Number(raw);
+        if (Number.isInteger(n) && n > 0 && isPidAlive(n)) pidToWait = n;
       }
-    } else {
-      // No pid file, try generic stop (no-op if none)
-      try { const { stopDaemon } = await import("../daemon.js"); stopDaemon(); } catch {}
+    } catch {}
+    try { stopDaemon(); } catch {}
+    // ensure bare daemon really exits (SIGTERM -> SIGKILL)
+    for (let i = 0; i < 15; i++) {
+      if (pidToWait && isPidAlive(pidToWait)) {
+        if (i === 7) try { process.kill(pidToWait, "SIGKILL"); } catch {}
+        await new Promise((r2) => setTimeout(r2, 200));
+      } else break;
+    }
+    // best-effort: fuser kill port if still held (some pid without pid file)
+    try { await execAsync("fuser", ["-k", "8989/tcp"]); } catch {}
+    // stop any leftover systemd instance before start
+    try { await execAsync("systemctl", ["--user", "stop", SERVICE_NAME]); } catch {}
+    // wait for :8989 to be free
+    for (let i = 0; i < 15; i++) {
+      const chk = await execAsync("ss", ["-ltn"]);
+      if (!chk.stdout.includes(":8989")) break;
+      await new Promise((r2) => setTimeout(r2, 200));
+      if (i === 8) try { await execAsync("fuser", ["-k", "8989/tcp"]); } catch {}
     }
   } catch {}
   let r = await execAsync("systemctl", ["--user", "daemon-reload"]);
