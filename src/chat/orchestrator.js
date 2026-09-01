@@ -64,7 +64,7 @@ export function createOrchestrator({
     let first;
     let firstMs = 0;
     if (firstCooling) {
-      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 跳过（冷却中）· 直接试 ${CHAT_FALLBACK}\x1b[0m`);
+      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 跳过（冷却 10min）· 额度用完，准备走网关 auto（将尝试其他可用模型）\x1b[0m`);
       first = { ok: false, error: "skip cooling", status: 429 };
     } else {
       const t = perf.now();
@@ -81,13 +81,16 @@ export function createOrchestrator({
     }
 
     if (firstCooling) {
-      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 冷却中（${CHAT_COOLDOWN_MS / 60000}min）· 直接走网关 auto，跳过 ${CHAT_FALLBACK}\x1b[0m`);
-      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 冷却，直接走网关 auto（:8989）\x1b[0m`);
+      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 冷却中（${CHAT_COOLDOWN_MS / 60000}min）· 直接走网关 auto（:8989），按 auto 择优尝试其他可用模型，跳过 ${CHAT_FALLBACK} 直连\x1b[0m`);
       const t2 = TRACE ? perf.now() : 0;
       const third = await _gateway(opts);
       if (TRACE) console.log(`\x1b[90m· [LLM] gateway auto ${third.ok ? "OK" : "FAIL"} · ${Math.round(perf.now() - t2)}ms · 总 ${Math.round(perf.now() - t0)}ms (gateway-fallback)\x1b[0m`);
       if (third.ok) return { ...third, model: third.model || "auto", fallbackGateway: true, fallback: true, firstError: first.error, secondError: "skip big-pickle (mimo cooling)", viaGateway: true };
-      return { ok: false, error: `${CHAT_PREFERRED} cooling: ${first.error}; gateway auto failed: ${third.error}`, status: third.status || 429 };
+      const isGwDown = third.code === "GATEWAY_NOT_RUNNING" || /本地(网关未运行|服务没有启动)/.test(String(third.error || ""));
+      if (isGwDown) {
+        return { ok: false, error: `${CHAT_PREFERRED} 冷却跳过（额度用完 10min）；${third.error} —— 本次 auto 未能尝试任何其他模型，因网关未就绪（3ms 失败即证明未触达上游，请先启动网关再重试）`, status: 502, code: "GATEWAY_NOT_RUNNING" };
+      }
+      return { ok: false, error: `${CHAT_PREFERRED} 冷却跳过（额度用完）；网关 auto 已尝试其他可用模型但均失败：${third.error}（总 ${Math.round(perf.now() - t0)}ms）`, status: third.status || 429 };
     }
 
     const secondCooling = await isCoolingAsync(CHAT_FALLBACK);
@@ -102,12 +105,14 @@ export function createOrchestrator({
     };
 
     if (secondCooling) {
-      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_FALLBACK} 跳过（冷却中）· 直接走网关 auto\x1b[0m`);
+      if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_FALLBACK} 跳过（冷却中）· 直接走网关 auto（将尝试其他可用模型）\x1b[0m`);
       const t2 = perf.now();
       const third = await doGateway();
       if (TRACE) console.log(`\x1b[90m· [LLM] gateway auto ${third.ok ? "OK" : "FAIL"} · ${Math.round(perf.now() - t2)}ms · 总 ${Math.round(perf.now() - t0)}ms (gateway-fallback)\x1b[0m`);
       if (third.ok) return { ...third, model: third.model || "auto", fallbackGateway: true, fallback: true, firstError: first.error, secondError: "skip cooling", viaGateway: true };
-      return { ok: false, error: `${CHAT_PREFERRED} failed: ${first.error}; ${CHAT_FALLBACK} failed: skip cooling; gateway auto failed: ${third.error}`, status: third.status || first.status };
+      const isGwDown2 = third.code === "GATEWAY_NOT_RUNNING" || /本地(网关未运行|服务没有启动)/.test(String(third.error || ""));
+      if (isGwDown2) return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 冷却跳过；${third.error} —— auto 未能尝试其他模型（网关未就绪）`, status: 502, code: "GATEWAY_NOT_RUNNING" };
+      return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 冷却跳过；网关 auto 已尝试其他模型但均失败：${third.error}（总 ${Math.round(perf.now() - t0)}ms）`, status: third.status || first.status };
     }
 
     if (TRACE) console.log(`\x1b[90m· [LLM] ${CHAT_PREFERRED} 失败，${CHAT_FALLBACK} + gateway 对冲中（${HEDGE_MS}ms）\x1b[0m`);
@@ -167,7 +172,9 @@ export function createOrchestrator({
       secondRes = sRes; gatewayRes = gRes;
       if (sRes?.ok) return { ...sRes, model: CHAT_FALLBACK, fallback: true, firstError: first.error };
       if (gRes?.ok) return { ...gRes, model: gRes.model || "auto", fallbackGateway: true, fallback: true, firstError: first.error, secondError: sRes?.error, viaGateway: true };
-      return { ok: false, error: `${CHAT_PREFERRED} failed: ${first.error}; ${CHAT_FALLBACK} failed: ${sRes?.error}; gateway auto failed: ${gRes?.error}`, status: gRes?.status || sRes?.status || first.status };
+      const gwDown0 = gRes?.code === "GATEWAY_NOT_RUNNING" || /本地(网关未运行|服务没有启动)/.test(String(gRes?.error || ""));
+      if (gwDown0) return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 失败：${sRes?.error}；${gRes?.error} —— gateway 侧 auto 未能尝试其他模型（网关未就绪）`, status: 502, code: "GATEWAY_NOT_RUNNING" };
+      return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 失败：${sRes?.error}；网关 auto 已尝试其他模型但均失败：${gRes?.error}（总 ${Math.round(perf.now() - t0)}ms）`, status: gRes?.status || sRes?.status || first.status };
     }
 
     const raced = await raceFirstOk();
@@ -183,7 +190,9 @@ export function createOrchestrator({
       try { gatewayRes = await (gatewayPromise || doGateway()); } catch (e) { gatewayRes = { ok: false, error: String(e), status: 502 }; }
     }
     if (gatewayRes?.ok) return { ...gatewayRes, model: gatewayRes.model || "auto", fallbackGateway: true, fallback: true, firstError: first.error, secondError: secondRes?.error, viaGateway: true };
-    return { ok: false, error: `${CHAT_PREFERRED} failed: ${first.error}; ${CHAT_FALLBACK} failed: ${secondRes?.error}; gateway auto failed: ${gatewayRes?.error}`, status: gatewayRes?.status || secondRes?.status || first.status };
+    const gwDown = gatewayRes?.code === "GATEWAY_NOT_RUNNING" || /本地(网关未运行|服务没有启动)/.test(String(gatewayRes?.error || ""));
+    if (gwDown) return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 失败：${secondRes?.error}；${gatewayRes?.error} —— gateway 侧 auto 未能尝试其他模型（网关未就绪）`, status: 502, code: "GATEWAY_NOT_RUNNING" };
+    return { ok: false, error: `${CHAT_PREFERRED} 失败：${first.error}；${CHAT_FALLBACK} 失败：${secondRes?.error}；网关 auto 已尝试其他模型但均失败：${gatewayRes?.error}（总 ${Math.round(perf.now() - t0)}ms）`, status: gatewayRes?.status || secondRes?.status || first.status };
   }
 
   async function summarizeHistory(messages) {

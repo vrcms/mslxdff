@@ -5,6 +5,7 @@ import { chatHandler } from "./chat.js";
 import { joinHandler, leaveHandler } from "./groups.js";
 import { heartbeatHandler, pollHandler, resultHandler, forwardHandler } from "./groups-relay.js";
 import { modelsHandler, modelsStatusHandler, providerModelsHandler } from "./models-route.js";
+import { relayHandler } from "./relay.js";
 
 export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins }) {
   return async function router(req, res) {
@@ -77,6 +78,12 @@ const ROUTES = [
     path: "/v1/groups/relay/forward",
     requiresAuth: true,
     handler: forwardHandler,
+  },
+  {
+    method: "POST",
+    path: "/v1/relay",
+    requiresAuth: true,
+    handler: relayHandler,
   },
   {
     method: "GET",

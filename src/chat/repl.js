@@ -6,7 +6,7 @@ import { getToolDefs, execCommand, readFileTool, curlTool } from "./tools.js";
 import { chatWithFallback, summarizeHistory } from "./upstream.js";
 import { loadHistory, saveHistory, clearHistory, histPath, estimateChars, needsCompress } from "./store.js";
 import { CHAT_KEEP_RECENT, CHAT_MAX_TOOL_LOOPS, CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
-import { formatBannerLines, formatStatsDetail, collectStats } from "./stats.js";
+import { formatBannerLines, formatStatsDetail, collectStats, probeGateway } from "./stats.js";
 import { createSpinner } from "./spinner.js";
 import { normalizeFullId } from "../providers/model-id.js";
 
@@ -18,9 +18,17 @@ const SLASH_HELP = `自然语言直接说，斜杠快捷：
   /exit     退出
 示例：设置 hy3 为默认模型 / 查看组列表 / 看最近20条日志 / 读一下 src/logs.js`;
 
-function printBanner() {
-  const { lines } = formatBannerLines();
+async function printBanner() {
+  let probe = null;
+  try {
+    const s = collectStats();
+    probe = await probeGateway(s.port, 800);
+  } catch {}
+  const { lines } = formatBannerLines(probe);
   for (const l of lines) console.log(l);
+  if (probe && !probe.alive) {
+    console.log(`\x1b[31m本地服务没有启动无法使用auto模式，请mslxdff -d 启动\x1b[0m`);
+  }
   console.log(`\x1b[90m输入自然语言即可执行；/help 帮助，/stats 看网关统计，/exit 退出\x1b[0m`);
   console.log(`\x1b[90m历史：${histPath()} · 仅拦截 -uninstall · 数据来自网关 -d，非本会话计数\x1b[0m`);
 }
@@ -283,7 +291,7 @@ export async function startRepl({ singleShot } = {}) {
     saveHistory(messages.slice(1));
     return;
   }
-  printBanner();
+  await printBanner();
   const rl = readline.createInterface({ input: stdin, output: stdout, prompt: `\x1b[36m${CHAT_PREFERRED.split("-")[0]}>\x1b[0m ` });
   rl.prompt();
   for await (const line of rl) {

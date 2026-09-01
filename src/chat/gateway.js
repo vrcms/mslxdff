@@ -136,9 +136,13 @@ export function createGatewayClient({
       }
       return { ok: true, message: choice.message, usage: effectiveJ.usage || j.usage, raw: j, status: res.status, model: rawModel, provider, viaGateway: true };
     } catch (err) {
-      const msg = String(err?.message || err).slice(0, 800);
-      if (env.MSLXDFF_CHAT_TRACE !== "0") {
-        const dt2 = performance.now() - (performance.now() - 0); // placeholder, TRACE off in tests
+      const raw = String(err?.message || err);
+      const msg = raw.slice(0, 800);
+      const isConnRefused = /ECONNREFUSED|Failed to fetch|fetch failed|connect ECONNREFUSED|ECONNRESET|EADDRNOTAVAIL/i.test(raw);
+      if (isConnRefused) {
+        const friendly = `本地服务没有启动无法使用auto模式，请mslxdff -d 启动（本地网关 http://127.0.0.1:${port} 拒绝连接）— 3ms 内失败说明未触达任何模型（非模型额度问题）；若已改端口请用 mslxdff -port N 或 MSLXDFF_PORT=${port} 保持一致`;
+        if (TRACE) console.log(`\x1b[90m· [LLM] gateway auto FAIL · ${Math.round(performance.now() - t0)}ms · ${friendly} · ${msg.slice(0, 80)}\x1b[0m`);
+        return { ok: false, error: friendly, status: 502, code: "GATEWAY_NOT_RUNNING", port, raw: msg };
       }
       return { ok: false, error: `gateway ${msg}`, status: 502 };
     }
