@@ -23,6 +23,87 @@ function pad(s, n, align = "left") {
   return str + " ".repeat(d);
 }
 
+export function formatViaReport(results, { peers = [], meta = {}, json = false } = {}) {
+  const peerIds = (peers || []).map((p) => p.id || p.url || String(p));
+  const samples = meta.samples ?? 1;
+  const timeout = meta.timeout ?? 30000;
+  const includeOpencode = Boolean(meta.includeOpencode);
+  const opencodeTag = includeOpencode ? "opencode=included" : "opencode=skipped";
+  const at = meta.at || new Date().toISOString();
+  // build json shape
+  const jsonObj = {
+    meta: { at, samples, timeout, includeOpencode, peers: peerIds, opencodeSkipped: !includeOpencode, ...meta, peers: peerIds },
+    results: (results || []).map((r) => ({
+      provider: r.provider,
+      model: r.model || r.id,
+      direct: r.direct ? { ttfb: r.direct.ttfbMs, total: r.direct.totalMs, ok: r.direct.ok, label: r.direct.label, error: r.direct.error } : null,
+      via: Object.fromEntries(Object.entries(r.via || {}).map(([k, v]) => [k, v.ok ? { ttfb: v.ttfbMs, total: v.totalMs } : { error: v.label || v.error || "offline", label: v.label }])),
+      best: r.best,
+      deltaMs: r.deltaMs,
+      opencodeSkipped: r.opencodeSkipped,
+    })),
+    advice: (() => {
+      const viaBest = (results || []).find((r) => r.best?.startsWith("via:"));
+      if (viaBest) return `${viaBest.provider}/${viaBest.model} 经 ${viaBest.best.slice(4)} 最快`;
+      if ((results || []).length) return `${results[0].provider} 走 direct 即可`;
+      return "无数据";
+    })(),
+  };
+  if (json) {
+    return { text: JSON.stringify(jsonObj, null, 2), json: jsonObj };
+  }
+  const lines = [];
+  lines.push(`bench-via: direct vs via peers (samples=${samples}, timeout=${timeout / 1000}s, ${opencodeTag})`);
+  lines.push("");
+  const header = `${pad("Provider", 12)} ${pad("Model", 24)} ${pad("direct", 8, "right")} ${peerIds.map((id) => pad(`via ${id}`, 10, "right")).join(" ")} ${pad("best", 14)}`;
+  lines.push(header);
+  lines.push("─".repeat(header.length));
+  for (const r of results || []) {
+    const provider = pad(r.provider || "", 12);
+    const model = pad(r.model || r.id || "", 24);
+    const directOk = r.direct?.ok;
+    const directTxt = directOk ? `${r.direct.ttfbMs ?? "—"}ms` : (r.direct?.label || "—");
+    // determine best ttfb for ★
+    const all = [];
+    if (r.direct?.ok) all.push({ key: "direct", ttfb: r.direct.ttfbMs ?? r.direct.totalMs });
+    for (const pid of peerIds) {
+      const v = r.via?.[pid];
+      if (v?.ok) all.push({ key: `via:${pid}`, ttfb: v.ttfbMs ?? v.totalMs });
+    }
+    let bestKey = r.best;
+    if (!bestKey && all.length) bestKey = all.sort((a, b) => a.ttfb - b.ttfb)[0].key;
+    const isDirectBest = bestKey === "direct";
+    const directCell = pad(`${directTxt}${isDirectBest ? "★" : ""}`, 8, "right");
+    const viaCells = peerIds.map((pid) => {
+      const v = r.via?.[pid];
+      if (!v) return pad("—", 10, "right");
+      if (v.ok) {
+        const txt = `${v.ttfbMs ?? v.totalMs ?? "—"}ms`;
+        const star = bestKey === `via:${pid}` ? "★" : "";
+        return pad(`${txt}${star}`, 10, "right");
+      }
+      const label = v.label || v.error || "offline";
+      // map offline label
+      const short = label.includes("离线") ? "offline" : label.slice(0, 8);
+      return pad(`— ${short}`, 10, "right");
+    }).join(" ");
+    let bestTxt = r.best || "direct";
+    if (r.deltaMs != null && r.best?.startsWith("via:")) {
+      const pct = r.direct?.ttfbMs ? Math.round((r.deltaMs / r.direct.ttfbMs) * 100) : 0;
+      bestTxt = `${r.best} ${pct}%`;
+    }
+    lines.push(`${provider} ${model} ${directCell} ${viaCells} ${pad(bestTxt, 14)}`);
+  }
+  lines.push("─".repeat(header.length));
+  const viaBestExample = (results || []).find((r) => r.best?.startsWith("via:"));
+  if (viaBestExample) lines.push(`建议：A 经 ${viaBestExample.best.slice(4)} 打 ${viaBestExample.provider} 最快；其余走 direct。`);
+  else if ((results || []).length) lines.push(`建议：${results[0].provider} 走 direct 即可。`);
+  else lines.push("建议：无数据");
+  lines.push(`提示：via 已跳过 opencode（省额度），需对比 opencode 请加 --include-opencode`);
+  lines.push(`* via 单样本，仅作参考，多次 --samples 2 取均值更稳`);
+  return { text: lines.join("\n"), json: jsonObj };
+}
+
 export function formatReport(results, { json = false } = {}) {
   const sorted = sortResults(results);
   const winner = sorted.find((r) => r.ok) || null;
