@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.68`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速）。最后更新：2026-08-31。
+> 适用版本：`>=0.1.79`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速 + `bench --via` 直连 vs 经 peer 延迟对比 + opencode 匿名 hermes 优先）。最后更新：2026-09-01。
 
 ## 目录
 
@@ -65,6 +65,7 @@
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
+| `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
@@ -575,6 +576,38 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider workbuddy bench
   mslxdff -provider workbuddy bench --json | jq .
   mslxdff -provider myapi bench --prompt "hi" --max-tokens 32 --timeout 30000
+  ```
+
+#### `mslxdff -provider <id> bench --via` / `mslxdff -provider bench --via`（家宽选路：直连 vs 经 peer 延迟对比）
+
+- **语法**：`mslxdff -provider bench --via [--include-opencode] [--json] [--samples N] [--timeout N]` / `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N]`
+- **作用**：同一上游模型，**现场比** `direct`（本机直连 `https://opencode.ai`）与经每个在线 `peer` 转发的 `TTFB`。家宽/出口 IP 不同会导致限流与首字延迟差很大，此命令一测就知道走哪条路最快。
+- **行为**：
+  - **不写 state**：结果仅打印与 `stdout`，不改 `preferredModel`/`allowlist`。
+  - **串行省额度**：同一模型对 `direct + 每个 peer` 串行发 `POST <baseUrl><chatPath>` 轻探针（`max_tokens=5 prompt=hi stream:false`，剥 `provider/` 前缀），每个结果记 `TTFB/总耗时/TPS/ok/error/label`。
+  - **额度保护**：默认**跳过** `opencode` 供应商（`opencode` 为免费共享池，走 `peer` 对冲会烧组员额度）。如确需包含，必须加 `--include-opencode`，且 **TTY 二次确认 `y/N`**（`[bench-via] 组员额度保护：默认跳过 opencode … --include-opencode y/N > `），`非 TTY`（脚本/CI）直接跳过并提示。
+  - **空状态**：无已加入组或全离线时直接空状态引导 ` -group list`（不发起任何探针），`direct` 与 `via` 共用同一 `runOne` 测 `TTFB`，统一 `formatViaReport` 打印 `bench-via: direct vs via` 头、`★` 最快、`— offline`。
+  - **`--json`**：`stdout` 纯 `{"meta":{"provider","model","samples","timeoutMs","includeOpencode"},"results":[…],"advice":"…"}`，进度与告警走 `stderr`（便于 `jq`）。
+- **输出（文本）**：
+  ```
+  [bench-via] 测试 workbuddy/hy3: direct + 2 peer(s) 串行（max_tokens=5，30000ms 超时）...
+    [1/3] via direct ... OK  TTFB 120ms  总 800ms
+    [2/3] via p1 (192.168.1.8) ... OK  TTFB 80ms  总 600ms
+    [3/3] via p2 (10.0.0.5) ... offline
+  bench-via: direct vs via (workbuddy/hy3)  samples=1  timeout=30000ms
+    direct                TTFB 120ms  总 800ms  ★ ——
+    via p1 (192.168.1.8)  TTFB 80ms   总 600ms  ★ 最快
+    via p2                — offline
+  建议：经 p1 最快，可让该 peer 优先承载此模型。
+  ```
+  空组时：`暂无在线 peer（空组）— 先 mslxdff -group list 查看/加组`。
+- **示例**：
+  ```bash
+  mslxdff -provider bench --via                          # 对当前 preferredModel
+  mslxdff -provider workbuddy bench --via                 # 对 workbuddy 的 preferredModel
+  mslxdff -provider workbuddy bench --via --json | jq .  # 脚本
+  mslxdff -provider bench --via --include-opencode       # 含 opencode（TTY 会二次确认）
+  mslxdff -provider bench --via --samples 3 --timeout 10000
   ```
 
 #### `mslxdff -provider clinebot login`（Cline 免 403：WorkOS 设备授权拿 refreshToken）

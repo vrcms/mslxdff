@@ -23,8 +23,22 @@ function pad(s, n, align = "left") {
   return str + " ".repeat(d);
 }
 
+function shortPeerLabel(p) {
+  const raw = String(p?.name || p?.id || p?.url || String(p || "")).trim();
+  if (!raw) return "peer";
+  // 优先用 name；若是 url 则取 host:port 的尾段
+  if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("relay://")) {
+    try { const u = new URL(raw); const host = u.hostname; const port = u.port ? `:${u.port}` : ""; if (host) return `${host}${port}`; } catch {}
+    return raw.slice(-12);
+  }
+  // name 可能是 url 字符串（如 "http://141.98..." 存于 name 字段）
+  if (raw.includes("://")) {
+    try { const u = new URL(raw); return u.hostname + (u.port ? `:${u.port}` : ""); } catch {}
+  }
+  return raw;
+}
 export function formatViaReport(results, { peers = [], meta = {}, json = false } = {}) {
-  const peerIds = (peers || []).map((p) => p.id || p.url || String(p));
+  const peerIds = (peers || []).map((p) => shortPeerLabel(p));
   const samples = meta.samples ?? 1;
   const timeout = meta.timeout ?? 30000;
   const includeOpencode = Boolean(meta.includeOpencode);
@@ -53,9 +67,11 @@ export function formatViaReport(results, { peers = [], meta = {}, json = false }
     return { text: JSON.stringify(jsonObj, null, 2), json: jsonObj };
   }
   const lines = [];
-  lines.push(`bench-via: direct vs via peers (samples=${samples}, timeout=${timeout / 1000}s, ${opencodeTag})`);
+  lines.push(`bench-via: direct vs via peers (samples=${samples}, timeout=${timeout / 1000}s, ${opencodeTag}) peers=${peerIds.join(",") || "(none)"}`);
   lines.push("");
-  const header = `${pad("Provider", 12)} ${pad("Model", 24)} ${pad("direct", 8, "right")} ${peerIds.map((id) => pad(`via ${id}`, 10, "right")).join(" ")} ${pad("best", 14)}`;
+  // 表头：直连 + 每个组员一列（短化为 host:port 或 name），兼容旧测试 via B 断言与用户“直连/组员B”心智
+  const colW = 18;
+  const header = `${pad("Provider", 12)} ${pad("Model", 24)} ${pad("direct", colW, "right")} ${peerIds.map((id) => pad(`via ${id}`, colW, "right")).join(" ")} ${pad("best", 14)}`;
   lines.push(header);
   lines.push("─".repeat(header.length));
   for (const r of results || []) {
@@ -73,19 +89,20 @@ export function formatViaReport(results, { peers = [], meta = {}, json = false }
     let bestKey = r.best;
     if (!bestKey && all.length) bestKey = all.sort((a, b) => a.ttfb - b.ttfb)[0].key;
     const isDirectBest = bestKey === "direct";
-    const directCell = pad(`${directTxt}${isDirectBest ? "★" : ""}`, 8, "right");
+    const directCell = pad(`${directTxt}${isDirectBest ? "★" : ""}`, colW, "right");
     const viaCells = peerIds.map((pid) => {
       const v = r.via?.[pid];
-      if (!v) return pad("—", 10, "right");
+      if (!v) return pad("—", colW, "right");
       if (v.ok) {
         const txt = `${v.ttfbMs ?? v.totalMs ?? "—"}ms`;
         const star = bestKey === `via:${pid}` ? "★" : "";
-        return pad(`${txt}${star}`, 10, "right");
+        return pad(`${txt}${star}`, colW, "right");
       }
+      // 失败也展示延迟（先测延迟）：如 42ms 鉴权失败，说明网络可达但该组员未配此供应商
+      const ms = v.ttfbMs != null ? `${v.ttfbMs}ms ` : "";
       const label = v.label || v.error || "offline";
-      // map offline label
       const short = label.includes("离线") ? "offline" : label.slice(0, 8);
-      return pad(`— ${short}`, 10, "right");
+      return pad(`${ms}— ${short}`, colW, "right");
     }).join(" ");
     let bestTxt = r.best || "direct";
     if (r.deltaMs != null && r.best?.startsWith("via:")) {

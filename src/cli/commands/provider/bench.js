@@ -187,7 +187,30 @@ async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, l
       return runOne({ baseUrl: p === "opencode" ? (process.env.UPSTREAM_BASE_URL || "https://opencode.ai") : baseUrl, chatPath, model, providerId: p, apiKey: key || "public", headers, prompt: "hi", maxTokens: 5, timeoutMs: opts.timeoutMs, fetchImpl });
     };
     const { viaProbe } = await import("../../../bench/via-probe.js");
-    const viaProbeFn = (args) => viaProbe({ ...args, token, fetchImpl });
+    const { joinUrl: _joinUrl } = await import("../../../providers/base.js");
+    const viaProbeFn = async (args) => {
+      // 纯中继：A 把 targetUrl+headers+body 发给 B，B 原样 fetch 到上游（不查 B 本地 providerConfigs）
+      const { peerUrl, providerId, model } = args;
+      const p = providerId || pid;
+      const idx = models.findIndex((x) => x.model === model);
+      const kIdx = idx >= 0 ? idx % (keys.length || 1) : 0;
+      const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
+      const key = keys[kIdx] || keys[0] || "";
+      const auth = auths[aIdx] || auths[0] || null;
+      const cKeys = keys.filter((k) => isRefreshToken(k));
+      if (cKeys.length) {
+        // cline refreshToken 需特殊流，暂走旧的 peer chat（peer 需自有 cline 配置）
+        return viaProbe({ ...args, token, fetchImpl });
+      }
+      const rawModel = String(model).startsWith(`${p}/`) ? String(model).slice(p.length + 1) : String(model);
+      const targetUrl = p === "opencode" ? `${process.env.UPSTREAM_BASE_URL || "https://opencode.ai"}/zen/v1/chat/completions` : `${String(baseUrl).replace(/\/+$/, "")}${chatPath}`;
+      const headers = buildHeadersForProvider(p, key, auth);
+      const body = { model: rawModel, stream: false, messages: [{ role: "user", content: "hi" }], max_tokens: 5 };
+      // 用对端 peer.token 做 relay 鉴权（B 只认自己的 Bearer）
+      const peer = peers.find((pe) => pe.url === peerUrl || (pe.name || pe.id) === peerUrl);
+      const peerToken = peer?.token || token;
+      return viaProbe({ peerUrl, token: peerToken, relayTarget: targetUrl, relayHeaders: headers, relayBody: body, timeoutMs: opts.timeoutMs, fetchImpl });
+    };
     const part = await orchestrateVia({ models, peers, directRunner, viaProbeFn, includeOpencode, token, timeoutMs: opts.timeoutMs });
     allResults.push(...part);
     if (!opts.json) viaLog(`  ${pid}: ${part.length} 模型完成`);

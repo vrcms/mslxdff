@@ -23,8 +23,8 @@ export function clineHeaders(sessionId, token) {
 export function isRefreshToken(key) {
   const s = String(key || "").trim();
   if (!s) return false;
-  // sk_ 形态直接视为旧直连 key，不走 refresh 链
-  if (s.startsWith("sk_")) return false;
+  // sk_ / sk- 形态直接视为旧直连 key（OpenAI 兼容网关），不走 refresh 链
+  if (s.startsWith("sk_") || s.startsWith("sk-")) return false;
   // refreshToken 通常为 JWT 或长随机串，长度 > 20 且含 . 或 -
   if (s.length > 20) return true;
   return false;

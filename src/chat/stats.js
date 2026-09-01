@@ -141,17 +141,40 @@ export function collectStats() {
   };
 }
 
-export function formatBannerLines() {
+export async function probeGateway(port, timeoutMs = 800) {
+  const url = `http://127.0.0.1:${port}/health`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    return { alive: r.ok, status: r.status, ms: 0 };
+  } catch (e) {
+    clearTimeout(t);
+    const msg = String(e?.message || e);
+    const isRefused = /ECONNREFUSED|Failed to fetch|fetch failed|ECONNRESET|abort/i.test(msg);
+    return { alive: false, status: 0, error: msg, refused: isRefused };
+  }
+}
+
+export function formatBannerLines(healthProbe = null) {
   const s = collectStats();
   const dim = "\x1b[90m";
   const rst = "\x1b[0m";
   const cyan = "\x1b[36m";
   const yellow = "\x1b[33m";
   const green = "\x1b[32m";
+  const red = "\x1b[31m";
+  const bgRed = "\x1b[41m\x1b[37m";
   const lines = [];
   lines.push(`${cyan}┌─ mslxdff chat  ·  数据来自 -d 网关进程（非本会话） ─────${rst}`);
+  if (healthProbe && !healthProbe.alive) {
+    lines.push(`${red}│  ✗ 本地服务没有启动无法使用auto模式，请mslxdff -d 启动  ·  ${s.healthUrl} 拒绝连接（${healthProbe.error?.slice(0,60) || "ECONNREFUSED"}）${rst}`);
+    lines.push(`${red}│  → 先在另一终端执行: mslxdff -d  (或 mslxdff)  启动后回此窗口重试，期间仅 mimo/big-pickle 直连可用，auto 不可用${rst}`);
+  }
   lines.push(`${cyan}│${rst}  对话模型  ${yellow}${s.chatPref}${rst} ${dim}→ ${s.chatFall} → gateway auto:8989${rst}  ${dim}[${s.chatPrefStatus}/${s.chatFallStatus}]${rst}  ${dim}三级兜底${rst}`);
-  lines.push(`${cyan}│${rst}  网关默认  ${green}${s.gatewayModel}${rst} ${dim}[${s.gatewayStatus}]${rst}  ·  端口 ${s.port}  ·  ${dim}${s.endpointUrl}${rst}`);
+  const gwAliveTag = healthProbe ? (healthProbe.alive ? `${green}● 运行中${rst}` : `${red}● 未运行${rst}`) : `${dim}…检测中${rst}`;
+  lines.push(`${cyan}│${rst}  网关默认  ${green}${s.gatewayModel}${rst} ${dim}[${s.gatewayStatus}]${rst}  ·  端口 ${s.port} ${gwAliveTag}  ·  ${dim}${s.endpointUrl}${rst}`);
   const prefTtfb = s.chatPrefStat?.avgTtfbMs ?? s.chatPrefStat?.emaTtfbMs ?? s.chatPrefLat?.emaMs;
   const fallTtfb = s.chatFallStat?.avgTtfbMs ?? s.chatFallStat?.emaTtfbMs ?? s.chatFallLat?.emaMs;
   const gateTtfb = s.gatewayStat?.avgTtfbMs ?? s.gatewayStat?.emaTtfbMs ?? s.gatewayLat?.emaMs;

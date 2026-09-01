@@ -99,9 +99,13 @@ export async function orchestrateVia({
     }
     const via = {};
     for (const peer of peers) {
-      const peerId = peer.id || peer.url || "peer";
+      const raw = String(peer.name || peer.id || peer.url || "peer");
+      let peerId = raw;
+      // 仅当 raw 本身就是 url 时才短化；显式 name/id 保持原样，避免 B → b:8989
+      if (!peer.name && !peer.id && raw.includes("://")) { try { const u = new URL(raw); peerId = u.hostname + (u.port ? `:${u.port}` : ""); } catch { peerId = raw.slice(-16); } }
+      const peerToken = peer.token || token || "";
       try {
-        const r = await viaProbeFn({ peerUrl: peer.url, token, providerId: provider, model, prompt: "hi", maxTokens: 5, timeoutMs, clock });
+        const r = await viaProbeFn({ peerUrl: peer.url, token: peerToken, providerId: provider, model, prompt: "hi", maxTokens: 5, timeoutMs, clock });
         via[peerId] = r;
       } catch (e) {
         via[peerId] = { ok: false, label: "网络错误", error: String(e?.message || e), ttfbMs: null, totalMs: 0 };
