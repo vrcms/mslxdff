@@ -25,7 +25,7 @@ test("upstream emits 9Router-parity headers (session/request/project/UA)", async
     const client = createUpstreamClient({ baseUrl:urlOf(srv) });
     await client.chat({ model:"deepseek-v4-flash-free", messages:[{role:"user",content:"hi"}], stream:true });
     assert.equal(seen["x-opencode-client"],"desktop");
-    assert.equal(seen["authorization"],"Bearer public");
+    assert.equal(seen["authorization"],"");
     assert.equal(seen["x-opencode-project"],"global");
     assert.match(seen["x-opencode-session"], /^ses_[0-9a-f]{32}$/);
     assert.match(seen["x-opencode-request"], /^msg_[0-9a-f]{32}$/);

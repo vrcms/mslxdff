@@ -59,13 +59,30 @@ export function createUpstreamClient({
       return null;
     }
   };
-  const baseHeaders = {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${authToken}`,
-    "x-opencode-client": "desktop",
-  };
+  function isAnonFirst() {
+    const raw = process.env.MSLXDFF_OPENCOD_ANON_FIRST ?? process.env.MSLXDFF_ANON_FIRST ?? process.env.MSLXDFF_OPENCOD_ANON;
+    if (raw === undefined || raw === null || raw === "") return authToken === "public";
+    const s = String(raw).trim().toLowerCase();
+    if (s === "0" || s === "false" || s === "off" || s === "no" || s === "disable" || s === "disabled") return false;
+    return authToken === "public";
+  }
+  const anonFirst = isAnonFirst();
+  const baseHeaders = anonFirst
+    ? {
+        "Content-Type": "application/json",
+        "Authorization": "",
+        "x-opencode-client": "desktop",
+        "User-Agent": "opencode",
+        "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+        "X-Title": "Hermes Agent",
+      }
+    : {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${authToken}`,
+        "x-opencode-client": "desktop",
+      };
 
-  function buildHeaders(body, { anonymous = false } = {}) {
+  function buildHeaders(body, { anonymous = anonFirst } = {}) {
     const isStream = body?.stream !== false;
     const base = {
       ...baseHeaders,
@@ -83,6 +100,11 @@ export function createUpstreamClient({
         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
         "X-Title": "Hermes Agent",
       };
+    }
+    // 显式 public 回退（anonFirst 时去掉 hermes 头）
+    if (anonFirst) {
+      const { "HTTP-Referer": _a, "X-Title": _b, ...rest } = base;
+      return { ...rest, "Authorization": `Bearer ${authToken}` };
     }
     return base;
   }
@@ -238,8 +260,8 @@ export function createUpstreamClient({
         waitMs += entry.delayMs;
         continue;
       }
-      // 额外额度探测：public 429 且为 free 模型时，用空头（hermes 方式）每秒重试 3 次
-      if (result.status === 429 && isFreeModel(body?.model) && shouldTryAnonFree()) {
+      // 额外额度探测：仅当非 anon 优先时，public 429 且为 free 模型时，用空头（hermes 方式）每秒重试 3 次；anon 优先时首发即高额度，无需再 public 撞墙
+      if (!anonFirst && result.status === 429 && isFreeModel(body?.model) && shouldTryAnonFree()) {
         const anonRetries = envInt("MSLXDFF_FREE_ANON_RETRIES", 3);
         const anonDelay = envInt("MSLXDFF_FREE_ANON_DELAY_MS", 1000);
         let anonResult = null;
@@ -349,7 +371,7 @@ export function createUpstreamClient({
     }
   }
 
-  async function attemptOnce(url, body, { anonymous = false } = {}) {
+  async function attemptOnce(url, body, { anonymous = anonFirst } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() =>
       controller.abort(new Error(`upstream timed out after ${connectTimeoutMs}ms`)),
