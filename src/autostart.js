@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -144,13 +144,48 @@ async function linuxEnable() {
   } catch (e) {
     return { ok: false, error: `write unit failed: ${e.message}` };
   }
+  // best-effort: enable linger so user service survives logout/SSH disconnect
+  let lingerRes = null;
+  try {
+    let who = "";
+    try { who = userInfo().username; } catch {}
+    who = who || process.env.USER || process.env.USERNAME || process.env.LOGNAME || "";
+    if (who) {
+      const lr = await execAsync("loginctl", ["enable-linger", who]);
+      lingerRes = lr.err ? (lr.stderr || lr.stdout || lr.err.message || "").slice(0, 200) : "ok";
+    }
+  } catch {}
+  // stop bare detached daemon that may hold the port, let systemd take over (best-effort)
+  try {
+    const { readPid, isPidAlive } = await import("../daemon.js");
+    const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");
+    // Only stop if pid exists and is alive and not already managed by systemd
+    const pidFile = join(homedir(), ".config", "mslxdff", "daemon.pid");
+    if (exists2(pidFile)) {
+      const raw = read2(pidFile, "utf8").trim().split("\n")[0];
+      const pid = Number(raw);
+      if (Number.isInteger(pid) && pid > 0) {
+        try { if (isPidAlive(pid)) { const { stopDaemon } = await import("../daemon.js"); stopDaemon(); await new Promise((r2) => setTimeout(r2, 600)); } } catch {}
+      }
+    } else {
+      // No pid file, try generic stop (no-op if none)
+      try { const { stopDaemon } = await import("../daemon.js"); stopDaemon(); } catch {}
+    }
+  } catch {}
   let r = await execAsync("systemctl", ["--user", "daemon-reload"]);
   if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
   r = await execAsync("systemctl", ["--user", "enable", SERVICE_NAME]);
   if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
-  // 可选立即拉起（不强求）
-  await execAsync("systemctl", ["--user", "start", SERVICE_NAME]);
-  return { ok: true, method: "systemd:user", unit };
+  r = await execAsync("systemctl", ["--user", "start", SERVICE_NAME]);
+  // Verify actually active; if not, surface journal hint
+  const chk = await execAsync("systemctl", ["--user", "is-active", SERVICE_NAME]);
+  const active = !chk.err && /active/i.test(chk.stdout);
+  if (!active) {
+    const st = await execAsync("systemctl", ["--user", "status", SERVICE_NAME, "--no-pager", "-l"]);
+    const hint = (st.stdout || st.stderr || r.stderr || r.stdout || "").slice(0, 600);
+    return { ok: false, error: `start failed (not active): ${hint || "check journalctl --user -u mslxdff"}`, unit, linger: lingerRes };
+  }
+  return { ok: true, method: "systemd:user", unit, linger: lingerRes };
 }
 
 async function linuxDisable() {
