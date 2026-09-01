@@ -20,12 +20,18 @@ export function clineHeaders(sessionId, token) {
   };
 }
 
-export function isRefreshToken(key) {
+export function isRefreshToken(key, providerId = "") {
   const s = String(key || "").trim();
   if (!s) return false;
-  // sk_ / sk- 形态直接视为旧直连 key（OpenAI 兼容网关），不走 refresh 链
+  // 仅 cline 系供应商才有 refreshToken 形态（WorkOS 设备授权）；其他一律走传统 Key
+  const pid = String(providerId || "").toLowerCase();
+  const baseHint = pid;
+  const isCline = baseHint.includes("cline");
+  if (!isCline) {
+    // 非 cline 供应商，即使长串也不视为 refreshToken，默认传统 Key（以后 xxx.bot 再扩展此处白名单）
+    return false;
+  }
   if (s.startsWith("sk_") || s.startsWith("sk-")) return false;
-  // refreshToken 通常为 JWT 或长随机串，长度 > 20 且含 . 或 -
   if (s.length > 20) return true;
   return false;
 }

@@ -45,8 +45,8 @@ export function createClineProvider({
     if (alt.length) extraKeys = alt;
   } catch {}
   const allKeys = [...new Set([...rawKeys, ...extraKeys].map((k) => String(k).trim()).filter(Boolean))];
-  const hasRefresh = allKeys.some((k) => isRefreshToken(k));
-  const ring = createKeyRing(allKeys.filter((k) => !isRefreshToken(k)), { cooldownMs });
+  const hasRefresh = allKeys.some((k) => isRefreshToken(k, id));
+  const ring = createKeyRing(allKeys.filter((k) => !isRefreshToken(k, id)), { cooldownMs });
 
   let dispatcher = null; let agent = null;
   const a = createAgent({ keepAliveTimeout: envInt("MSLXDFF_CLINE_KEEPALIVE_TIMEOUT", 30_000), keepAliveMaxTimeout: envInt("MSLXDFF_CLINE_KEEPALIVE_MAX_TIMEOUT", 60_000), connections: envInt("MSLXDFF_CLINE_KEEPALIVE_CONNECTIONS", 20) });
@@ -62,7 +62,7 @@ export function createClineProvider({
   // 新 refreshToken 模式
   let authPool = null; let newChatSvc = null;
   if (hasRefresh) {
-    const refreshTokens = allKeys.filter((k) => isRefreshToken(k));
+    const refreshTokens = allKeys.filter((k) => isRefreshToken(k, id));
     authPool = createAuthPool({
       id, keys: refreshTokens, fetchImpl, dispatcher, baseUrl: resolvedBase, file,
       saveFn: async ({ oldRefreshToken, newRefreshToken }) => {
@@ -94,13 +94,13 @@ export function createClineProvider({
   }
 
   async function chatWithKeys(body, keys) {
-    const refreshSubset = (keys || []).filter((k) => isRefreshToken(k));
+    const refreshSubset = (keys || []).filter((k) => isRefreshToken(k, id));
     if (refreshSubset.length && hasRefresh) {
       const tmpPool = createAuthPool({ id, keys: refreshSubset, fetchImpl, dispatcher, baseUrl: resolvedBase, file });
       const tmpSvc = createChatService({ id, baseUrl: resolvedBase, chatPath: resolvedChatPath, fetchImpl, dispatcher, authPool: tmpPool, connectTimeoutMs, retry });
       return tmpSvc.runChat(body, createKeyRing([], { cooldownMs }), "shared");
     }
-    const tmpRing = createKeyRing((keys || []).filter((k) => !isRefreshToken(k)), { cooldownMs });
+    const tmpRing = createKeyRing((keys || []).filter((k) => !isRefreshToken(k, id)), { cooldownMs });
     return oldRunner.runChat(body, tmpRing, "shared provider keys");
   }
 
