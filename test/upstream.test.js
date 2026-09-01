@@ -35,7 +35,7 @@ test("client posts to upstream with required headers", async () => {
     const res = await client.chat({ model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
     assert.equal(seen.headers["x-opencode-client"], "desktop");
-    assert.equal(seen.headers["authorization"], "Bearer public");
+    assert.equal(seen.headers["authorization"], "");
     assert.equal(seen.headers["accept"], "text/event-stream");
     assert.deepEqual(JSON.parse(seen.body), { model: "deepseek-v4-flash-free", messages: [] });
   } finally {
