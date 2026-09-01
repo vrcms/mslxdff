@@ -174,7 +174,7 @@ async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, l
       const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
       const key = keys[kIdx] || keys[0] || "";
       const auth = auths[aIdx] || auths[0] || null;
-      const cKeys = keys.filter((k) => isRefreshToken(k));
+      const cKeys = keys.filter((k) => isRefreshToken(k, p));
       if (cKeys.length) {
         const normBase = String(baseUrl).replace(/\/+$/, "");
         const chatBase = normBase.endsWith("/api/v1") ? normBase.slice(0, -7) : normBase;
@@ -197,7 +197,7 @@ async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, l
       const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
       const key = keys[kIdx] || keys[0] || "";
       const auth = auths[aIdx] || auths[0] || null;
-      const cKeys = keys.filter((k) => isRefreshToken(k));
+      const cKeys = keys.filter((k) => isRefreshToken(k, p));
       if (cKeys.length) {
         // cline refreshToken 需特殊流，暂走旧的 peer chat（peer 需自有 cline 配置）
         return viaProbe({ ...args, token, fetchImpl });
@@ -280,7 +280,7 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
   log(`bench ${providerId}: 共 ${allowed.length} 个已勾选模型，逐个测速（串行，${opts.timeoutMs}ms 超时）...`);
   if (!opts.json) console.log(`prompt="${opts.prompt}" maxTokens=${opts.maxTokens}\n`);
   const chatPath = cfg.chatPath || defaultChatPath(providerId);
-  const rtKeys = keys.filter((k) => isRefreshToken(k));
+  const rtKeys = keys.filter((k) => isRefreshToken(k, providerId));
   const normBase = String(baseUrl).replace(/\/+$/, "");
   const clineChatBase = normBase.endsWith("/api/v1") ? normBase.slice(0, -7) : normBase;
   const results = [];
