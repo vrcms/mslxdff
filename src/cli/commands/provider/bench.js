@@ -29,11 +29,10 @@ async function clineBenchOne({ baseUrl, model, accessToken, prompt, maxTokens, t
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-    const firstChunkAt = performance.now();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (ttfbMs === null) ttfbMs = Math.round(performance.now() - firstChunkAt);
+      if (ttfbMs === null) ttfbMs = Math.round(performance.now() - t0);
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
@@ -199,8 +198,18 @@ async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, l
       const auth = auths[aIdx] || auths[0] || null;
       const cKeys = keys.filter((k) => isRefreshToken(k, p));
       if (cKeys.length) {
-        // cline refreshToken 需特殊流，暂走旧的 peer chat（peer 需自有 cline 配置）
-        return viaProbe({ ...args, token, fetchImpl });
+        const normBase = String(baseUrl).replace(/\/+$/, "");
+        const chatBase = normBase.endsWith("/api/v1") ? normBase.slice(0, -7) : normBase;
+        const rt = cKeys[0];
+        const at = await refreshTokenForBase({ refreshToken: rt, baseUrl: normBase, fetchImpl });
+        if (!at) return { ok: false, label: "鉴权失败", error: "refresh failed", ttfbMs: null, totalMs: 0 };
+        const targetUrl = `${chatBase}/api/v1/chat/completions`;
+        const headers = clineHeaders(`sess_bench_via_${Date.now()}`, at);
+        const rawModel = String(model).startsWith(`${p}/`) ? String(model).slice(p.length + 1) : String(model);
+        const body = { model: rawModel, messages: [{ role: "user", content: "hi" }], stream: true, max_tokens: 5, session_id: `sess_bench_via_${Date.now()}`, reasoning_effort: "high" };
+        const peer = peers.find((pe) => pe.url === peerUrl || (pe.name || pe.id) === peerUrl);
+        const peerToken = peer?.token || token;
+        return viaProbe({ peerUrl, token: peerToken, relayTarget: targetUrl, relayHeaders: headers, relayBody: body, timeoutMs: opts.timeoutMs, fetchImpl });
       }
       const rawModel = String(model).startsWith(`${p}/`) ? String(model).slice(p.length + 1) : String(model);
       const targetUrl = p === "opencode" ? `${process.env.UPSTREAM_BASE_URL || "https://opencode.ai"}/zen/v1/chat/completions` : `${String(baseUrl).replace(/\/+$/, "")}${chatPath}`;
