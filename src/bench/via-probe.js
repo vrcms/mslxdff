@@ -36,11 +36,64 @@ export async function viaProbe({
   timeoutMs = 30000,
   fetchImpl = globalThis.fetch,
   clock = Date.now,
+  shareKeys,
+  shareKeysHeader,
+  relayTarget,
+  relayHeaders,
+  relayBody,
+  targetUrl,
 } = {}) {
   const started = clock();
   const t0 = typeof performance !== "undefined" && performance.now ? performance.now() : started;
   const base = String(peerUrl || "").replace(/\/+$/, "");
   if (!base) return { ok: false, label: "配置错误", error: "missing peerUrl", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
+  // 纯中继模式：A 把 targetUrl+headers+body 发给 B，B 原样 fetch 到上游（不查 B 本地 providerConfigs）
+  const rt = String(relayTarget || targetUrl || "").trim();
+  if (rt) {
+    const rh = relayHeaders && typeof relayHeaders === "object" ? relayHeaders : {};
+    const rb = relayBody !== undefined ? relayBody : null;
+    const relayUrl = joinUrl(base, "/v1/relay");
+    const relayHeadersOut = { "Content-Type": "application/json", Accept: "application/json" };
+    if (token) relayHeadersOut.Authorization = `Bearer ${token}`;
+    const payload = { targetUrl: rt, method: "POST", headers: rh, body: rb };
+    let ttfbMs = null;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
+      const fetchStart = typeof performance !== "undefined" && performance.now ? performance.now() : clock();
+      let res;
+      try { res = await fetchImpl(relayUrl, { method: "POST", headers: relayHeadersOut, body: JSON.stringify(payload), signal: controller.signal }); } finally { clearTimeout(timer); }
+      ttfbMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - fetchStart);
+      const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
+      if (!res.ok) {
+        let txt = ""; try { txt = await res.text(); } catch {}
+        const cls = classifyError(res.status, txt);
+        const msg = extractInnerMessage(txt) || `HTTP ${res.status}`;
+        return { ok: false, status: res.status, label: cls.label, error: msg, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+      }
+      let txt = ""; let j = {};
+      try { txt = await res.text(); j = JSON.parse(txt); } catch { j = {}; }
+      const relayStatus = res.headers.get("x-mslxdff-relay-status") ? Number(res.headers.get("x-mslxdff-relay-status")) : res.status;
+      if (relayStatus >= 400) {
+        const cls = classifyError(relayStatus, txt);
+        const msg = extractInnerMessage(txt) || `HTTP ${relayStatus}`;
+        return { ok: false, status: relayStatus, label: cls.label, error: msg, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+      }
+      const usage = extractUsageFromJson(j);
+      const content = j?.choices?.[0]?.message?.content || j?.choices?.[0]?.text || txt || "";
+      const chars = typeof content === "string" ? content.length : 0;
+      const pt = usage?.prompt_tokens ?? null;
+      const ct = usage?.completion_tokens ?? null;
+      const { tps, charsPerSec } = computeMetrics({ ttfbMs, totalMs, promptTokens: pt, completionTokens: ct, chars });
+      const totalTokens = usage?.total_tokens ?? (pt !== null && ct !== null ? pt + ct : null);
+      return { ok: true, status: relayStatus, label: "成功", ttfbMs, totalMs, tps, charsPerSec, tokens: { prompt: pt, completion: ct, total: totalTokens }, chars };
+    } catch (e) {
+      const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
+      const msg = e?.message || String(e);
+      const isTimeout = /timeout|abort/i.test(msg);
+      return { ok: false, label: isTimeout ? "超时" : "网络错误", error: msg.slice(0, 300), ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+    }
+  }
   if (!model) return { ok: false, label: "配置错误", error: "missing model", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   let rawModel = String(model).trim();
   if (providerId && rawModel.startsWith(`${providerId}/`)) rawModel = rawModel.slice(providerId.length + 1);
@@ -48,6 +101,8 @@ export async function viaProbe({
   const body = { model: rawModel, stream: false, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens };
   const headers = { "Content-Type": "application/json", Accept: "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
+  const sk = shareKeysHeader || shareKeys;
+  if (sk) headers["x-mslxdff-share-keys"] = String(sk);
   let ttfbMs = null;
   try {
     const controller = new AbortController();
