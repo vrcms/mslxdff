@@ -31,7 +31,7 @@ test("isAutoModel treats empty and auto as auto, others explicit", () => {
 
 test("rankModels puts the preferred model first when no errors", () => {
   const ids = [PREFERRED_MODEL, "deepseek-v4-flash-free", "mimo-v2.5-free"];
-  const ranked = rankModels(ids, {});
+  const ranked = rankModels(ids, {}, { preferred: PREFERRED_MODEL });
   assert.equal(ranked[0], PREFERRED_MODEL);
   assert.deepEqual([...ranked].sort(), [...ids].sort(), "set preserved");
 });
@@ -44,7 +44,8 @@ test("rankModels prefers the model that errored longest ago", () => {
     "m-three-free": 2000,
   };
   // m-two errored at 1000 (longest ago) -> first; m-three 2000; m-one 3000 last
-  assert.deepEqual(rankModels(ids, errors), ["m-two-free", "m-three-free", "m-one-free"]);
+  // 显式 preferred 避免全局 state 污染导致排序不确定
+  assert.deepEqual(rankModels(ids, errors, { preferred: "big-pickle" }), ["m-two-free", "m-three-free", "m-one-free"]);
 });
 
 test("a recently-errored deepseek yields to never-errored others", () => {
@@ -100,7 +101,8 @@ test("candidatesFor pushes a cooldown model to the back", async () => {
 });
 
 test("createAutoSelector falls back to DEFAULT_AUTO_MODELS when no candidates load", async () => {
-  const auto = createAutoSelector({ loadCandidates: async () => null, errors: {} });
+  const file = tmpStateFile();
+  const auto = createAutoSelector({ loadCandidates: async () => null, errors: {}, file });
   const list = await auto.candidates();
   assert.deepEqual(list, DEFAULT_AUTO_MODELS);
 });
@@ -323,7 +325,9 @@ async function postChat(app, body) {
 
 test("empty model resolves to auto: preferred model forwarded, other models not touched", async () => {
   const seen = [];
-  const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors: {} });
+  const file = tmpStateFile();
+  // 注入一个 normal 状态使 hasPriorSuccess=true，禁用并发择优，保持串行单一尝试的原始语义
+  const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors: { [PREFERRED_MODEL]: { status: "normal", at: 1, code: 200, slow: false } }, file });
   const app = await boot({
     auto,
     upstreamHandler: (req, res, body) => {
@@ -343,9 +347,10 @@ test("empty model resolves to auto: preferred model forwarded, other models not 
 
 test("auto: first model 400, falls back to next candidate, records error", async () => {
   const seen = [];
+  const file = tmpStateFile();
   const errors = {};
   const nextAfterPreferred = DEFAULT_AUTO_MODELS.filter((m) => m !== PREFERRED_MODEL)[0];
-  const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors });
+  const auto = createAutoSelector({ loadCandidates: async () => DEFAULT_AUTO_MODELS, errors, file });
   const app = await boot({
     auto,
     upstreamHandler: (req, res, body) => {
@@ -377,7 +382,9 @@ test("auto: first model 400, falls back to next candidate, records error", async
 
 test("auto: all candidates fail, last upstream error relayed and all recorded", async () => {
   const seen = [];
-  const auto = createAutoSelector({ loadCandidates: async () => ["a-free", "b-free"], errors: {} });
+  const file = tmpStateFile();
+  // 串行路径才能准确透传 503，注入 dummy normal 禁用并发择优
+  const auto = createAutoSelector({ loadCandidates: async () => ["a-free", "b-free"], errors: { "_dummy": { status: "normal", at: 1, code: 200, slow: false } }, file });
   const app = await boot({
     auto,
     upstreamHandler: (req, res, body) => {
