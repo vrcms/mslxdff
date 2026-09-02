@@ -13,7 +13,7 @@ import { refreshGroupMembers } from "../groups.js";
 import { fmtShanghaiYMDHM } from "../time.js";
 import { fmtStatus, fmtUptime, fmtTs } from "./format.js";
 import { compareSemver } from "./policy.js";
-import { buildProviderRows, formatProviderRow } from "./provider-row.js";
+import { buildProviderRows, formatProviderRow, formatProviderSection } from "./provider-row.js";
 
 export async function printStatus(VERSION) {
   const daemon = readPid();
@@ -53,12 +53,12 @@ export async function printStatus(VERSION) {
   try {
     const providerRows = buildProviderRows({});
     const enabledCount = providerRows.filter((r) => r.enabled).length;
-    console.log(`\nupstream providers (${providerRows.length}, ${enabledCount} enabled)  —  mslxdff -providers list 查看详情`);
-    for (const p of providerRows) {
-      console.log(formatProviderRow(p));
-    }
+    console.log(`\nupstream providers  ${providerRows.length} 个 · ${enabledCount} 已启用  —  mslxdff -providers list 查看详情`);
+    console.log(formatProviderSection(providerRows));
     if (enabledCount === 1 && providerRows.length === 1) {
-      console.log(`  (仅 opencode 内置免费通道；按需加：mslxdff -provider add bai https://api.b.ai/v1 <key>  或  node workbuddy-token-auto.js)`);
+      console.log(`\n  空状态：仅 opencode 内置免费通道`);
+      console.log(`    → 加一个私有上游：mslxdff -provider add bai https://api.b.ai/v1 <key>`);
+      console.log(`    → 或 WorkBuddy 一键接入：node workbuddy-token-auto.js`);
     }
   } catch (e) {
     console.log(`\nupstream providers: (unavailable — ${String(e?.message || e).slice(0, 80)})`);
