@@ -8,6 +8,7 @@ export function opencodeConfigPath() {
   return join(os.homedir(), ".config", "opencode", "opencode.json");
 }
 
+//  legacy mslxdff- 前缀（保留做兼容剥离，新写入不再使用）
 export function toExternalAlias(id) {
   const s = String(id || "").trim();
   if (!s) return "";
@@ -20,9 +21,28 @@ export function toInternalId(aliasOrRaw) {
   return s.startsWith("mslxdff-") ? s.slice("mslxdff-".length) : s;
 }
 
+// 新存储键：/ → -（与 WorkBuddy 一致），裸 id 原样
+export function toStorageKey(canonical) {
+  const s = String(canonical || "").trim();
+  if (!s) return "";
+  // 先剥 legacy 前缀
+  const internal = toInternalId(s);
+  return internal.includes("/") ? internal.replace(/\//g, "-") : internal;
+}
+
+// 从存储键还原为内部 canonical（需查 alias 表，调用方用 getModelAlias）
+export function storageKeyToCanonical(storageKey) {
+  const s = String(storageKey || "").trim();
+  if (!s) return "";
+  const internal = toInternalId(s);
+  return internal;
+}
+
 export function buildOpencodeProvider({ id, token, port }) {
   const p = Number(port) || 8989;
-  const alias = toExternalAlias(id);
+  const internal = toInternalId(String(id || "").trim());
+  const storageKey = internal.includes("/") ? internal.replace(/\//g, "-") : internal;
+  const key = storageKey || toExternalAlias(id); // fallback 兼容
   return {
     name: "mslxdff",
     npm: "@ai-sdk/openai-compatible",
@@ -31,7 +51,7 @@ export function buildOpencodeProvider({ id, token, port }) {
       baseURL: `http://127.0.0.1:${p}/v1`,
     },
     models: {
-      [alias]: { name: alias },
+      [key]: { name: key },
     },
   };
 }
@@ -43,12 +63,11 @@ export function isOpencodeLocalUrl(url) {
 
 export async function syncToOpencode({ id, token, port, file } = {}) {
   const targetFile = file || opencodeConfigPath();
-  // id 可能是 alias 或原名，统一以 internal 去重、以 external 入库（原名兼容）
   const normalizedRaw = String(id || "").trim();
   if (!normalizedRaw) throw new Error("model id required");
   const internal = toInternalId(normalizedRaw);
   if (!internal) throw new Error("model id required");
-  const external = toExternalAlias(internal);
+  const storageKey = internal.includes("/") ? internal.replace(/\//g, "-") : internal;
   const cleanToken = String(token || "");
   const p = Number(port) || 8989;
 
@@ -81,32 +100,49 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
     : null;
 
   let action;
-  let effectiveId = external;
+  let effectiveId = storageKey;
   if (oldProvider) {
     const oldModels = oldProvider.models && typeof oldProvider.models === "object" && !Array.isArray(oldProvider.models)
       ? oldProvider.models
       : {};
-    // 去重：internal 或 external 任一已存在即视为已存在（原名兼容，以 internal 为基准）
-    const hasExternal = Object.prototype.hasOwnProperty.call(oldModels, external);
-    const hasInternal = Object.prototype.hasOwnProperty.call(oldModels, internal);
-    const exists = hasExternal || hasInternal;
+    // 归一所有旧 key 到 storageKey 维度，判断是否已存在（兼容 mslxdff- 前缀与 / 形态）
+    const normalizeToStorage = (k) => {
+      const inner = toInternalId(String(k));
+      return inner.includes("/") ? inner.replace(/\//g, "-") : inner;
+    };
+    let existingKey = null;
+    for (const k of Object.keys(oldModels)) {
+      if (normalizeToStorage(k) === storageKey) { existingKey = k; break; }
+    }
+    // 也兼容直接 internal（slash）形态
+    if (!existingKey && Object.prototype.hasOwnProperty.call(oldModels, internal)) existingKey = internal;
+    if (!existingKey && Object.prototype.hasOwnProperty.call(oldModels, storageKey)) existingKey = storageKey;
+
     const nextModels = { ...oldModels };
-    if (exists) {
-      if (hasExternal) {
-        nextModels[external] = { name: external, ...(oldModels[external] && typeof oldModels[external] === "object" ? oldModels[external] : {}), name: external };
-        effectiveId = external;
-      } else if (hasInternal) {
-        // 仅原名存在：保留原名不强制迁移为 alias，视为 updated（原名兼容）
-        nextModels[internal] = { name: internal, ...(oldModels[internal] && typeof oldModels[internal] === "object" ? oldModels[internal] : {}), name: internal };
-        effectiveId = internal;
+    if (existingKey) {
+      // 已存在：迁移到 storageKey（新规范），清理旧的 legacy 键
+      const oldEntry = oldModels[existingKey];
+      const merged = oldEntry && typeof oldEntry === "object" && !Array.isArray(oldEntry) ? oldEntry : {};
+      // 若 existingKey !== storageKey，需要把旧键删掉，统一到 storageKey
+      if (existingKey !== storageKey) {
+        // 收集所有同逻辑的旧键一起清理
+        for (const k of Object.keys(oldModels)) {
+          if (normalizeToStorage(k) === storageKey) delete nextModels[k];
+        }
+        // 也清理 legacy mslxdff- 前缀变体
+        const legacyAlias = toExternalAlias(storageKey);
+        const legacyInternal = toExternalAlias(internal);
+        if (nextModels[legacyAlias]) delete nextModels[legacyAlias];
+        if (legacyInternal !== legacyAlias && nextModels[legacyInternal]) delete nextModels[legacyInternal];
       }
+      nextModels[storageKey] = { ...merged, name: storageKey };
+      effectiveId = storageKey;
       action = "updated";
     } else {
-      nextModels[external] = { name: external };
-      effectiveId = external;
+      nextModels[storageKey] = { name: storageKey };
+      effectiveId = storageKey;
       action = "inserted";
     }
-    // 合并 provider：保留 name/npm，覆盖 options.baseURL/apiKey，合并 models
     const nextProvider = {
       ...oldProvider,
       name: oldProvider.name || "mslxdff",
@@ -118,16 +154,24 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
       },
       models: nextModels,
     };
-    // 若插入的是 alias 但原名已存在，上面已处理为不新增；否则正常
     data.provider.mslxdff = nextProvider;
-    // 若是新插入且 external 不等于 internal，且 internal 已存在时，需避免双键，上面已处理
-    // 若是新插入 external 且 internal 不存在，正常插入
-    if (!exists) {
-      data.provider.mslxdff.models = nextModels;
-    }
   } else {
-    data.provider.mslxdff = buildOpencodeProvider({ id: external, token: cleanToken, port: p });
+    data.provider.mslxdff = buildOpencodeProvider({ id: storageKey, token: cleanToken, port: p });
+    // buildOpencodeProvider 已用 storageKey，这里再确保
+    if (!data.provider.mslxdff.models[storageKey]) {
+      data.provider.mslxdff.models = { [storageKey]: { name: storageKey } };
+    }
     action = "inserted";
+  }
+
+  // 若内部含 /，注册 dash→slash 别名，供网关 mslxdff 侧自动映射（与 WorkBuddy 同表）
+  if (internal.includes("/") && storageKey !== internal) {
+    try {
+      const { loadModelAliases, registerModelAlias, persistModelAliases } = await import("./providers/model-id.js");
+      loadModelAliases();
+      registerModelAlias(storageKey, internal);
+      persistModelAliases();
+    } catch {}
   }
 
   // 原子写
@@ -148,5 +192,5 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
     }
   } catch {}
 
-  return { action, file: targetFile, id: effectiveId, alias: external, internal, corrupted };
+  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey };
 }

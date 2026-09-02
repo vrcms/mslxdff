@@ -1,7 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { injectReasoningContent, normalizeModel } from "../../reasoning.js";
 import { isAutoModel } from "../../auto.js";
-import { toInternalId as aliasToInternal } from "../../sync-opencode.js";
 import { clientIp, json, readBody, parseHops, summarizePrompt, errMsg } from "../helpers.js";
 import { hedgeDelayMs, shouldHedge } from "../hedge.js";
 import { runHook } from "../../plugins.js";
@@ -53,25 +52,20 @@ export function createChatGateway({ upstream, auto, logs, peers, maxHops, groups
     if (aliasResolved) { normalizedRequested = aliasResolved; body = { ...body, model: aliasResolved }; }
     let requested = normalizedRequested;
     let aliasInfo = null;
-    if (requested.startsWith("mslxdff-")) {
-      const internal = aliasToInternal(requested);
-      if (internal) { aliasInfo = `${requested} -> ${internal}`; requested = internal; }
-    } else if (requested.includes("/")) {
-      const slashIdx = requested.indexOf("/");
-      const rawPart = requested.slice(slashIdx + 1);
-      const providerPart = requested.slice(0, slashIdx);
-      if (rawPart.startsWith("mslxdff-")) {
-        const internal = aliasToInternal(rawPart);
-        if (internal) {
-          aliasInfo = `${requested} -> ${providerPart}/${internal} (alias stripped)`;
-          requested = `${providerPart}/${internal}`;
-          if (providerPart === "mslxdff") { requested = internal; aliasInfo = `${rawModel} -> ${internal} (mslxdff alias stripped)`; }
-        }
-      } else if (providerPart === "mslxdff") {
-        aliasInfo = `${requested} -> ${rawPart} (mslxdff provider stripped, 原名兼容)`;
-        requested = rawPart;
+    // opencode 侧 provider.mslxdff 模型会以 mslxdff/<id> 形式到达，剥掉前缀即得真实模型
+    if (requested.startsWith("mslxdff/")) {
+      const rawPart = requested.slice("mslxdff/".length);
+      aliasInfo = `${requested} -> ${rawPart} (mslxdff provider stripped)`;
+      requested = rawPart;
+      // mslxdff/bai-deepseek... 这类 dash 形态二次走 alias 表还原为 bai/...
+      const alias2 = getModelAlias(requested);
+      if (alias2) {
+        aliasInfo = `${rawModel} -> ${alias2} (mslxdff + alias)`;
+        requested = alias2;
+        body = { ...body, model: alias2 };
       }
     }
+    // 非 mslxdff 前缀的 dash 形态（如 bai-deepseek）已在首轮 aliasResolved 处理
     const useAuto = isAutoModel(requested);
     mark("parsed");
     if (aliasInfo) { try { res.setHeader("x-mslxdff-alias", aliasInfo); } catch {} }
