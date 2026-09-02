@@ -72,6 +72,8 @@ export async function orchestrateVia({
   token,
   timeoutMs = 30000,
   clock = Date.now,
+  onProgress = null,
+  delayMs = 0,
 } = {}) {
   const filtered = includeOpencode ? models : models.filter((m) => {
     const s = typeof m === "string" ? m : (m.id || m.model || m.provider || "");
@@ -87,17 +89,23 @@ export async function orchestrateVia({
     return { provider, model: id, id };
   });
   const results = [];
-  for (const entry of normModels) {
+  const total = normModels.length;
+  for (let idx = 0; idx < normModels.length; idx++) {
+    const entry = normModels[idx];
     const provider = entry.provider;
     const model = entry.model;
-    // direct
+    const seq = idx + 1;
+    // direct —— 串行，完成后立刻回调供实时进度
     let direct = null;
     if (directRunner) {
       try { direct = await directRunner({ provider, model, timeoutMs, clock }); } catch (e) { direct = { ok: false, label: "网络错误", error: String(e), ttfbMs: null, totalMs: 0 }; }
     } else {
       direct = { ok: false, label: "未配置 directRunner", error: "missing directRunner", ttfbMs: null, totalMs: 0 };
     }
+    if (typeof onProgress === "function") try { await onProgress({ phase: "direct", provider, model, seq, total, result: direct }); } catch {}
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
     const via = {};
+    // 串行逐个 peer，避免 A/B/C 同时打同一上游并发限流
     for (const peer of peers) {
       const raw = String(peer.name || peer.id || peer.url || "peer");
       let peerId = raw;
@@ -106,12 +114,16 @@ export async function orchestrateVia({
         try { const u = new URL(raw); const host = u.hostname; const port = u.port ? `:${u.port}` : ""; if (host) peerId = `${host}${port}`; else peerId = raw.slice(-16); } catch { peerId = raw.slice(-16); }
       }
       const peerToken = peer.token || token || "";
+      let r;
       try {
-        const r = await viaProbeFn({ peerUrl: peer.url, token: peerToken, providerId: provider, model, prompt: "hi", maxTokens: 5, timeoutMs, clock });
+        r = await viaProbeFn({ peerUrl: peer.url, token: peerToken, providerId: provider, model, prompt: "hi", maxTokens: 5, timeoutMs, clock });
         via[peerId] = r;
       } catch (e) {
-        via[peerId] = { ok: false, label: "网络错误", error: String(e?.message || e), ttfbMs: null, totalMs: 0 };
+        r = { ok: false, label: "网络错误", error: String(e?.message || e), ttfbMs: null, totalMs: 0 };
+        via[peerId] = r;
       }
+      if (typeof onProgress === "function") try { await onProgress({ phase: "via", provider, model, seq, total, peerId, result: r }); } catch {}
+      if (delayMs) await new Promise((rr) => setTimeout(rr, delayMs));
     }
     // best
     let best = "direct";
