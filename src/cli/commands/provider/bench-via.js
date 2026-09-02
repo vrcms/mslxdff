@@ -4,6 +4,7 @@ import { refreshTokenForBase } from "../../../providers/cline/auth.js";
 import { runOne } from "../../../bench/runner.js";
 import { formatViaReport } from "../../../bench/report.js";
 import { clineBenchOne } from "../../../bench/cline-bench.js";
+import { workbuddyBenchOne } from "../../../bench/workbuddy-bench.js";
 
 export function buildHeadersForProvider(providerId, apiKey, auth) {
   const h = {};
@@ -93,6 +94,9 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
       const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
       const key = keys[kIdx] || keys[0] || "";
       const auth = auths[aIdx] || auths[0] || null;
+      if (String(p).toLowerCase() === "workbuddy") {
+        return workbuddyBenchOne({ baseUrl, chatPath, model, apiKey: key, auth, prompt: "hi", maxTokens: 5, timeoutMs: opts.timeoutMs, fetchImpl });
+      }
       const cKeys = keys.filter((k) => isRefreshToken(k, p));
       if (cKeys.length) {
         const normBase = String(baseUrl).replace(/\/+$/, "");
@@ -114,6 +118,16 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
       const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
       const key = keys[kIdx] || keys[0] || "";
       const auth = auths[aIdx] || auths[0] || null;
+      // workbuddy 强制 stream:true SSE 中继（与直连一致）
+      if (String(p).toLowerCase() === "workbuddy") {
+        const rawModel = String(model).startsWith(`${p}/`) ? String(model).slice(p.length + 1) : String(model);
+        const targetUrl = `${String(baseUrl).replace(/\/+$/, "")}${chatPath}`;
+        const headers = buildHeadersForProvider(p, key, auth);
+        const body = { model: rawModel, stream: true, messages: [{ role: "user", content: "hi" }], max_tokens: 5 };
+        const peer = peers.find((pe) => pe.url === peerUrl || (pe.name || pe.id) === peerUrl);
+        const peerToken = peer?.token || token;
+        return viaProbe({ peerUrl, token: peerToken, relayTarget: targetUrl, relayHeaders: headers, relayBody: body, timeoutMs: opts.timeoutMs, fetchImpl });
+      }
       const cKeys = keys.filter((k) => isRefreshToken(k, p));
       if (cKeys.length) {
         const normBase = String(baseUrl).replace(/\/+$/, "");
@@ -154,6 +168,15 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
   }
   const meta = { at: new Date().toISOString(), samples: opts.samples, timeout: opts.timeoutMs, includeOpencode, peers: peers.map((p) => p.id), opencodeSkipped: !includeOpencode };
   const report = formatViaReport(allResults, { peers, meta, json: opts.json });
+  if (opts.apply) {
+    const { saveViaRoutes } = await import("../../../bench/via-routes.js");
+    const saved = saveViaRoutes(allResults, { meta });
+    const viaLog2 = (s) => (opts.json ? console.error(s) : console.log(s));
+    viaLog2(`\nvia-routes 已落盘: ${saved.at} 共 ${Object.keys(saved.routes).length} 条 → ${saved.routes[Object.keys(saved.routes)[0]] ? "" : ""}${(await import("../../../bench/via-routes.js")).defaultViaRoutesFile()}`);
+    for (const [m, e] of Object.entries(saved.routes)) {
+      if (allResults.some((r) => r.model === m)) viaLog2(`  ${m} → ${e.best}${e.deltaMs ? ` (${e.deltaMs}ms)` : ""}`);
+    }
+  }
   if (opts.json) console.log(report.text);
   else console.log("\n" + report.text);
   process.exit(0);
