@@ -5,14 +5,16 @@ import { defaultModelsPath, defaultChatPath } from "../../../state/provider-conf
 import { isRefreshToken } from "../../../providers/cline/headers.js";
 import { refreshTokenForBase } from "../../../providers/cline/auth.js";
 import { clineBenchOne } from "../../../bench/cline-bench.js";
+import { workbuddyBenchOne } from "../../../bench/workbuddy-bench.js";
 import { buildHeadersForProvider, handleVia } from "./bench-via.js";
 
 function parseBenchArgs(rest) {
-  const opts = { json: false, prompt: "hi", maxTokens: 32, timeoutMs: 30000, via: false, includeOpencode: false, samples: 1 };
+  const opts = { json: false, prompt: "hi", maxTokens: 32, timeoutMs: 30000, via: false, includeOpencode: false, samples: 1, apply: false };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--json" || a === "-json") opts.json = true;
     else if (a === "--via" || a === "--bench-via") opts.via = true;
+    else if (a === "--apply" || a === "--write" || a === "--save") opts.apply = true;
     else if (a === "--include-opencode") opts.includeOpencode = true;
     else if (a === "--samples" && rest[i + 1]) opts.samples = Number(rest[++i]) || 1;
     else if (a.startsWith("--samples=")) opts.samples = Number(a.split("=")[1]) || 1;
@@ -95,6 +97,12 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
     const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
     const key = keys[kIdx];
     const auth = auths[aIdx] || auths[0] || null;
+    if (String(providerId).toLowerCase() === "workbuddy") {
+      const r = await workbuddyBenchOne({ baseUrl, chatPath, model, apiKey: key, auth, prompt: opts.prompt, maxTokens: opts.maxTokens, timeoutMs: opts.timeoutMs, fetchImpl });
+      results.push(r);
+      if (!opts.json) { if (r.ok) console.log(`OK  TTFB ${r.ttfbMs}ms  总 ${r.totalMs}ms  ${r.tps != null ? `${r.tps} t/s` : r.charsPerSec != null ? `${r.charsPerSec} 字/秒` : "—"}`); else console.log(`FAIL ${r.label} ${r.error ? `(${r.error.slice(0, 60)})` : ""}`); }
+      continue;
+    }
     if (rtKeys.length) {
       const rt = rtKeys[kIdx % rtKeys.length];
       const at = await refreshTokenForBase({ refreshToken: rt, baseUrl: normBase, fetchImpl });

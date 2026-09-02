@@ -10,6 +10,7 @@ import { handleHedge } from "./hedge-handler.js";
 import { handleLocalRelay } from "./local-handler.js";
 import { handlePeerRelay } from "./peer-handler.js";
 import { handleBroadbandRelay } from "./broadband-handler.js";
+import { handleViaRoute } from "./via-route-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "./exhausted-handler.js";
 import { normalizeFullId, getModelAlias } from "../../providers/model-id.js";
 
@@ -111,7 +112,7 @@ export function createChatGateway({ upstream, auto, logs, peers, maxHops, groups
       for (const e of sel.errors) evt("plugin-hook-error", { reqId, hook: "model:select", plugin: e.plugin, error: e.error });
     }
 
-    const handlerCtx = { reqId, model: null, body, hops, peers, plugins, evt, logError, logCall, logs };
+    const handlerCtx = { reqId, model: null, body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid };
 
     // ===== Selector: 首次 auto 并发择优 =====
     if (useAuto && order.length > 1 && auto && !lockModel) {
@@ -176,8 +177,38 @@ export function createChatGateway({ upstream, auto, logs, peers, maxHops, groups
       }
     }
 
+    // ===== VIA-ROUTE 单路径择路（显式锁模型，不并发） =====
+    let viaRouteLastErr = null;
+    if (!useAuto && requested && requested.includes("/") && canForwardPeers && !lockModel && peers) {
+      try {
+        const vr = await handleViaRoute({
+          model: requested,
+          body,
+          peers,
+          handlerCtx,
+          evt,
+          logCall,
+          logError,
+          mark,
+          perf0,
+          stages,
+          startedAt,
+          plugins,
+          res,
+          requested,
+          useAuto,
+          lockModel,
+          auto,
+        });
+        if (vr.handled) return;
+        if (vr.lastErr) viaRouteLastErr = vr.lastErr;
+      } catch (e) {
+        evt("via-route-exception", { reqId, model: requested, error: errMsg(e) });
+      }
+    }
+
     // ===== Executor: 串行 trial =====
-    let lastErr = null;
+    let lastErr = viaRouteLastErr;
     for (let idx = 0; idx < order.length; idx++) {
       const model = order[idx];
       handlerCtx.model = model;

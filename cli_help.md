@@ -65,7 +65,7 @@
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
-| `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`） | 否 | 否 |
+| `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
@@ -578,16 +578,17 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider myapi bench --prompt "hi" --max-tokens 32 --timeout 30000
   ```
 
-#### `mslxdff -provider <id> bench --via` / `mslxdff -provider bench --via`（家宽选路：直连 vs 经 peer 延迟对比）
+#### `mslxdff -provider <id> bench --via` / `mslxdff -provider bench --via`（家宽选路：直连 vs 经 peer 延迟对比 + 动态择路）
 
-- **语法**：`mslxdff -provider bench --via [--include-opencode] [--json] [--samples N] [--timeout N]` / `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N]`
-- **作用**：同一上游模型，**现场比** `direct`（本机直连 `https://opencode.ai`）与经每个在线 `peer` 转发的 `TTFB`。家宽/出口 IP 不同会导致限流与首字延迟差很大，此命令一测就知道走哪条路最快。
+- **语法**：`mslxdff -provider bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]`
+- **作用**：同一上游模型，**现场比** `direct`（本机直连）与经每个在线 `peer` 转发的 `TTFB`。家宽/出口 IP 不同会导致限流与首字延迟差很大，此命令一测就知道走哪条路最快；`--apply` 则把 `best` 写入 `via-routes.json`，网关对**显式锁模型** `provider/model` 按 `best` 单路径直达（`via:host` 单 peer 借 `x-mslxdff-share-keys`，`direct` 本机），不并发，失败秒切直连，`--apply` 手动重跑即动态调整。
 - **行为**：
-  - **不写 state**：结果仅打印与 `stdout`，不改 `preferredModel`/`allowlist`。
+  - **不写 state（除 --apply）**：默认仅打印 `stdout`，不改 `preferredModel`/`allowlist`；`--apply` 时落盘 `via-routes.json`（`~/.config/mslxdff/via-routes.json`，随 `MSLXDFF_STATE_FILE` 派生，`MSLXDFF_VIA_ROUTES_FILE` 可覆盖，`MSLXDFF_VIA_ROUTE_TTL_MS=0` 默认不过期）。
   - **串行省额度**：同一模型对 `direct + 每个 peer` 串行发 `POST <baseUrl><chatPath>` 轻探针（`max_tokens=5 prompt=hi stream:false`，剥 `provider/` 前缀），每个结果记 `TTFB/总耗时/TPS/ok/error/label`。
   - **额度保护**：默认**跳过** `opencode` 供应商（`opencode` 为免费共享池，走 `peer` 对冲会烧组员额度）。如确需包含，必须加 `--include-opencode`，且 **TTY 二次确认 `y/N`**（`[bench-via] 组员额度保护：默认跳过 opencode … --include-opencode y/N > `），`非 TTY`（脚本/CI）直接跳过并提示。
   - **空状态**：无已加入组或全离线时直接空状态引导 ` -group list`（不发起任何探针），`direct` 与 `via` 共用同一 `runOne` 测 `TTFB`，统一 `formatViaReport` 打印 `bench-via: direct vs via` 头、`★` 最快、`— offline`。
-  - **`--json`**：`stdout` 纯 `{"meta":{"provider","model","samples","timeoutMs","includeOpencode"},"results":[…],"advice":"…"}`，进度与告警走 `stderr`（便于 `jq`）。
+  - **`--json`**：`stdout` 纯 `{"meta":{"provider","model","samples","timeoutMs","includeOpencode"},"results":[…],"advice":"…"}`，进度与告警走 `stderr`（便于 `jq`）；`--apply` 时落盘信息亦走 `stderr`。
+  - **`--apply` 动态择路**：落盘后网关对显式锁模型（如 `clinebot/z-ai/glm-5.3-flash`）按 `best` 单路径择路（工作 `workbuddy→direct`、`clinebot→172`、`bai/aihubmix→leader` 已验证），`via:host:port` 失败自动回落 `direct`，`workbuddy` 等 `stream:true` 走 peer 的 `x-mslxdff-share-keys` 透传，`B` 无配置也能借 `A` 的 key。
 - **输出（文本）**：
   ```
   [bench-via] 测试 workbuddy/hy3: direct + 2 peer(s) 串行（max_tokens=5，30000ms 超时）...
@@ -608,6 +609,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider workbuddy bench --via --json | jq .  # 脚本
   mslxdff -provider bench --via --include-opencode       # 含 opencode（TTY 会二次确认）
   mslxdff -provider bench --via --samples 3 --timeout 10000
+  mslxdff -provider bench --via --apply                  # 产表并落盘 via-routes.json，供网关显式模型单路径择路（工作→direct，clinebot→172，bai/aihubmix→leader）
+  mslxdff -provider workbuddy bench --via --apply        # 仅 workbuddy 产表
   ```
 
 #### `mslxdff -provider clinebot login`（Cline 免 403：WorkOS 设备授权拿 refreshToken）
@@ -1057,7 +1060,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_PEER_RACE_LIMIT` | — | 组员并发竞速限制 |
 | `MSLXDFF_BAN_WINDOW_MS` | `172800000` (48h) | 加群失败封禁窗口 |
 | `MSLXDFF_BAN_THRESHOLD` | `5` | 封禁阈值（窗口内失败次数） |
-| `MSLXDFF_HEDGE_DELAY_MS` | `1000` | 首块对冲等待（`0/off` 关闭） |
+| `MSLXDFF_HEDGE_DELAY_MS` | `1000` | 首块对冲等待（`0/off` 关闭，显式锁模型按 `via-routes.json` 单路径择路，不经 hedge） |
+| `MSLXDFF_VIA_ROUTES_FILE` | `~/.config/mslxdff/via-routes.json` | via-routes 落盘路径（随 `MSLXDFF_STATE_FILE` 派生） |
+| `MSLXDFF_VIA_ROUTE_TTL_MS` | `0` | via-routes 条目 TTL（`0`=不过期，手动 `bench --via --apply` 重跑即更新） |
+| `MSLXDFF_BENCH_DELAY_MS` | `120` | bench --via 串行间隔 ms |
 | `MSLXDFF_SLOW_TOTAL_MS` | `20000` | 慢模型判定：总耗时阈值 |
 | `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块超时（未写字节才 failover） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
