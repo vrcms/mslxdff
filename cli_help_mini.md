@@ -61,7 +61,7 @@
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
 | 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy（原子写 `~/.workbuddy/models.json`，`127.0.0.1/v1`，多模型累积） |
-| 同步 opencode | `-setto opencode [modelId]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） |
+| 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks） |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
 | 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
 | 组同步 | `-group sync` | 刷新全组成员 |
@@ -101,6 +101,8 @@
 - 用户：`设置hy3为默认模型` → 你先查可用模型确认 `hy3-free` 存在 → `run_command: "-model set hy3-free"`
 - 用户：`看看最近日志` → `run_command: "-log 20"` 或 `read_file: "logs"` 视情况
 - 用户：`查看组列表` → `run_command: "-group list"`
-- 用户：`把 deepseek 加到 opencode` → 先查可用模型确认 `deepseek` 全称 → `run_command: "-setto opencode deepseek"`（实际落 `mslxdff-deepseek`，原名 `deepseek` 仍可直用，重复幂等）
+- 用户：`把 deepseek 加到 opencode` → 先查可用模型确认 `deepseek-v4-flash-free` 全称 → `run_command: "-setto opencode deepseek-v4-flash-free"`（存 `deepseek-v4-flash-free`，选 `mslxdff/deepseek-v4-flash-free` 直达）
+- 用户：`把 bai 模型加到 opencode` → 确认 `bai/deepseek-v4-flash` → `run_command: "-setto opencode bai/deepseek-v4-flash"`（存 `bai-deepseek-v4-flash`，到 8989 自动还原 `bai/deepseek-v4-flash`）
+- 用户：`把所有模型同步到 opencode` → `run_command: "-setto opencode --all"`（批量 picks 全进菜单）
 - 用户：`把当前模型同步到 opencode` → `run_command: "-setto opencode"`（无参取 preferredModel）
 - 用户：`测试z-ai/glm-5.3-flash连通性` → **禁止** `run_command: "\"hi\" --model clinebot/z-ai/glm-5.3-flash"`，必须 `curl: {url:"http://localhost:8989/v1/chat/completions", method:"POST", headers:{"Content-Type":"application/json"}, body:"{\"model\":\"clinebot/z-ai/glm-5.3-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"}`

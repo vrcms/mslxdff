@@ -85,7 +85,7 @@
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
-| `mslxdff -setto opencode [modelId]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，默认 `mslxdff-<id>` alias 防重名，原名仍兼容，重复幂等） | 是（`opencode.json`） | 热重载 |
+| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
@@ -797,30 +797,36 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 
 ## 7. 外部同步（WorkBuddy / opencode）
 
-### `-setto opencode [modelId]` / `--setto opencode [modelId]`
+### `-setto opencode [modelId|--all]` / `--setto opencode [modelId|--all]`
 
-- **语法**：`mslxdff -setto opencode [modelId]`（`--setto` 等价）
-- **作用**：把本地网关 `http://127.0.0.1:<port>/v1` 以 `provider.mslxdff` 写入 `~/.config/opencode/opencode.json`，使 opencode 把 mslxdff 当供应商（`mslxdff/mslxdff-<id>`）。默认写 **alias** `mslxdff-<id>` 防重名（如 `deepseek`→`mslxdff-deepseek`，避免与 `workbuddy/deepseek` 混乱），**原名仍兼容**（旧裸 `deepseek` 键视为同一逻辑模型，不强制迁移；网关对 `mslxdff-deepseek` 与 `deepseek` 双兼容，重复添加幂等）。
+- **语法**：`mslxdff -setto opencode [modelId]`（`--setto` 等价）；批量 `mslxdff -setto opencode --all` / `-a` / `all`
+- **作用**：把本地网关 `http://127.0.0.1:<port>/v1` 以 `provider.mslxdff` 写入 `~/.config/opencode/opencode.json`，使 opencode 把 mslxdff 当供应商（`mslxdff/<model>`）。模型键直写裸名（如 `deepseek-v4-flash-free`），含 `/` 的自动转 `-`（如 `bai/deepseek-v4-flash`→`bai-deepseek-v4-flash`），到达 8989 后网关通过 `~/.config/mslxdff/model-aliases.json` 自动还原为 `/` 形式，`opencode` 里选 `mslxdff/deepseek-v4-flash-free` 或 `mslxdff/bai-deepseek-v4-flash` 直达本地同名模型。
 - **参数**：
-  - 无 `modelId`：取 `loadPreferredModel() || getPreferredModel()`（`big-pickle` 兜底），归一后转 alias。
-  - 有 `modelId`：`normalizeModel(raw)` 归一后 `toInternalId`→`toExternalAlias`（`mslxdff-deepseek` 不会双前缀），`savePreferredModel`，`modelId` 不能为 `auto` 或空。
+  - 无 `modelId`：取 `loadPreferredModel() || getPreferredModel()`（`big-pickle` 兜底）单条同步。
+  - 有 `modelId`：`normalizeModel(raw)` 归一后直写裸名（`/`→`-`），`savePreferredModel`，`modelId` 不能为 `auto` 或空。
+  - `--all` / `-a` / `all`：批量同步全部 `modelPicks`（`state.json` 的勾选集，空则回退到首选），每条 `inserted/updated` 累积，原子写一次完成。
 - **流程**：
-  1. 4s 超时尝试刷新模型列表，若 `internal` 与 `alias` 均不在 free 列表则 `warn` 但仍继续。
+  1. 单条时 4s 超时尝试刷新模型列表，若 `id` 及其 `dash` 形态均不在 free 列表则 `warn` 但仍继续；批量时跳过校验直接同步。
   2. `loadToken()` 取 token，`getPort() || MSLXDFF_PORT || 8989` 取端口，`opencodeConfigPath()` 取文件（`OPENCODE_CONFIG` 可覆盖）。
-  3. `syncToOpencode({ id: alias, token, port, file })`：不存在则 `inserted`，已存在（`alias` 或原名 `internal` 任一存在即视为已存在）则 `updated`（不新增双键，保留原键，仅覆盖 `options.baseURL/apiKey`），原子写 `tmp→rename`，损坏备份 `.bak`。
+  3. `syncToOpencode({ id, token, port, file })`：`/`→`-` 转存储键，`/` 形态同时注册 `model-aliases.json` 的 `dash→slash` 映射；已存在（同存储键）则 `updated`，否则 `inserted`，保留其他 `provider`，原子写 `tmp→rename`，损坏备份 `.bak`。
 - **输出**：
   ```
-  default model set to: deepseek (daemon hot-reloads on next request)
-  synced to opencode: inserted "mslxdff-deepseek" (alias for "deepseek", 原名仍兼容) @ C:\Users\you\.config\opencode\opencode.json
+  default model set to: deepseek-v4-flash-free (daemon hot-reloads on next request)
+  synced to opencode: inserted "deepseek-v4-flash-free" @ C:\Users\you\.config\opencode\opencode.json
     url: http://127.0.0.1:8989/v1
-    alias: mslxdff-deepseek -> deepseek (opencode 选 mslxdff/mslxdff-deepseek 直达本地 deepseek)
+    opencode 选 mslxdff/deepseek-v4-flash-free 直达本地 deepseek-v4-flash-free
+  # 批量
+  synced to opencode: 19 inserted, 0 updated, total 19 @ ...\opencode.json
+    url: http://127.0.0.1:8989/v1
+    models: big-pickle, deepseek-v4-flash-free, bai/deepseek-v4-flash, ...
   ```
-- **入站兼容**：网关对 `POST /v1/chat/completions` 的 `model` 做 alias 还原：`mslxdff-deepseek`→`deepseek`、`mslxdff/mslxdff-deepseek`→`deepseek`、`deepseek` 原样，`x-mslxdff-alias` 头回显。
+- **入站**：网关对 `POST /v1/chat/completions` 的 `model` 做两段还原：`mslxdff/<model>` 剥前缀 → `model-aliases` 的 `dash→slash`（如 `bai-deepseek-v4-flash`→`bai/deepseek-v4-flash`），`x-mslxdff-alias` 头回显。
 - **示例**：
   ```bash
-  mslxdff -setto opencode deepseek
-  mslxdff -setto opencode mslxdff-deepseek   # 已带前缀不双写，去重
+  mslxdff -setto opencode deepseek-v4-flash-free
+  mslxdff -setto opencode bai/deepseek-v4-flash   # 存为 bai-deepseek-v4-flash，自动映射
   mslxdff -setto opencode big-pickle
+  mslxdff -setto opencode --all   # picks 全部进 opencode 菜单
   mslxdff -setto opencode   # 用当前首选
   ```
 
