@@ -101,8 +101,10 @@ export async function orchestrateVia({
     for (const peer of peers) {
       const raw = String(peer.name || peer.id || peer.url || "peer");
       let peerId = raw;
-      // 仅当 raw 本身就是 url 时才短化；显式 name/id 保持原样，避免 B → b:8989
-      if (!peer.name && !peer.id && raw.includes("://")) { try { const u = new URL(raw); peerId = u.hostname + (u.port ? `:${u.port}` : ""); } catch { peerId = raw.slice(-16); } }
+      // 组员 name 可能存为完整 url（如 http://172.93...），统一短化为 host:port，防止 report 端 peerIds 与 via keys 不一致导致表格空白
+      if (raw.includes("://")) {
+        try { const u = new URL(raw); const host = u.hostname; const port = u.port ? `:${u.port}` : ""; if (host) peerId = `${host}${port}`; else peerId = raw.slice(-16); } catch { peerId = raw.slice(-16); }
+      }
       const peerToken = peer.token || token || "";
       try {
         const r = await viaProbeFn({ peerUrl: peer.url, token: peerToken, providerId: provider, model, prompt: "hi", maxTokens: 5, timeoutMs, clock });

@@ -91,7 +91,15 @@ export function formatViaReport(results, { peers = [], meta = {}, json = false }
     const isDirectBest = bestKey === "direct";
     const directCell = pad(`${directTxt}${isDirectBest ? "★" : ""}`, colW, "right");
     const viaCells = peerIds.map((pid) => {
-      const v = r.via?.[pid];
+      // via keys 可能存为完整 url（如 http://172...）而 peerIds 已短化，兼容两者
+      let v = r.via?.[pid];
+      if (!v) {
+        // 尝试完整 url 变体
+        const full = Object.keys(r.via || {}).find((k) => {
+          try { const u = new URL(k); return (u.hostname + (u.port ? `:${u.port}` : "")) === pid; } catch { return false; }
+        });
+        if (full) v = r.via[full];
+      }
       if (!v) return pad("—", colW, "right");
       if (v.ok) {
         const txt = `${v.ttfbMs ?? v.totalMs ?? "—"}ms`;
