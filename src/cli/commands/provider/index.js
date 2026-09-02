@@ -6,73 +6,12 @@ export async function handleProviders(args) {
   const idx = args.findIndex((x) => x === "-providers" || x === "--providers");
   const sub = args[idx + 1];
   if (!sub || sub === "list" || sub === "status") {
-    const { loadProviderConfigs, loadProviderKeys, loadProviderShareKeys, loadProviderBaseUrl, loadProviderAllowedModels } = await import("../../../state.js");
-    const configs = loadProviderConfigs();
-    const opencodeEnabled = true;
-    const opencodeBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
-    const orKeys = loadProviderKeys("openrouter");
-    const orBase = "https://openrouter.ai/api/v1";
-    const orShare = loadProviderShareKeys("openrouter");
-    const orAllowed = loadProviderAllowedModels("openrouter");
-    const genericIds = new Set(Object.keys(configs).filter((id) => id !== "opencode" && id !== "openrouter"));
-    try {
-      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
-      const pk = raw.providerKeys || {};
-      for (const id of Object.keys(pk)) if (id !== "opencode" && id !== "openrouter") genericIds.add(id);
-      const cfgRaw = raw.providerConfigs || {};
-      for (const id of Object.keys(cfgRaw)) if (id !== "opencode" && id !== "openrouter") genericIds.add(id);
-    } catch {}
-    for (const k of Object.keys(process.env)) {
-      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
-      if (m) {
-        const id = m[1].toLowerCase().replace(/__/g, "-");
-        if (id !== "openrouter" && id !== "opencode") genericIds.add(id);
-      }
-    }
-    try {
-      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
-      const cfgs = raw.providerConfigs || {};
-      for (const id of Object.keys(cfgs)) {
-        if (id === "opencode" || id === "openrouter") continue;
-        const am = cfgs[id]?.allowedModels;
-        if (Array.isArray(am) && am.length) genericIds.add(id);
-      }
-    } catch {}
-    const list = [];
-    const { loadProviderAllowAnyModels: _la0 } = await import("../../../state.js");
-    const opAllowAny = _la0("opencode");
-    const orAllowAny = _la0("openrouter");
-    const opAllowed = loadProviderAllowedModels("opencode");
-    list.push({ id: "opencode", enabled: opencodeEnabled, baseUrl: opencodeBase, keys: [], share: false, allowed: opAllowed, allowAny: opAllowAny, note: "built-in, no key, cannot share" });
-    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, allowed: orAllowed, allowAny: orAllowAny, note: orKeys.length ? "" : "no keys" });
-    for (const gid of [...genericIds].sort()) {
-      const cfg = configs[gid];
-      const keys = loadProviderKeys(gid);
-      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || "";
-      const share = loadProviderShareKeys(gid);
-      const allowed = loadProviderAllowedModels(gid);
-      const allowAny = _la0(gid);
-      const enabled = Boolean(baseUrl && keys.length);
-      let note = "";
-      if (!baseUrl && !keys.length && !allowed.length && allowAny === false) note = "no baseUrl, no keys, BLOCKED (allowAny OFF)";
-      else if (!baseUrl && !keys.length && !allowed.length) note = "no baseUrl, no keys";
-      else if (!baseUrl && !allowed.length && !allowAny) note = "missing baseUrl, BLOCKED";
-      else if (!keys.length && !allowed.length && !allowAny) note = "no keys, BLOCKED";
-      else if (!baseUrl) note = "missing baseUrl";
-      else if (!keys.length) note = "no keys";
-      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, allowed, allowAny, note });
-    }
-    console.log(`providers (${list.length}):`);
-    for (const p of list) {
-      const state = p.enabled ? "enabled " : "disabled";
-      const keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}` : "0 keys";
-      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
-      const allowInfo = p.allowed.length ? `allow=${p.allowed.length}(${p.allowed.slice(0, 3).join(",")}${p.allowed.length > 3 ? "..." : ""})` : (p.allowAny ? "allow=all" : "allow=none(BLOCKED)");
-      const note = p.note ? `  (${p.note})` : "";
-      console.log(`  ${p.id.padEnd(12)} ${state}  ${keysInfo.padEnd(28)}  ${allowInfo.padEnd(22)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
-    }
-    console.log(`\nuse: mslxdff -provider <id> list  to inspect one,  mslxdff -provider <id> allowlist set <model...>  to restrict`);
-    console.log(`     mslxdff -provider <id> allowAny on|off  (empty allowlist = block or allow all)`);
+    const { buildProviderRows, formatProviderSection } = await import("../../provider-row.js");
+    const rows = buildProviderRows({});
+    const enabled = rows.filter((r) => r.enabled).length;
+    console.log(`providers  ${rows.length} 个 · ${enabled} 已启用  —  mslxdff -provider <id> list 查看详情`);
+    console.log(formatProviderSection(rows));
+    console.log(`\n提示: mslxdff -provider <id> list 单看一个 · allowlist set <model...> 限制模型 · allowAny on|off 空名单放行/阻断`);
     process.exit(0);
   }
   console.error("usage: mslxdff -providers list");
@@ -106,68 +45,11 @@ export async function handleProvider(args) {
     process.exit(1);
   }
   if (id === "list" || id === "status") {
-    const { loadProviderConfigs, loadProviderKeys, loadProviderShareKeys, loadProviderBaseUrl } = await import("../../../state.js");
-    const configs = loadProviderConfigs();
-    const opencodeBase = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
-    const orKeys = loadProviderKeys("openrouter");
-    const orBase = "https://openrouter.ai/api/v1";
-    const orShare = loadProviderShareKeys("openrouter");
-    const genericIds = new Set(Object.keys(configs).filter((x) => x !== "opencode" && x !== "openrouter"));
-    try {
-      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
-      const pk = raw.providerKeys || {};
-      for (const k of Object.keys(pk)) if (k !== "opencode" && k !== "openrouter") genericIds.add(k);
-      const cfgRaw = raw.providerConfigs || {};
-      for (const k of Object.keys(cfgRaw)) if (k !== "opencode" && k !== "openrouter") genericIds.add(k);
-    } catch {}
-    for (const k of Object.keys(process.env)) {
-      const m = k.match(/^MSLXDFF_(.+)_KEY$/);
-      if (m) {
-        const gid = m[1].toLowerCase().replace(/__/g, "-");
-        if (gid !== "openrouter" && gid !== "opencode") genericIds.add(gid);
-      }
-    }
-    try {
-      const raw = JSON.parse(readFileSync(defaultStateFile(), "utf8"));
-      const cfgs = raw.providerConfigs || {};
-      for (const gid of Object.keys(cfgs)) {
-        if (gid === "opencode" || gid === "openrouter") continue;
-        const am = cfgs[gid]?.allowedModels;
-        if (Array.isArray(am) && am.length) genericIds.add(gid);
-      }
-    } catch {}
-    const list = [];
-    const { loadProviderAllowAnyModels: _la0 } = await import("../../../state.js");
-    const { loadProviderAllowedModels } = await import("../../../state.js");
-    const opAllowed = loadProviderAllowedModels("opencode");
-    const opAllowAny = _la0("opencode");
-    const orAllowed = loadProviderAllowedModels("openrouter");
-    const orAllowAny = _la0("openrouter");
-    list.push({ id: "opencode", enabled: true, baseUrl: opencodeBase, keys: [], share: false, allowed: opAllowed, allowAny: opAllowAny, note: "built-in, no key, cannot share" });
-    list.push({ id: "openrouter", enabled: orKeys.length > 0, baseUrl: orBase, keys: orKeys, share: orShare, allowed: orAllowed, allowAny: orAllowAny, note: orKeys.length ? "" : "no keys" });
-    for (const gid of [...genericIds].sort()) {
-      const cfg = configs[gid];
-      const keys = loadProviderKeys(gid);
-      const baseUrl = loadProviderBaseUrl(gid) || cfg?.baseUrl || "";
-      const share = loadProviderShareKeys(gid);
-      const allowed = loadProviderAllowedModels(gid);
-      const allowAny = _la0(gid);
-      const enabled = Boolean(baseUrl && keys.length);
-      let note = "";
-      if (!baseUrl && !keys.length) note = "no baseUrl, no keys";
-      else if (!baseUrl) note = "missing baseUrl";
-      else if (!keys.length) note = "no keys";
-      list.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, share, note });
-    }
-    console.log(`providers (${list.length}):`);
-    for (const p of list) {
-      const state = p.enabled ? "enabled " : "disabled";
-      const keysInfo = p.keys.length ? `${p.keys.length} key${p.keys.length > 1 ? "s" : ""} ${p.keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")}` : "0 keys";
-      const shareInfo = p.id === "opencode" ? "cannot share" : `share=${p.share ? "ON" : "off"}`;
-      const note = p.note ? `  (${p.note})` : "";
-      console.log(`  ${p.id.padEnd(12)} ${state}  ${keysInfo.padEnd(28)}  baseUrl=${p.baseUrl}  ${shareInfo}${note}`);
-    }
-    console.log(`\nuse: mslxdff -provider <id> list  to inspect one,  mslxdff -provider add <id> <baseUrl> <key>  to add generic`);
+    const { buildProviderRows, formatProviderSection } = await import("../../provider-row.js");
+    const rows = buildProviderRows({});
+    const enabled = rows.filter((r) => r.enabled).length;
+    console.log(`providers  ${rows.length} 个 · ${enabled} 已启用  —  mslxdff -provider <id> list 单看一个`);
+    console.log(formatProviderSection(rows));
     process.exit(0);
   }
   if (id === "add") {

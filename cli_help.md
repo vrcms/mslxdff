@@ -72,6 +72,7 @@
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
 | `mslxdff -provider <id> allowlist ...` | `--provider` | 管理供应商模型白名单（空=阻塞除非 `allowAny on`，非空仅名单内可用，防昂贵模型） | 是 | 热更新立即生效 |
 | `mslxdff -provider <id> allowAny on\|off` | `--provider` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） | 是 | 热更新立即生效 |
+| `mslxdff -provider <id> del` | `--provider` | 删除整个供应商（清 `providerConfigs`/`providerKeys`/`share`，自动重启生效，`opencode` 不可删） | 是（删） | 自动重启 |
 | `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用/workbuddy）及启用状态（含 allowlist 摘要） | 否 | 否 |
 | `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发） | 否 | 否 |
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
@@ -420,6 +421,8 @@
 
 > 多供应商架构（ADR-0007 + 通用 0.1.59）：`opencode` 为默认供应商（裸 id，向后兼容，恒启用，无 key）；其他供应商带 `<provider>/` 前缀（如 `openrouter/google/gemma:free` / `myapi/gpt-4`），按前缀路由并在转发前剥回原始 id。已实现 `openrouter`（匿名可拉 `GET /api/v1/models`，chat 必须有 key）与通用 OpenAI 兼容供应商（`providerConfigs.<id>={baseUrl,keys}`，`mslxdff -provider add <id> <baseUrl> <key>` 一键添加）。
 
+> **⚠️ 生效说明（有点别扭但很快）**：`providerConfigs` 的结构性改动（`add` / `set-url` / `set-*-path` / `clear` / `share` / 新增 key 覆盖）在 daemon 启动时一次性创建连接池与 `KeyRing`，**需 `mslxdff -restart`（<1s）才生效**，否则仍走旧实例，可能命中 `401` 或冷却。`allowlist` / `allowAny` / `model set` / `model pick` 为热更新，无需重启。未来可能做热重建，目前重启最稳妥 —— 虽有点别扭但成本极低，体验像游戏读档。
+
 ### `-provider add <id> <baseUrl> <key>` / `-provider <id> [key...|add|remove|list|clear|share|set-url]`
 
 #### 通用语法
@@ -494,6 +497,18 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **作用**：清空该供应商全部 keys（`saveProviderKeys(id, [])`），provider 在下次 daemon 启动时自动禁用。
 - **输出**：`cleared openrouter API keys (provider disabled on next daemon start)`
 - **示例**：`mslxdff -provider openrouter clear`
+
+#### `mslxdff -provider <id> del`（删除整个供应商，自动重启）
+
+- **语法**：`mslxdff -provider kenari del` / `mslxdff -provider kenari delete` / `mslxdff -provider kenari rm`（别名 `delete`/`rm`/`remove-provider`/`del-provider`，`opencode` 受保护不可删）
+- **作用**：彻底删除该供应商的 `providerConfigs`/`providerKeys`/`providerShareKeys`，不留 `○ disabled` 空行。区别于 `clear`（仅清 keys 仍占一行）。
+- **行为**：`saveProviderConfig(id, {baseUrl:"",keys:[]…})` 触发删除分支，同步清理 `providerKeys`/`shareKeys` 残留；若 daemon 运行中则 **自动 `mslxdff -restart`（<1s）**，否则下次启动生效。需重启才生效的“别扭”在此被自动抚平。
+- **输出**：`已删除供应商: kenari — 配置已清空` + `检测到 daemon 运行中，自动重启以生效…` / `已自动重启完成`。
+- **示例**：
+  ```bash
+  mslxdff -provider cline del        # 删掉旧的 cline，保留 clinebot（sk_6b… 正确）
+  mslxdff -providers list            # 确认已从 9 → 8
+  ```
 
 #### `mslxdff -provider <id> share on|off`（瞬时共享开关，ADR-0008）
 
