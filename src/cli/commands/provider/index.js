@@ -65,6 +65,8 @@ export async function handleProvider(args) {
   }
   const { handleClineLogin } = await import("./cline-login.js");
   if (await handleClineLogin(id, sub)) return true;
+  const { handleWorkbuddyLogin } = await import("./workbuddy-login.js");
+  if (await handleWorkbuddyLogin(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");
