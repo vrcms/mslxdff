@@ -1,6 +1,6 @@
 import { clientIp, json, readBody, parseHops, errMsg } from "./helpers.js";
 import { DEFAULT_MAX_HOPS } from "../peers.js";
-import { enqueueRelay, dequeueRelayForPoll, resolveRelay } from "./relay-queue.js";
+import { enqueueRelay, dequeueRelayForPoll, resolveRelay, subscribeStream, unsubscribeStream } from "./relay-queue.js";
 
 export async function heartbeatHandler({ req, res, groups, bus, logs }) {
   const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
@@ -61,6 +61,90 @@ export async function resultHandler({ req, res, groups }) {
   const ok = resolveRelay(reqId, body.result || body);
   if (!ok) return json(res, 404, { error: "pending request not found or timed out" });
   return json(res, 200, { object: "result", ok: true });
+}
+
+function isStreamEnabled() {
+  const v = process.env.MSLXDFF_BROADBAND_STREAM;
+  if (v === "0" || v === "false" || v === "off") return false;
+  return true;
+}
+
+export async function streamHandler({ req, res, groups, bus, logs }) {
+  if (!isStreamEnabled()) return json(res, 404, { error: "broadband stream disabled" });
+  const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
+  if (!auth) return json(res, 401, { error: "bearer token required" });
+  // support GET query ?name= & ?group=
+  let groupName = null;
+  try {
+    const u = new URL(req.url || "", "http://127.0.0.1");
+    groupName = u.searchParams.get("name") || u.searchParams.get("group");
+  } catch {}
+  if (!groupName) {
+    // also try body for POST-compat (though GET should use query)
+    try {
+      const b = await readBody(req);
+      groupName = b?.name || b?.group;
+    } catch {}
+  }
+  if (!groupName) return json(res, 400, { error: "group name is required" });
+  const hit = groups?.membersForToken(groupName, auth[1]);
+  if (!hit) return json(res, 403, { error: "invalid member token" });
+  const targetUrl = hit.member?.url;
+  if (!targetUrl) return json(res, 400, { error: "member url not found" });
+  const isBb = hit.member?.kind === "broadband" || String(targetUrl).startsWith("relay://");
+  if (!isBb) return json(res, 403, { error: "only broadband members can stream" });
+  // SSE headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+  // initial frame
+  try { res.write(`:connected ${Date.now()}\n\n`); } catch {}
+  const pingMs = Number(process.env.MSLXDFF_BROADBAND_PING_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_PING_MS) : 25_000;
+  subscribeStream({ group: groupName, target: targetUrl, res });
+  const evtOpen = { ts: Date.now(), type: "relay-stream-open", member: targetUrl, group: groupName };
+  try { bus?.emit(evtOpen); } catch {}
+  try { logs?.appendEvent?.(evtOpen); } catch {}
+  // heartbeat touch
+  try {
+    const ip = clientIp(req);
+    const members = groups.list()[groupName]?.members || {};
+    const targetId = Object.keys(members).find((k) => members[k].url === targetUrl) || targetUrl;
+    const m = members[targetId] || hit.member;
+    if (m) {
+      m.publicIp = ip;
+      m.lastSeen = Date.now();
+      try { groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen }); } catch {}
+    }
+  } catch {}
+  const pingTimer = setInterval(() => {
+    try { res.write(`:ping ${Date.now()}\n\n`); } catch {}
+    // keep lastSeen fresh so forward doesn't see stale while stream is alive
+    try {
+      const members = groups.list()[groupName]?.members || {};
+      const targetId = Object.keys(members).find((k) => members[k].url === targetUrl) || targetUrl;
+      const m = members[targetId] || hit.member;
+      if (m) {
+        m.lastSeen = Date.now();
+        try { groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", lastSeen: m.lastSeen }); } catch {}
+      }
+    } catch {}
+    const evt = { ts: Date.now(), type: "relay-stream-ping", member: targetUrl, group: groupName };
+    try { bus?.emit(evt); } catch {}
+  }, pingMs);
+  pingTimer.unref?.();
+  const cleanup = () => {
+    clearInterval(pingTimer);
+    unsubscribeStream({ group: groupName, target: targetUrl, res });
+    const evt = { ts: Date.now(), type: "relay-stream-close", member: targetUrl, group: groupName };
+    try { bus?.emit(evt); } catch {}
+    try { logs?.appendEvent?.(evt); } catch {}
+  };
+  req.on("close", cleanup);
+  req.on("error", cleanup);
+  // keep promise pending until close — do not end res here
+  await new Promise(() => {});
 }
 
 export async function forwardHandler({ req, res, groups, bus, logs }) {

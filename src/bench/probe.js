@@ -1,9 +1,9 @@
 import { joinUrl } from "../providers/base.js";
 import { getCustomNormalizer } from "../providers/registry.js";
+import { createTransport } from "../transport/index.js";
 
 function normalizeModelsPayload(json, baseUrl = "") {
   if (!json) return [];
-  // 可扩展：优先走注册表的定制化解析（如 cline.bot 仅 free）
   try {
     const custom = getCustomNormalizer(baseUrl);
     if (custom) {
@@ -46,27 +46,20 @@ export async function probeModels({
     if (!seen.has(norm)) { seen.add(norm); candidates.push(norm); }
   };
   if (modelsPath) push(modelsPath);
-  // 通用回退：/v1/models 与 /models
   push("/v1/models");
   push("/models");
-  // workbuddy 异形已在 defaultModelsPath 注入，若仍未命中则 candidates 已含
+  const tr = createTransport({ fetchImpl, keepAlive: false, retry: {}, timeoutMs });
   const tried = [];
   let lastError = "";
   for (const p of candidates) {
     const url = joinUrl(base, p);
     tried.push(url);
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(new Error(`probe timeout ${timeoutMs}ms`)), timeoutMs);
-      let res;
-      try {
-        res = await fetchImpl(url, { headers, signal: controller.signal });
-      } finally { clearTimeout(t); }
-      if (res instanceof Error) { lastError = res.message || String(res); continue; }
+      const res = await tr.request({ url, method: "GET", headers, stream: false });
       if (!res.ok) { lastError = `HTTP ${res.status}`; continue; }
       let json = {};
       try { json = await res.json(); } catch { json = {}; }
-      const raw = normalizeModelsPayload(json);
+      const raw = normalizeModelsPayload(json, baseUrl);
       const data = raw.map((m) => ({ id: toModelId(m), raw: m })).filter((x) => x.id).map((x) => ({ id: x.id, ...x.raw }));
       return { ok: true, data, tried, url, rawCount: raw.length };
     } catch (e) {
