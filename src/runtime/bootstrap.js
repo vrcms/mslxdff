@@ -316,6 +316,44 @@ export async function startDaemonMain(VERSION) {
 
   const broadbandGroups = () => loadGroupsJoined().filter((g) => g.kind === "broadband" && g.leaderUrl);
   if (broadbandGroups().length) {
+    const streamEnabled = (() => {
+      const v = process.env.MSLXDFF_BROADBAND_STREAM;
+      if (v === "0" || v === "false" || v === "off") return false;
+      return true;
+    })();
+    const execAndPost = async (g, reqId, body) => {
+          let result;
+      try {
+        const upRes = await upstream.chat(body);
+        const ct = upRes.headers.get("content-type") || "";
+        const isStream = Boolean(body?.stream) || ct.includes("text/event-stream");
+        if (isStream && upRes.body) {
+          let collected = "";
+          for await (const chunk of upRes.body) {
+            if (typeof chunk === "string") collected += chunk;
+            else if (Buffer.isBuffer(chunk)) collected += chunk.toString("utf8");
+            else if (chunk instanceof Uint8Array) collected += Buffer.from(chunk).toString("utf8");
+            else collected += String(chunk);
+          }
+          result = { status: upRes.status, headers: { "Content-Type": "text/event-stream" }, body: collected };
+        } else {
+          const txt = await upRes.text();
+          let parsed;
+          try { parsed = JSON.parse(txt); } catch { parsed = txt; }
+          result = { status: upRes.status, headers: { "Content-Type": upRes.headers.get("content-type") || "application/json" }, body: typeof parsed === "string" ? parsed : JSON.stringify(parsed) };
+        }
+      } catch (err) {
+        result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: errMsg(err) }) };
+      }
+      try {
+        await fetch(`${g.leaderUrl}/v1/groups/relay/result`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          body: JSON.stringify({ name: g.name, group: g.name, reqId, result }),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch {}
+    };
     const doHeartbeat = async () => {
       for (const g of broadbandGroups()) {
         try {
@@ -348,44 +386,88 @@ export async function startDaemonMain(VERSION) {
           const items = data.data || [];
           for (const item of items) {
             const { reqId, body } = item;
-            let result;
-            try {
-              const upRes = await upstream.chat(body);
-              const ct = upRes.headers.get("content-type") || "";
-              const isStream = Boolean(body?.stream) || ct.includes("text/event-stream");
-              if (isStream && upRes.body) {
-                let collected = "";
-                for await (const chunk of upRes.body) {
-                  collected += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-                }
-                result = { status: upRes.status, headers: { "Content-Type": "text/event-stream" }, body: collected };
-              } else {
-                const txt = await upRes.text();
-                let parsed;
-                try { parsed = JSON.parse(txt); } catch { parsed = txt; }
-                result = { status: upRes.status, headers: { "Content-Type": upRes.headers.get("content-type") || "application/json" }, body: typeof parsed === "string" ? parsed : JSON.stringify(parsed) };
-              }
-            } catch (err) {
-              result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: errMsg(err) }) };
-            }
-            try {
-              await fetch(`${g.leaderUrl}/v1/groups/relay/result`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-                body: JSON.stringify({ name: g.name, group: g.name, reqId, result }),
-                signal: AbortSignal.timeout(5000),
-              });
-            } catch {}
+            await execAndPost(g, reqId, body);
           }
         } catch {}
       }
     };
-    doHeartbeat().catch(() => {});
-    const hbTimer = setInterval(doHeartbeat, 30_000);
-    hbTimer.unref();
-    const pollTimer = setInterval(doPoll, 1000);
-    pollTimer.unref();
-    console.log(`broadband relay: heartbeat 30s + poll 1s for ${broadbandGroups().length} group(s)`);
+    if (!streamEnabled) {
+      doHeartbeat().catch(() => {});
+      const hbTimer = setInterval(doHeartbeat, 30_000);
+      hbTimer.unref();
+      const pollTimer = setInterval(doPoll, 1000);
+      pollTimer.unref();
+      console.log(`broadband relay: heartbeat 30s + poll 1s for ${broadbandGroups().length} group(s) [poll mode]`);
+    } else {
+      const streamManagers = new Map();
+      const startStreamForGroup = (g) => {
+        if (streamManagers.has(g.name)) return;
+        let attempts = 0;
+        let abort = null;
+        let stopped = false;
+        const connect = async () => {
+          if (stopped) return;
+          const url = `${g.leaderUrl}/v1/groups/relay/stream?name=${encodeURIComponent(g.name)}`;
+          const controller = new AbortController();
+          abort = controller;
+          try {
+            const res = await fetch(url, {
+              headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+              signal: controller.signal,
+            });
+            if (!res.ok) throw new Error(`stream ${res.status}`);
+            if (!res.body) throw new Error("no body");
+            attempts = 0;
+            let buf = "";
+            const decodeChunk = (c) => {
+              if (typeof c === "string") return c;
+              if (Buffer.isBuffer(c)) return c.toString("utf8");
+              if (c instanceof Uint8Array) return Buffer.from(c).toString("utf8");
+              return String(c);
+            };
+            for await (const chunk of res.body) {
+              buf += decodeChunk(chunk);
+              let idx;
+              while ((idx = buf.indexOf("\n\n")) >= 0) {
+                const raw = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                if (!raw || raw.startsWith(":")) continue;
+                let event = "message";
+                let data = "";
+                for (const line of raw.split("\n")) {
+                  if (line.startsWith("event:")) event = line.slice(6).trim();
+                  else if (line.startsWith("data:")) data += line.slice(5).trim();
+                }
+                if (event === "relay" && data) {
+                  try {
+                    const parsed = JSON.parse(data);
+                    const { reqId, body } = parsed;
+                    if (reqId && body) execAndPost(g, reqId, body).catch(() => {});
+                  } catch {}
+                }
+              }
+            }
+            throw new Error("stream ended");
+          } catch (err) {
+            if (stopped) return;
+            const msg = errMsg(err);
+            if (!String(msg).includes("abort") && !String(msg).includes("Abort")) console.log(`broadband stream ${g.name}: ${msg} — reconnecting`);
+            attempts++;
+            const delay = Math.min(30_000, 1000 * Math.pow(2, attempts - 1) + Math.random() * 500);
+            await new Promise((r) => setTimeout(r, delay));
+            connect();
+          }
+        };
+        streamManagers.set(g.name, { stop: () => { stopped = true; abort?.abort(); } });
+        connect();
+      };
+      for (const g of broadbandGroups()) startStreamForGroup(g);
+      const ensureTimer = setInterval(() => {
+        for (const g of broadbandGroups()) if (!streamManagers.has(g.name)) startStreamForGroup(g);
+      }, 10_000);
+      ensureTimer.unref();
+      console.log(`broadband relay: stream (SSE) + ping 25s for ${broadbandGroups().length} group(s)`);
+    }
   }
 
   const { setupAutoUpdate } = await import("./auto-update.js");

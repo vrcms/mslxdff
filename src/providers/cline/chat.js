@@ -1,5 +1,6 @@
 import { joinUrl, sleep } from "../base.js";
 import { clineHeaders } from "./headers.js";
+import { createTransport } from "../../transport/index.js";
 
 function genSessionId() { return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 
@@ -12,40 +13,27 @@ function unwrapData(obj) {
 }
 
 async function streamToNonStream(upstream) {
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
   let content = "";
   let reasoning = "";
   let finishReason = null;
   let model = "";
   let id = "";
   let usage = null;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-      try {
-        const obj = JSON.parse(payload);
-        const normalized = unwrapData(obj);
-        const choice = normalized?.choices?.[0];
-        if (!choice) continue;
-        const delta = choice.delta || {};
-        if (delta.content) content += delta.content;
-        if (delta.reasoning) reasoning += delta.reasoning;
-        if (choice.finish_reason) finishReason = choice.finish_reason;
-        if (normalized.id) id = normalized.id;
-        if (normalized.model) model = normalized.model;
-        if (normalized.usage) usage = normalized.usage;
-      } catch {}
-    }
+  for await (const ev of upstream.stream()) {
+    if (!ev || ev === "[DONE]") continue;
+    try {
+      const obj = JSON.parse(ev);
+      const normalized = unwrapData(obj);
+      const choice = normalized?.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta || {};
+      if (delta.content) content += delta.content;
+      if (delta.reasoning) reasoning += delta.reasoning;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      if (normalized.id) id = normalized.id;
+      if (normalized.model) model = normalized.model;
+      if (normalized.usage) usage = normalized.usage;
+    } catch {}
   }
   const msg = { role: "assistant", content };
   if (reasoning) msg.reasoning = reasoning;
@@ -68,42 +56,34 @@ export function createChatService({
   dispatcher,
   authPool,
   connectTimeoutMs = 30_000,
-  retry = { network: { attempts: 2, delayMs: 300 } },
 } = {}) {
   const resolvedBase = String(baseUrl).trim().replace(/\/+$/, "");
-  // chat 固定落在 /api/v1/chat/completions：base 已含 /api/v1 则只拼 /chat/completions，
-  // 否则拼 /api/v1/chat/completions（避免双 /api/v1 或 /v1 错路径导致 401/empty response）
   const resolvedChat = chatPath || (String(resolvedBase).includes("/api/v1") ? "/chat/completions" : "/api/v1/chat/completions");
+  const transport = createTransport({ fetchImpl, dispatcher, keepAlive: !!dispatcher, timeoutMs: connectTimeoutMs, retry: {} });
 
   async function clineFetch(body, sessionId) {
     const token = await authPool.getAccessToken();
     const headers = clineHeaders(sessionId, token);
     const finalUrl = joinUrl(resolvedBase, resolvedChat);
-    const opts = { method: "POST", headers, body: JSON.stringify(body) };
-    if (dispatcher) opts.dispatcher = dispatcher;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
-    opts.signal = controller.signal;
-    try { return await fetchImpl(finalUrl, opts); } finally { clearTimeout(timer); }
+    const isStream = body?.stream === true;
+    return transport.request({ url: finalUrl, headers, body, stream: isStream, timeoutMs: connectTimeoutMs });
   }
 
-  // 判断限流信号
-  function isLimitHit(status, bodyText, isStream) {
+  function isLimitHit(status, bodyText) {
     if (status === 429) return true;
     if (status >= 500 && String(bodyText).includes("empty response content")) return true;
-    if (status === 200 && !isStream && String(bodyText).includes("empty response content")) return true;
     return false;
   }
 
-  async function clineFetchWithRetry(body, sessionId, isStream) {
+  async function clineFetchWithRetry(body, sessionId) {
     const maxRetries = 4;
     let lastResp = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const resp = await authPool.enqueue(() => clineFetch(body, sessionId));
       lastResp = resp;
       let bodyText = "";
-      try { bodyText = await resp.clone().text(); } catch {}
-      const hit = isLimitHit(resp.status, bodyText, isStream);
+      if (resp.status !== 200) { try { bodyText = await resp.text(); } catch {} }
+      const hit = isLimitHit(resp.status, bodyText);
       if (hit) {
         const { parseCooldown } = await import("./auth.js");
         const cooldownMs = parseCooldown(bodyText, resp.status);
@@ -126,7 +106,7 @@ export function createChatService({
     let lastData = null;
     let resp = firstResp;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (!resp) resp = await clineFetchWithRetry(body, sessionId, true);
+      if (!resp) resp = await clineFetchWithRetry(body, sessionId);
       if (!resp.ok) {
         const errText = await resp.text().catch(() => "");
         const hdrs = new Headers(resp.headers);
@@ -165,7 +145,6 @@ export function createChatService({
     const sessionId = genSessionId();
     const isStream = body?.stream === true;
     const upstreamModel = String(model).split("/").pop().includes(":") ? model : model;
-    // 构造上游 body：保留外部 model 名，Cline 上游用同名
     const upstreamBody = {
       model: upstreamModel,
       max_tokens: body?.max_tokens || body?.max_completion_tokens || 4096,
@@ -178,16 +157,11 @@ export function createChatService({
     for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
       if (body[k] !== undefined) upstreamBody[k] = body[k];
     }
-
-    // 网络层重试
     for (let netAttempt = 0; netAttempt < 3; netAttempt++) {
       try {
-        const resp = await clineFetchWithRetry(upstreamBody, sessionId, true);
+        const resp = await clineFetchWithRetry(upstreamBody, sessionId);
         if (!resp) throw new Error("empty response");
-        if (!resp.ok) {
-          // 直通错误（403/400 等）
-          return resp;
-        }
+        if (!resp.ok) return resp;
         if (isStream) return resp;
         if (forceStream) {
           const ret = await nonStreamWithContentCheck(upstreamBody, sessionId, resp);
@@ -196,7 +170,6 @@ export function createChatService({
           const hdrs = new Headers({ "Content-Type": "application/json" });
           return new Response(JSON.stringify(ret.data), { status: 200, headers: hdrs });
         }
-        // 普通非流式（非 deepseek）
         const raw = await resp.json().catch(() => null);
         if (!raw) return resp;
         const normalized = unwrapData(raw);

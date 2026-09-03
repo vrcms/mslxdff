@@ -5,7 +5,7 @@ import { workbuddyBenchOne } from "../src/bench/workbuddy-bench.js";
 // mock SSE stream helper
 function sseResponse(chunks, { status = 200, headers = {} } = {}) {
   const enc = new TextEncoder();
-  const lines = chunks.map((c) => `data: ${JSON.stringify(c)}\n`).join("") + "data: [DONE]\n";
+  const lines = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(enc.encode(lines));
