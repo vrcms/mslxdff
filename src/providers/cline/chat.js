@@ -4,6 +4,16 @@ import { createTransport } from "../../transport/index.js";
 
 function genSessionId() { return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 
+// stripProviderPrefix 去掉本地供应商前缀，发上游用裸模型 id。
+// 上游（对标 cline2api-workers MODELS）只认裸 id："deepseek/deepseek-v4-flash"、
+// "poolside/laguna-s-2.1:free"；本地 "clinebot/deepseek/..." 需取后两段。
+// 两段及以内视为已是裸 id，原样透传。
+function stripProviderPrefix(id) {
+  const parts = String(id || "").split("/").filter(Boolean);
+  if (parts.length > 2) return parts.slice(1).join("/");
+  return String(id || "");
+}
+
 function unwrapData(obj) {
   if (obj && obj.data && typeof obj.data === "object") {
     const d = obj.data;
@@ -144,7 +154,7 @@ export function createChatService({
     const model = body?.model || "deepseek/deepseek-v4-flash";
     const sessionId = genSessionId();
     const isStream = body?.stream === true;
-    const upstreamModel = String(model).split("/").pop().includes(":") ? model : model;
+    const upstreamModel = stripProviderPrefix(model);
     const upstreamBody = {
       model: upstreamModel,
       max_tokens: body?.max_tokens || body?.max_completion_tokens || 4096,
@@ -171,7 +181,10 @@ export function createChatService({
           return new Response(JSON.stringify(ret.data), { status: 200, headers: hdrs });
         }
         const raw = await resp.json().catch(() => null);
-        if (!raw) return resp;
+        if (!raw || typeof raw !== "object") {
+          if (!raw) return resp;
+          return new Response(JSON.stringify({ error: { message: "upstream returned non-JSON body", type: "api_error" } }), { status: 502, headers: { "Content-Type": "application/json" } });
+        }
         const normalized = unwrapData(raw);
         normalized.model = model;
         return new Response(JSON.stringify(normalized), { status: 200, headers: { "Content-Type": "application/json" } });
