@@ -5,8 +5,13 @@ import { probeModels } from "../src/bench/probe.js";
 function mockFetch(map) {
   return async (url) => {
     const v = map[url];
-    if (v instanceof Error) return v;
-    if (!v) return { ok: false, status: 404, json: async () => ({}) };
+    if (v instanceof Error) throw v;
+    if (!v) return { ok: false, status: 404, headers: { get: () => "" }, text: async () => "{}", json: async () => ({}) };
+    if (!v.headers) v.headers = { get: () => "application/json" };
+    if (!v.text && v.json) {
+      const j = v.json;
+      v.text = async () => JSON.stringify(await j());
+    }
     return v;
   };
 }

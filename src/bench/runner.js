@@ -1,5 +1,6 @@
 import { joinUrl } from "../providers/base.js";
 import { computeMetrics, extractUsageFromJson } from "../metrics.js";
+import { createTransport } from "../transport/index.js";
 
 function extractInnerMessage(bodyText) {
   const t = String(bodyText || "");
@@ -37,43 +38,28 @@ export async function runOne({
   maxTokens = 32,
   timeoutMs = 30000,
   fetchImpl = globalThis.fetch,
-  clock = Date.now,
 } = {}) {
-  const started = clock();
-  const t0 = typeof performance !== "undefined" && performance.now ? performance.now() : started;
   if (!baseUrl) return { id: model, ok: false, error: "missing baseUrl", label: "配置错误", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   if (!model) return { id: model, ok: false, error: "missing model", label: "配置错误", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   if (!apiKey) return { id: model, ok: false, error: "missing apiKey", label: "未配置 Key", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   const url = joinUrl(String(baseUrl).replace(/\/+$/, ""), chatPath);
   let rawModel = String(model || "").trim();
-  // allowlist 已是 raw（如 z-ai/glm-5.3-flash），仅当带供应商前缀时才剥
   if (providerId && rawModel.startsWith(`${providerId}/`)) rawModel = rawModel.slice(providerId.length + 1);
   const body = { model: rawModel, stream: false, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens };
-  // workbuddy 需额外 workbuddy 透传头由调用方 headers 注入；此处直接透传
   const finalHeaders = { "Content-Type": "application/json", Accept: "application/json", ...headers };
   if (apiKey && !finalHeaders.Authorization) finalHeaders.Authorization = `Bearer ${apiKey}`;
-
-  let ttfbMs = null;
-  let res;
+  const tr = createTransport({ fetchImpl, keepAlive: false, retry: {}, timeoutMs });
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
-    const fetchStart = typeof performance !== "undefined" && performance.now ? performance.now() : clock();
-    try {
-      res = await fetchImpl(url, { method: "POST", headers: finalHeaders, body: JSON.stringify(body), signal: controller.signal });
-    } finally { clearTimeout(timer); }
-    ttfbMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - fetchStart);
-    if (res instanceof Error) throw res;
-    const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
+    const res = await tr.request({ url, method: "POST", headers: finalHeaders, body, stream: false });
+    const ttfbMs = res.ttfbMs;
+    const totalMs = res.totalMs;
     if (!res.ok) {
-      let txt = "";
-      try { txt = await res.text(); } catch {}
+      let txt = ""; try { txt = await res.text(); } catch {}
       const cls = classifyError(res.status, txt);
       const msg = extractInnerMessage(txt) || `HTTP ${res.status}`;
       return { id: model, providerId, ok: false, status: res.status, error: msg, label: cls.label, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
     }
-    let json = {};
-    let txt = "";
+    let json = {}; let txt = "";
     try { txt = await res.text(); json = JSON.parse(txt); } catch { json = {}; }
     const usage = extractUsageFromJson(json);
     const content = json?.choices?.[0]?.message?.content || json?.choices?.[0]?.text || txt || "";
@@ -84,9 +70,8 @@ export async function runOne({
     const totalTokens = usage?.total_tokens ?? (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
     return { id: model, providerId, ok: true, status: res.status, ttfbMs, totalMs, tps, charsPerSec, tokens: { prompt: promptTokens, completion: completionTokens, total: totalTokens }, chars, label: "成功", raw: json };
   } catch (e) {
-    const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
     const msg = e?.message || String(e);
     const isTimeout = /timeout|abort/i.test(msg);
-    return { id: model, providerId, ok: false, error: msg.slice(0, 300), label: isTimeout ? "超时" : "网络错误", ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+    return { id: model, providerId, ok: false, error: msg.slice(0, 300), label: isTimeout ? "超时" : "网络错误", ttfbMs: null, totalMs: null, tps: null, charsPerSec: null, tokens: null };
   }
 }

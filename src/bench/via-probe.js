@@ -1,5 +1,6 @@
 import { joinUrl } from "../providers/base.js";
 import { computeMetrics, extractUsageFromJson } from "../metrics.js";
+import { createTransport } from "../transport/index.js";
 
 function extractInnerMessage(bodyText) {
   const t = String(bodyText || "");
@@ -43,11 +44,9 @@ export async function viaProbe({
   relayBody,
   targetUrl,
 } = {}) {
-  const started = clock();
-  const t0 = typeof performance !== "undefined" && performance.now ? performance.now() : started;
   const base = String(peerUrl || "").replace(/\/+$/, "");
   if (!base) return { ok: false, label: "配置错误", error: "missing peerUrl", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
-  // 纯中继模式：A 把 targetUrl+headers+body 发给 B，B 原样 fetch 到上游（不查 B 本地 providerConfigs）
+  const tr = createTransport({ fetchImpl, keepAlive: false, retry: {}, timeoutMs });
   const rt = String(relayTarget || targetUrl || "").trim();
   if (rt) {
     const rh = relayHeaders && typeof relayHeaders === "object" ? relayHeaders : {};
@@ -56,15 +55,10 @@ export async function viaProbe({
     const relayHeadersOut = { "Content-Type": "application/json", Accept: "application/json" };
     if (token) relayHeadersOut.Authorization = `Bearer ${token}`;
     const payload = { targetUrl: rt, method: "POST", headers: rh, body: rb };
-    let ttfbMs = null;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
-      const fetchStart = typeof performance !== "undefined" && performance.now ? performance.now() : clock();
-      let res;
-      try { res = await fetchImpl(relayUrl, { method: "POST", headers: relayHeadersOut, body: JSON.stringify(payload), signal: controller.signal }); } finally { clearTimeout(timer); }
-      ttfbMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - fetchStart);
-      const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
+      const res = await tr.request({ url: relayUrl, method: "POST", headers: relayHeadersOut, body: payload, stream: false });
+      const ttfbMs = res.ttfbMs;
+      const totalMs = res.totalMs;
       if (!res.ok) {
         let txt = ""; try { txt = await res.text(); } catch {}
         const cls = classifyError(res.status, txt);
@@ -88,10 +82,9 @@ export async function viaProbe({
       const totalTokens = usage?.total_tokens ?? (pt !== null && ct !== null ? pt + ct : null);
       return { ok: true, status: relayStatus, label: "成功", ttfbMs, totalMs, tps, charsPerSec, tokens: { prompt: pt, completion: ct, total: totalTokens }, chars };
     } catch (e) {
-      const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
       const msg = e?.message || String(e);
       const isTimeout = /timeout|abort/i.test(msg);
-      return { ok: false, label: isTimeout ? "超时" : "网络错误", error: msg.slice(0, 300), ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+      return { ok: false, label: isTimeout ? "超时" : "网络错误", error: msg.slice(0, 300), ttfbMs: null, totalMs: null, tps: null, charsPerSec: null, tokens: null };
     }
   }
   if (!model) return { ok: false, label: "配置错误", error: "missing model", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
@@ -103,27 +96,17 @@ export async function viaProbe({
   if (token) headers.Authorization = `Bearer ${token}`;
   const sk = shareKeysHeader || shareKeys;
   if (sk) headers["x-mslxdff-share-keys"] = String(sk);
-  let ttfbMs = null;
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
-    const fetchStart = typeof performance !== "undefined" && performance.now ? performance.now() : clock();
-    let res;
-    try {
-      res = await fetchImpl(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
-    } finally { clearTimeout(timer); }
-    ttfbMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - fetchStart);
-    if (res instanceof Error) throw res;
-    const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
+    const res = await tr.request({ url, method: "POST", headers, body, stream: false });
+    const ttfbMs = res.ttfbMs;
+    const totalMs = res.totalMs;
     if (!res.ok) {
-      let txt = "";
-      try { txt = await res.text(); } catch {}
+      let txt = ""; try { txt = await res.text(); } catch {}
       const cls = classifyError(res.status, txt);
       const msg = extractInnerMessage(txt) || `HTTP ${res.status}`;
       return { ok: false, status: res.status, label: cls.label, error: msg, ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
     }
-    let json = {};
-    let txt = "";
+    let json = {}; let txt = "";
     try { txt = await res.text(); json = JSON.parse(txt); } catch { json = {}; }
     const usage = extractUsageFromJson(json);
     const content = json?.choices?.[0]?.message?.content || json?.choices?.[0]?.text || txt || "";
@@ -134,9 +117,8 @@ export async function viaProbe({
     const totalTokens = usage?.total_tokens ?? (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
     return { ok: true, status: res.status, label: "成功", ttfbMs, totalMs, tps, charsPerSec, tokens: { prompt: promptTokens, completion: completionTokens, total: totalTokens }, chars };
   } catch (e) {
-    const totalMs = Math.round((typeof performance !== "undefined" && performance.now ? performance.now() : clock()) - t0);
     const msg = e?.message || String(e);
     const isTimeout = /timeout|abort/i.test(msg);
-    return { ok: false, label: isTimeout ? "超时" : "网络错误", error: msg.slice(0, 300), ttfbMs, totalMs, tps: null, charsPerSec: null, tokens: null };
+    return { ok: false, label: isTimeout ? "超时" : "网络错误", error: msg.slice(0, 300), ttfbMs: null, totalMs: null, tps: null, charsPerSec: null, tokens: null };
   }
 }

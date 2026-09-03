@@ -2,9 +2,62 @@ import { loadGroupsJoined } from "../state.js";
 
 const relayPending = new Map();
 const relayPendingByReqId = new Map();
+const streamSubscribers = new Map(); // key group::target -> Set<res>
+
+function streamKey(group, target) { return `${group}::${target}`; }
+
+export function subscribeStream({ group, target, res }) {
+  const k = streamKey(group, target);
+  const set = streamSubscribers.get(k) || new Set();
+  set.add(res);
+  streamSubscribers.set(k, set);
+}
+
+export function unsubscribeStream({ group, target, res }) {
+  const k = streamKey(group, target);
+  const set = streamSubscribers.get(k);
+  if (!set) return;
+  set.delete(res);
+  if (set.size === 0) streamSubscribers.delete(k);
+}
+
+export function clearStreamSubscribers() { streamSubscribers.clear(); }
+export function getStreamSubscribers() { return streamSubscribers; }
+
+export function pushToStream({ group, target, entry }) {
+  const k = streamKey(group, target);
+  const set = streamSubscribers.get(k);
+  if (!set || set.size === 0) return false;
+  const payload = JSON.stringify({ reqId: entry.reqId, body: entry.body, hops: entry.hops });
+  const frame = `event: relay\ndata: ${payload}\n\n`;
+  let pushed = 0;
+  for (const res of [...set]) {
+    try {
+      res.write(frame);
+      pushed++;
+    } catch {
+      set.delete(res);
+    }
+  }
+  if (set.size === 0) streamSubscribers.delete(k);
+  return pushed > 0;
+}
 
 export function enqueueRelay({ group, target, reqId, body, hops }) {
   const key = `${group}::${target}`;
+  // try stream push first — if any subscriber, push and don't enqueue to poll queue
+  const entryForPush = { reqId, body, hops };
+  if (pushToStream({ group, target, entry: entryForPush })) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        relayPendingByReqId.delete(reqId);
+        reject(new Error("relay timeout"));
+      }, 30_000);
+      timer.unref?.();
+      const entry = { reqId, body, hops, resolve, reject, timer };
+      relayPendingByReqId.set(reqId, entry);
+    });
+  }
   const list = relayPending.get(key) || [];
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

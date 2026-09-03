@@ -3,7 +3,7 @@ import { DEFAULT_MAX_HOPS } from "../peers.js";
 import { json, notFound, authorized } from "./helpers.js";
 import { chatHandler } from "./chat.js";
 import { joinHandler, leaveHandler } from "./groups.js";
-import { heartbeatHandler, pollHandler, resultHandler, forwardHandler } from "./groups-relay.js";
+import { heartbeatHandler, pollHandler, resultHandler, forwardHandler, streamHandler } from "./groups-relay.js";
 import { modelsHandler, modelsStatusHandler, providerModelsHandler } from "./models-route.js";
 import { relayHandler } from "./relay.js";
 
@@ -72,6 +72,12 @@ const ROUTES = [
     path: "/v1/groups/relay/result",
     requiresAuth: false,
     handler: resultHandler,
+  },
+  {
+    method: "GET",
+    path: "/v1/groups/relay/stream",
+    requiresAuth: false,
+    handler: streamHandler,
   },
   {
     method: "POST",
