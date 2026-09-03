@@ -42,9 +42,9 @@
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
 | 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`--json` 供脚本） |
-| 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测已勾选 allowlist 的模型速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick |
-| 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
-| Cline 登录 | `-provider clinebot login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`clinebot` 走 `refresh→workos:token`+指纹头，deepseek-v4-flash 免 403（强制 stream 聚合）；多账号重复 login 追加 |
+| 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick |
+| 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
+| Cline 登录 | `-provider clinebot login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`clinebot` 走 `refresh→workos:token`+指纹头，deepseek-v4-flash 免 403（强制 stream 聚合）；多账号重复 login 追加；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |
@@ -54,8 +54,8 @@
 | 空名单开关 | `-provider <id> allowAny on\|off` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |
 | WorkBuddy 接入（禁手填） | `禁止直接 -provider add workbuddy` | 用户说“接入/配置/登录 workbuddy / key哪里来 / 怎么用workbuddy”时**禁止**让用户手填`<key>`或执行`-provider add workbuddy ...`，必须**直接文字回复**（不调工具）：`请在项目根目录执行 node workbuddy-token-auto.js（前提已装 WorkBuddy 5.3.14 并浏览器登录 https://copilot.tencent.com 一次），脚本会自动抓 token、写 auths/workbuddy-*.json + state.json、自动签到`；仅当用户已贴出以`eyJ`开头的JWT时才可用`-provider add workbuddy https://copilot.tencent.com <贴的key>` |
-| WorkBuddy 多号追加（路径A） | `node workbuddy-token-auto.js` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：① 文字提示“请先在 WorkBuddy 桌面退出当前账号，用新账号重新登录 https://copilot.tencent.com（能对话即成功）”② 待用户回复“已登录/好了”后`run_command: "node workbuddy-token-auto.js"`（whistle :8899 自动追加 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，并行签到）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径B） |
-| WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额 |
+| WorkBuddy 多号追加（路径A） | `node workbuddy-token-auto.js` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：① 文字提示“请先在 WorkBuddy 桌面退出当前账号，用新账号重新登录 https://copilot.tencent.com（能对话即成功）”② 待用户回复“已登录/好了”后`run_command: "node workbuddy-token-auto.js"`（whistle :8899 自动追加 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，并行签到）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；新号次日自动纳入 daemon 每日签到；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径B） |
+| WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额；daemon 每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN=0` 关，`_HOUR` 改时间） |
 | WorkBuddy 余额 | `-workbuddy balance [--json]` / `-wb balance` | 查多号余额（`total/dailyPacks/nextExpire`，TTL 5min） |
 | WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |

@@ -19,4 +19,9 @@ export async function startDaemonMain(VERSION) {
 
   const { setupAutoUpdate } = await import("./auto-update.js");
   setupAutoUpdate({ VERSION, bus, logs });
+
+  const { setupWorkbuddyCheckin } = await import("./workbuddy-checkin.js");
+  void setupWorkbuddyCheckin({ bus, logs }).catch((e) => {
+    try { logs.appendEvent({ ts: Date.now(), type: "workbuddy-checkin-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
+  });
 }

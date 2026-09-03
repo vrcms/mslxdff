@@ -7,17 +7,48 @@ export async function handleClineLogin(id, sub) {
   const WORKOS_AUTH = "https://api.workos.com/user_management/authenticate";
   const CLINE_REGISTER = "https://api.cline.bot/api/v1/auth/register";
 
+  // 网络层：支持代理（读环境变量）+ 超时 + 人话报错。
+  // 直连 api.workos.com 在部分网络下 TCP 会被墙（DNS 通但 443 超时），此时必须走代理。
+  const PROXY_URL = (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || "").trim();
+  let dispatcher = null;
+  if (PROXY_URL) {
+    try {
+      const { ProxyAgent } = await import("undici");
+      dispatcher = new ProxyAgent(PROXY_URL);
+    } catch (e) {
+      console.error(`⚠️ 代理变量 ${PROXY_URL} 不可用（${e.message}），回退直连`);
+    }
+  }
+  function netHint(e, url) {
+    const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+    const cause = e?.cause || e;
+    const code = cause?.code || cause?.name || "";
+    if (code === "ENOTFOUND" || code === "EAI_AGAIN") return `DNS 解析失败（${host}），检查 DNS/网络`;
+    if (code === "ECONNREFUSED") return `连接被拒（${host}），检查代理是否开启`;
+    if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || e?.name === "TimeoutError") return `连接 ${host} 超时（直连可能被墙），请开代理后重试：set HTTPS_PROXY=http://127.0.0.1:7890 再跑 login`;
+    if (!PROXY_URL && /workos\.com|cline\.bot/.test(host)) return `直连 ${host} 失败（${code || e.message}），疑似被墙，请开代理后重试`;
+    return `${code || e.message}`;
+  }
+  // 注意：dispatcher 为 null 时不能显式传给 fetch（undici 会断言失败），有代理才带。
+  const extraOpts = dispatcher ? { dispatcher } : {};
   async function postForm(url, form) {
     const body = new URLSearchParams(form).toString();
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, ...extraOpts, signal: AbortSignal.timeout(20000) });
+    } catch (e) { throw new Error(`连不上 WorkOS：${netHint(e, url)}`); }
     const txt = await res.text();
     try { return JSON.parse(txt); } catch { throw new Error(`WorkOS 返回非 JSON: ${txt.slice(0, 200)}`); }
   }
   async function postJson(url, obj) {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj) });
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj), ...extraOpts, signal: AbortSignal.timeout(20000) });
+    } catch (e) { throw new Error(`连不上 Cline：${netHint(e, url)}`); }
     const txt = await res.text();
     try { return JSON.parse(txt); } catch { throw new Error(`Cline 返回非 JSON: ${txt.slice(0, 200)}`); }
   }
+  if (PROXY_URL && dispatcher) console.log(`🌐 检测到代理：${PROXY_URL}\n`);
 
   console.log("🚀 启动 Cline WorkOS 设备授权流程...\n");
   let device;
