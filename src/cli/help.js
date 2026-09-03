@@ -9,7 +9,8 @@ Usage:
   mslxdff -models                interactive picker: ↑/↓ select a model, Enter sets it as the default (non-TTY: plain list)
   mslxdff -model list            list the free models this proxy serves (cached)
   mslxdff -model set <id>        set the default (preferred) model without the interactive picker
-  mslxdff -model status            show per-model health status (normal/limit/error)
+  mslxdff -model status [--all]    show per-model health status (normal/limit/error, 默认隐藏孤儿 --all 看全部)
+  mslxdff -model stats [--all]     监控：每模型 请求/首字/总耗时/速度 样本（--all 含孤儿，精简版 -status）
   mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
   mslxdff -stop                    stop the running daemon
