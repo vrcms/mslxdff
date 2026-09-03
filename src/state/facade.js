@@ -48,6 +48,7 @@ export {
   saveModelLatencies,
   loadModelStats,
   saveModelStats,
+  recordModelStats,
   loadPreferredModel,
   loadModelPicks,
   saveModelPicks,

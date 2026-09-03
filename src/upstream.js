@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { isFreeModel } from "./models.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 import { createTransport } from "./transport/index.js";
+import { isResponsesModel, chatToResponsesBody, toChatResponse } from "./upstream-responses.js";
 
 function genId(prefix) {
   return `${prefix}${crypto.randomUUID().replace(/-/g, "")}`;
@@ -81,56 +82,6 @@ export function createUpstreamClient({
     if (raw === "0" || raw === "off" || raw === "false" || raw === "no") return false;
     return true;
   }
-  function isResponsesModel(model) {
-    return String(model || "").toLowerCase().startsWith("muse-spark");
-  }
-  function chatToResponsesBody(chatBody) {
-    const msgs = Array.isArray(chatBody?.messages) ? chatBody.messages : [];
-    const system = msgs.filter((m) => m.role === "system").map((m) => String(m.content || "")).join("\n");
-    const nonSystem = msgs.filter((m) => m.role !== "system");
-    const inputParts = nonSystem.map((m) => {
-      const c = m.content;
-      if (typeof c === "string") return `${m.role}: ${c}`;
-      if (Array.isArray(c)) return `${m.role}: ${c.map((x) => x.text || "").join("")}`;
-      return `${m.role}: ${String(c || "")}`;
-    });
-    const input = inputParts.join("\n\n") || "hi";
-    const out = { model: chatBody.model, input, stream: false };
-    if (system) out.instructions = system;
-    if (chatBody.tools) out.tools = chatBody.tools;
-    if (chatBody.tool_choice) out.tool_choice = chatBody.tool_choice;
-    if (chatBody.temperature != null) out.temperature = chatBody.temperature;
-    if (chatBody.max_tokens != null) out.max_output_tokens = chatBody.max_tokens;
-    return out;
-  }
-  function responsesToChatJson(respJson) {
-    let text = "";
-    for (const item of respJson.output || []) {
-      if (item.type === "message" && item.role === "assistant") {
-        for (const c of item.content || []) {
-          if (c.type === "output_text") text += c.text || "";
-          else if (c.type === "text") text += c.text || "";
-        }
-      }
-    }
-    if (!text) {
-      for (const item of respJson.output || []) {
-        if (item.type === "message") {
-          const t = item.content?.[0]?.text;
-          if (t) { text = t; break; }
-        }
-      }
-    }
-    const chatJson = {
-      id: respJson.id || `resp_${Date.now()}`,
-      object: "chat.completion",
-      created: Math.floor((respJson.created_at || Date.now() / 1000)),
-      model: respJson.model,
-      choices: [{ index: 0, finish_reason: respJson.status === "completed" ? "stop" : "length", message: { role: "assistant", content: text } }],
-      usage: respJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    };
-    return chatJson;
-  }
   function freeAnonLogFile() {
     return process.env.MSLXDFF_FREE_ANON_LOG || join(process.cwd(), "free-anon-extra.txt");
   }
@@ -196,16 +147,14 @@ export function createUpstreamClient({
           continue;
         }
         if (anonRes.status !== 429) {
-          // responses 模型需转回 chat 形状
+          // responses 模型需转回 chat 形状（复用 upstream-responses）
           let outAnon = anonRes;
           if (isResp && anonRes.ok) {
             try {
               const txt = await anonRes.text();
               const j = JSON.parse(txt);
               if (j && Array.isArray(j.output)) {
-                const chatJson = responsesToChatJson(j);
-                outAnon = new Response(JSON.stringify(chatJson), { status: anonRes.status, headers: new Headers(anonRes.headers) });
-                outAnon.headers.set("content-type", "application/json");
+                outAnon = toChatResponse(anonRes, j);
               } else {
                 outAnon = new Response(txt, { status: anonRes.status, headers: anonRes.headers });
               }
@@ -228,16 +177,13 @@ export function createUpstreamClient({
       }
     }
 
-    // responses 模型成功态转 chat
+    // responses 模型成功态转 chat（复用 upstream-responses）
     if (isResp && res.ok) {
       try {
         const txt = await res.text();
         const j = JSON.parse(txt);
         if (j && Array.isArray(j.output)) {
-          const chatJson = responsesToChatJson(j);
-          const headers = new Headers(res.headers);
-          headers.set("content-type", "application/json");
-          const transformed = new Response(JSON.stringify(chatJson), { status: res.status, headers });
+          const transformed = toChatResponse(res, j);
           transformed._t = { ...(res._t || {}), totalMs: Math.round(performance.now() - t0) };
           return transformed;
         }

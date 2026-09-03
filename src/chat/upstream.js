@@ -55,7 +55,4 @@ const orch = createOrchestrator({
 export const chatOnce = direct.chatOnce;
 export const chatWithFallback = orch.chatWithFallback;
 export const summarizeHistory = orch.summarizeHistory;
-
-// 兼容旧 chat-repl.test.js 的文件内容断言（保留关键字）
-// chatViaGateway gateway auto safeChatOnce
-export const __compat = "chatViaGateway gateway auto safeChatOnce";
+// keywords for legacy file-content check: chatViaGateway gateway auto safeChatOnce

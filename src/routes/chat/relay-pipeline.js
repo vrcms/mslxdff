@@ -1,4 +1,7 @@
 import { runHook } from "../../plugins.js";
+import { recordModelStats } from "../../state.js";
+import { normalizeFullId } from "../../providers/model-id.js";
+import { computeMetrics, extractUsageFromJson, extractUsageFromSseText } from "../../metrics.js";
 
 /**
  * RelayPipeline 深模块
@@ -139,6 +142,29 @@ export function createRelayPipeline({
       try { await auto.recordOk(actual, { latencyMs }); } catch {}
     } else if (!scoredSlow && auto) {
       try { await auto.recordLatency(actual, latencyMs); } catch {}
+    }
+
+    // 每次 8989 正常返回都落体检：count/首字/总耗时/速度（供 -status TopN）
+    if (out.status === 200) {
+      try {
+        const isStream = Boolean(body?.stream);
+        let ttfb = isStream ? (out.ttfMs ?? upRes?._t?.ttfbMs ?? null) : null;
+        // out.totalMs 为 0 时（非流式 <1ms 四舍五入）回退到 elapsed/durationMs
+        const elapsedFallback = Date.now() - curStartedAt;
+        let total = out.totalMs;
+        if (!Number.isFinite(total) || total <= 0) total = elapsedFallback;
+        if (!Number.isFinite(total) || total <= 0) total = latencyMs;
+        if (!Number.isFinite(total) || total <= 0) total = Date.now() - curStartedAt;
+        if (isStream && (!Number.isFinite(ttfb) || ttfb <= 0)) ttfb = null;
+        const usage = out.detail?.usage || null;
+        const chars = out.detail?.chars ?? null;
+        const compTok = usage?.completion_tokens ?? null;
+        const m = computeMetrics({ ttfbMs: ttfb, totalMs: total, completionTokens: compTok, chars });
+        const tps = m.tps ?? m.charsPerSec ?? null;
+        const fullId = normalizeFullId(actual);
+        recordModelStats(fullId, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
+        if (fullId !== actual) recordModelStats(actual, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
+      } catch {}
     }
 
     _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback, requested, actual });
