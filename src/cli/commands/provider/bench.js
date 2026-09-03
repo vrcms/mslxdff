@@ -6,7 +6,7 @@ import { isRefreshToken } from "../../../providers/cline/headers.js";
 import { refreshTokenForBase } from "../../../providers/cline/auth.js";
 import { clineBenchOne } from "../../../bench/cline-bench.js";
 import { workbuddyBenchOne } from "../../../bench/workbuddy-bench.js";
-import { buildHeadersForProvider, handleVia } from "./bench-via.js";
+import { buildHeadersForProvider, filterBenchModels, handleVia } from "./bench-via.js";
 
 function parseBenchArgs(rest) {
   const opts = { json: false, prompt: "hi", maxTokens: 32, timeoutMs: 30000, via: false, includeOpencode: false, samples: 1, apply: false };
@@ -36,13 +36,14 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
   if (!isBench) return false;
   const opts = parseBenchArgs(_restArr);
   if (opts.via) {
-    const loadConfigs = deps.loadProviderConfigs || (await import("../../../state.js")).loadProviderConfigs;
-    const loadKeys = deps.loadProviderKeys || (await import("../../../state.js")).loadProviderKeys;
-    const loadAllowed = deps.loadProviderAllowedModels || (await import("../../../state.js")).loadProviderAllowedModels;
-    const loadBaseUrl = deps.loadProviderBaseUrl || (await import("../../../state.js")).loadProviderBaseUrl;
+    const stateMod = await import("../../../state.js");
+    const loadConfigs = deps.loadProviderConfigs || stateMod.loadProviderConfigs;
+    const loadKeys = deps.loadProviderKeys || stateMod.loadProviderKeys;
+    const loadAllowed = deps.loadProviderAllowedModels || stateMod.loadProviderAllowedModels;
+    const loadBaseUrl = deps.loadProviderBaseUrl || stateMod.loadProviderBaseUrl;
     const viaPid = _isBenchViaAll ? "bench" : String(id || "").trim();
     if (!viaPid) { console.error("usage: mslxdff -provider <id> bench --via [--json] [--include-opencode]"); process.exit(1); }
-    await handleVia({ providerId: viaPid, opts, fetchImpl: deps.fetchImpl || globalThis.fetch, loadConfigs, loadKeys, loadAllowed, loadBaseUrl });
+    await handleVia({ providerId: viaPid, opts, fetchImpl: deps.fetchImpl || globalThis.fetch, loadConfigs, loadKeys, loadAllowed, loadBaseUrl, loadAllowAny: deps.loadProviderAllowAnyModels || stateMod.loadProviderAllowAnyModels, loadModelPicks: deps.loadModelPicks, getOnlinePeersFn: deps.getOnlinePeers });
     return true;
   }
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
@@ -58,6 +59,12 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
   const keys = loadKeys(providerId) || [];
   const allowed = loadAllowed(providerId) || [];
   const allowAny = loadAllowAny(providerId);
+  let picks = [];
+  try {
+    const m = await import("../../../state.js");
+    picks = typeof deps.loadModelPicks === "function" ? (deps.loadModelPicks() || []) : (typeof m.loadModelPicks === "function" ? m.loadModelPicks() || [] : []);
+  } catch { picks = []; }
+  const picked = filterBenchModels({ providerId, allowed, picks, allowAny });
   const baseUrl = (loadBaseUrl(providerId) || cfg.baseUrl || "").trim();
   let auths = [];
   try { const m = await import("../../../state.js"); auths = m.loadProviderAuths ? m.loadProviderAuths(providerId) : []; } catch {}
@@ -81,18 +88,26 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
     if (opts.json) console.log(JSON.stringify({ ok: true, data: list, hint: `pick then bench` }, null, 2));
     process.exit(0);
   }
+  if (picks.length && !picked.models.length) {
+    console.log(`provider ${providerId}: allowlist ${allowed.length} 个模型都不在全局 picks 中，不测速（只测勾选）。`);
+    if (picked.pickedBlocked.length) console.log(`已勾选但未进 allowlist：${picked.pickedBlocked.join(" ")} → mslxdff -provider ${providerId} allowlist set <model>`);
+    else console.log(`先勾选：mslxdff -model pick ${providerId}/<model>`);
+    process.exit(0);
+  }
   const log = (s) => (opts.json ? console.error(s) : console.log(s));
-  log(`bench ${providerId}: 共 ${allowed.length} 个已勾选模型，逐个测速（串行，${opts.timeoutMs}ms 超时）...`);
+  log(`bench ${providerId}: 共 ${picked.models.length} 个已勾选模型，逐个测速（串行，${opts.timeoutMs}ms 超时）...`);
+  if (picked.skippedUnpicked) log(`跳过 ${picked.skippedUnpicked} 个未勾选模型`);
   if (!opts.json) console.log(`prompt="${opts.prompt}" maxTokens=${opts.maxTokens}\n`);
   const chatPath = cfg.chatPath || defaultChatPath(providerId);
   const rtKeys = keys.filter((k) => isRefreshToken(k, providerId));
   const normBase = String(baseUrl).replace(/\/+$/, "");
   const clineChatBase = normBase.endsWith("/api/v1") ? normBase.slice(0, -7) : normBase;
   const results = [];
-  for (let i = 0; i < allowed.length; i++) {
-    const raw = allowed[i];
+  const benchModels = picked.models;
+  for (let i = 0; i < benchModels.length; i++) {
+    const raw = benchModels[i];
     const model = String(raw || "").trim();
-    if (!opts.json) process.stdout.write(`  [${i + 1}/${allowed.length}] ${model} ... `);
+    if (!opts.json) process.stdout.write(`  [${i + 1}/${benchModels.length}] ${model} ... `);
     const kIdx = i % (keys.length || 1);
     const aIdx = Math.min(kIdx, Math.max(auths.length - 1, 0));
     const key = keys[kIdx];

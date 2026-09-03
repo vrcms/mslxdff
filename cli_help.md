@@ -64,7 +64,7 @@
 | `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
-| `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
+| `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
@@ -74,7 +74,7 @@
 | `mslxdff -provider <id> allowAny on\|off` | `--provider` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） | 是 | 热更新立即生效 |
 | `mslxdff -provider <id> del` | `--provider` | 删除整个供应商（清 `providerConfigs`/`providerKeys`/`share`，自动重启生效，`opencode` 不可删） | 是（删） | 自动重启 |
 | `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用/workbuddy）及启用状态（含 allowlist 摘要） | 否 | 否 |
-| `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发） | 否 | 否 |
+| `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发；daemon 默认每日 09:00 自动全号签到，`MSLXDFF_WORKBUDDY_CHECKIN=0` 关） | 否 | 否 |
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
@@ -561,7 +561,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 #### `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]`（评估已勾选模型速度，防误烧）
 
 - **语法**：`mslxdff -provider workbuddy bench` / `mslxdff -provider myapi bench --json` / `mslxdff -provider workbuddy bench --prompt hi --max-tokens 32 --timeout 30000`
-- **作用**：**只测已勾选的 `allowlist` 模型**，逐个发最小 `POST <baseUrl><chatPath>` 探针，采集 `TTFB/总耗时/TPS(或字/秒)/tokens/状态` 并表格排序标 `*最快`；空 `allowlist` 时**不发任何 chat**，仅 `GET <baseUrl>/v1/models → GET <baseUrl>/models` 探活并提示 `mslxdff -provider <id> allowlist set <model>`，避免全量 60 个误扣费。`--json` 输出 `[{id, ok, ttfbMs, totalMs, tps, charsPerSec, tokens, error, label}]` 供脚本。
+- **作用**：**只测（`allowlist` ∩ 全局 `picks`）交集**，逐个发最小 `POST <baseUrl><chatPath>` 探针，采集 `TTFB/总耗时/TPS(或字/秒)/tokens/状态` 并表格排序标 `*最快`；空 `allowlist` 时**不发任何 chat**，仅 `GET <baseUrl>/v1/models → GET <baseUrl>/models` 探活并提示 `mslxdff -provider <id> allowlist set <model>`，避免全量 60 个误扣费。`--json` 输出 `[{id, ok, ttfbMs, totalMs, tps, charsPerSec, tokens, error, label}]` 供脚本。
 - **行为**：串行（防 429），`30s` 超时（`AbortSignal.timeout`），`401` 鉴权失败/`402` 余额不足/`429` 限流/`超时` 人话且不中断其余模型，`workbuddy` 自动带 `X-User-Id/X-Domain` 等特化头，通用供应商仅 `Bearer`。
 - **输出**：
   ```
@@ -633,6 +633,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **语法**：`mslxdff -provider clinebot login`（别名 `auth`/`oauth`；`cline` 同）
 - **作用**：`clinebot` 供应商默认直连 `api.cline.bot` 用 `Bearer sk_xxx` 会遇 `403 only available via Cline product surfaces`（服务端强校验 Cline 客户端指纹）。本命令走 Cline 官方 WorkOS 设备授权流：打印浏览器授权链接 → 你登录一次 → 自动 `POST /api/v1/auth/register` 换 `refreshToken` → **落盘 `providerConfigs.{cline,clinebot}.keys`**。此后 `clinebot` 所有请求自动走：`refreshToken → POST /api/v1/auth/refresh → workos:accessToken` + 完整指纹头（`User-Agent: Cline/3.0.47`、`X-CLIENT-TYPE: cline-sdk`、`X-PLATFORM: terminal`、`X-Task-ID` 等），`deepseek/deepseek-v4-flash` 不再 403；免费通道自动强制 `stream:true` 并聚合返回（避免 `500 empty response content`）。
 - **多账号**：重复 `login` 追加；`429 Daily free limit reached`/空响应自动解析冷却（`Try again in Xh Xm`）并切换下一账号，800ms 串行队列防并发空响应。
+- **网络**：直连 `api.workos.com` 被墙会报超时（20s）；开代理后重试：`set HTTPS_PROXY=http://127.0.0.1:7890`（`HTTP_PROXY` 同），login 自动经代理。
 - **示例**：
   ```bash
   mslxdff -provider clinebot login        # 浏览器授权 → token 落盘
@@ -751,7 +752,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。
 - **白名单**：同通用供应商（空=不限，非空仅名单内可用，`403 + x-mslxdff-allowlist:1` 直通，`/v1/models` 过滤）。
 - **共享**：`workbuddy` 默认 `share=off`（`opencode` 同理恒排除），需 `mslxdff -provider workbuddy share on` 或 `MSLXDFF_WORKBUDDY_SHARE_KEYS=1` 显式开启才随 `x-mslxdff-share-keys` 外借。
-- **签到**：`POST https://www.codebuddy.cn/v2/billing/meter/daily-checkin` + `https://copilot.tencent.com/v2/billing/meter/daily-checkin` 双域，`code 0` 新增 100 credits/30d 裂变包，`code 10001 已签到` 视为成功；并行 3，`--json` 聚合 `results[].balance`；`workbuddy-token-auto.js` 已在 `refresh` 后自动 `spawn workbuddy-checkin.js`，可另加 `schtasks /create /tn WorkBuddyCheckin /tr "node .../workbuddy-checkin.js" /sc daily /st 09:00`。
+- **签到**：`POST https://www.codebuddy.cn/v2/billing/meter/daily-checkin` + `https://copilot.tencent.com/v2/billing/meter/daily-checkin` 双域，`code 0` 新增 100 credits/30d 裂变包，`code 10001 已签到` 视为成功；并行 3，`--json` 聚合 `results[].balance`；`workbuddy-token-auto.js` 已在 `refresh` 后自动 `spawn workbuddy-checkin.js`；daemon 默认每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 改时间，`=0` 关，启动时过期补签），新追加账号次日自动纳入无需配置，不再需要 `schtasks`。
 - **调用**：
   ```bash
   curl -H "Authorization: Bearer $(mslxdff -showtoken)" http://127.0.0.1:8989/v1/chat/completions -d '{"model":"workbuddy/hy3","messages":[{"role":"user","content":"hi"}]}'
@@ -1058,6 +1059,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_WORKBUDDY_TIMEOUT_MS` | `30000` | WorkBuddy 单次 fetch 超时 |
 | `MSLXDFF_WORKBUDDY_COOLDOWN_MS` | `30000` | WorkBuddy 多 key 冷却（401/403/429/5xx） |
 | `MSLXDFF_WORKBUDDY_SHARE_KEYS` | `off` | WorkBuddy 共享开关（`1/on/true` 显式开，默认关） |
+| `MSLXDFF_WORKBUDDY_CHECKIN` | `1` | daemon 每日自动签到开关（`0` 关；开则每天本地时 `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 全号签到+过期 token 续期，code 10001 幂等，落盘 `workbuddyCheckin {date}` 防重复，启动时过期补签） |
+| `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` | `9` | 自动签到小时（0~23 本地时，非法回退 9） |
 | `WORKBUDDY_AUTH_DIR` | `./auths` | WorkBuddy 落盘目录（`workbuddy-*.json`，`0600`） |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |

@@ -25,9 +25,37 @@ export function buildHeadersForProvider(providerId, apiKey, auth) {
   return h;
 }
 
-export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, loadAllowed, loadBaseUrl }) {
+// bench 取数口径：只测（allowlist ∩ 全局 picks）交集。
+// 两套勾选会分叉（allowlist 管上游放行，picks 是用户 curated 集），直接测 allowlist 会打到未勾选模型、漏掉已勾选模型。
+// picks 为空时原样通过（兼容纯 allowlist 用户）。
+export function filterBenchModels({ providerId, allowed, picks, allowAny = false } = {}) {
+  const pid = String(providerId ?? "");
+  const isOpen = pid.toLowerCase() === "opencode";
+  let list = [...new Set((Array.isArray(allowed) ? allowed : []).map((m) => String(m ?? "").trim()).filter(Boolean))];
+  const all = [...new Set((Array.isArray(picks) ? picks : []).map((p) => String(p ?? "").trim()).filter(Boolean))];
+  // opencode 默认 allowAny 且 allowlist 常空：候选即裸 picks
+  if (!list.length && allowAny && isOpen && all.length) {
+    list = [];
+    for (const p of all) {
+      if (!p.includes("/")) list.push(p);
+      else if (p.toLowerCase().startsWith("opencode/")) list.push(p.slice(9));
+    }
+    list = [...new Set(list.map((m) => m.trim()).filter(Boolean))];
+  }
+  if (!all.length) return { models: list, skippedUnpicked: 0, pickedBlocked: [] };
+  const hit = (m) => all.includes(`${pid}/${m}`) || (isOpen && (all.includes(m) || all.includes(`opencode/${m}`)));
+  const models = list.filter(hit);
+  const inAllowed = new Set(list);
+  const pickedBlocked = all.filter((p) => {
+    if (isOpen) return !p.includes("/") && !inAllowed.has(p);
+    return p.startsWith(`${pid}/`) && !inAllowed.has(p.slice(pid.length + 1));
+  });
+  return { models, skippedUnpicked: list.length - models.length, pickedBlocked };
+}
+
+export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, loadAllowed, loadBaseUrl, loadAllowAny, loadModelPicks, getOnlinePeersFn }) {
   const { getOnlinePeers, orchestrateVia, resolveIncludeOpencode } = await import("../../../bench/via.js");
-  const peers = await getOnlinePeers();
+  const peers = await (typeof getOnlinePeersFn === "function" ? getOnlinePeersFn() : getOnlinePeers());
   if (!peers.length) {
     const msg = "未加入组或无在线 peer，--via 无意义。先 mslxdff -group list / -addtogroup";
     if (opts.json) console.log(JSON.stringify({ meta: { at: new Date().toISOString(), samples: opts.samples, timeout: opts.timeoutMs, includeOpencode: false, peers: [], opencodeSkipped: true }, results: [], advice: msg }, null, 2));
@@ -47,9 +75,23 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
     const log = (s) => (opts.json ? console.error(s) : console.log(s));
     includeOpencode = await resolveIncludeOpencode({ includeOpencode, isTTY, confirmFn, log });
   }
-  const { loadToken } = await import("../../../state.js");
+  const stateMod = await import("../../../state.js");
+  const { loadToken } = stateMod;
   let token = "";
   try { token = (await loadToken()).token || ""; } catch {}
+  let picks = [];
+  try {
+    picks = typeof loadModelPicks === "function"
+      ? (loadModelPicks() || [])
+      : (typeof stateMod.loadModelPicks === "function" ? stateMod.loadModelPicks() || [] : []);
+  } catch { picks = []; }
+  const allowAnyOf = (pid) => {
+    try {
+      if (typeof loadAllowAny === "function") return loadAllowAny(pid);
+      if (typeof stateMod.loadProviderAllowAnyModels === "function") return stateMod.loadProviderAllowAnyModels(pid);
+    } catch {}
+    return String(pid || "").toLowerCase() === "opencode";
+  };
   let targetIds = [];
   const isAll = providerId === "bench" || providerId === "all";
   if (isAll) {
@@ -68,6 +110,10 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
       for (const k of Object.keys(raw.providerKeys || {})) if (!targetIds.includes(k) && (loadAllowed(k) || []).length) targetIds.push(k);
     } catch {}
     if (!targetIds.length) targetIds = ["openrouter", "workbuddy", "clinebot"].filter((p) => (loadAllowed(p) || []).length);
+    // opencode 默认 allowAny 但 allowlist 常空：有裸 picks 且确认包含 opencode 时纳入
+    if (includeOpencode && !targetIds.includes("opencode") && picks.some((p) => !String(p).includes("/") || String(p).toLowerCase().startsWith("opencode/"))) {
+      targetIds.push("opencode");
+    }
   } else {
     targetIds = [providerId];
   }
@@ -80,13 +126,20 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
     const keys = loadKeys(pid) || [];
     const allowed = loadAllowed(pid) || [];
     const baseUrl = (loadBaseUrl(pid) || cfg.baseUrl || "").trim();
-    if (!allowed.length) { viaLog(`provider ${pid}: 无勾选模型，跳过`); continue; }
+    const picked = filterBenchModels({ providerId: pid, allowed, picks, allowAny: allowAnyOf(pid) });
+    if (!picked.models.length) {
+      if (!allowed.length && !(pid === "opencode" && allowAnyOf(pid))) viaLog(`provider ${pid}: 无勾选模型，跳过`);
+      else viaLog(`provider ${pid}: allowlist ${allowed.length} 个模型都不在全局 picks 中，跳过（如需测请 -model pick）`);
+      if (picked.pickedBlocked.length) viaLog(`  已勾选但未进 allowlist（先 allowlist set）：${picked.pickedBlocked.join(" ")}`);
+      continue;
+    }
+    if (picked.skippedUnpicked) viaLog(`provider ${pid}: 跳过 ${picked.skippedUnpicked} 个未勾选模型，只测 ${picked.models.length} 个已勾选`);
     if (!baseUrl && pid !== "opencode") { viaLog(`provider ${pid}: missing baseUrl 跳过`); continue; }
     if (!keys.length && pid !== "opencode") { viaLog(`provider ${pid}: 未配置 Key 跳过`); continue; }
     const chatPath = cfg.chatPath || defaultChatPath(pid);
     let auths = [];
     try { const m = await import("../../../state.js"); auths = m.loadProviderAuths ? m.loadProviderAuths(pid) : []; } catch {}
-    const models = allowed.map((id) => ({ provider: pid, model: String(id), id: String(id) }));
+    const models = picked.models.map((id) => ({ provider: pid, model: String(id), id: String(id) }));
     const directRunner = async ({ provider, model }) => {
       const p = provider || pid;
       const idx = models.findIndex((x) => x.model === model);
