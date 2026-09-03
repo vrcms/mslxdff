@@ -2,7 +2,7 @@
 // workbuddy-token-auto.js — 一键自动化获取 WorkBuddy token（流程化，Windows 免 DevTools）
 // 流程：whistle MITM(8899) → codebuddy CLI 走代理发 "hi" → 从 whistle 抓 Authorization/refresh → 写 auths/workbuddy-<uid>.json → 停 whistle
 // 下次刷新只需调 POST /v2/plugin/auth/token/refresh，无需再走 MITM。Node>=20 零依赖（需已装 WorkBuddy 5.3.14 且已登录）
-// 用法：node workbuddy-token-auto.js
+// 用法：node workbuddy-token-auto.js [--force|--new|--mitm]   // 加新号时必须加 --force，跳过旧号 refresh 捷径直抓包
 // 可选 env：WORKBUDDY_AUTH_DIR=./auths  WHISTLE_PORT=8899
 
 import fs from "node:fs";
@@ -12,17 +12,23 @@ import { spawn, execSync } from "node:child_process";
 const AUTH_DIR = process.env.WORKBUDDY_AUTH_DIR || path.join(process.cwd(), "auths");
 const PORT = Number(process.env.WHISTLE_PORT) || 8899;
 function findCodebuddyBin() {
-  const candidates = [
-    process.env.CODEBUDDY_BIN,
-    "D:/Program Files/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy",
-    "C:/Program Files/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy",
-    path.join(process.env.LOCALAPPDATA || "", "Programs/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"),
-    path.join(process.env.APPDATA || "", "WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"),
-  ].filter(Boolean);
-  for (const p of candidates) if (fs.existsSync(p)) return p;
-  // 兜底：where codebuddy
-  try { const out = execSync("where codebuddy", { encoding: "utf8" }).split("\n")[0].trim(); if (out && fs.existsSync(out)) return out; } catch {}
-  return candidates[0];
+  if (process.env.CODEBUDDY_BIN) {
+    if (!fs.existsSync(process.env.CODEBUDDY_BIN)) throw new Error(`CODEBUDDY_BIN 不存在: ${process.env.CODEBUDDY_BIN}`);
+    return process.env.CODEBUDDY_BIN;
+  }
+  // PATH 优先（跨平台），再试常见安装位（不写死盘符）
+  for (const cmd of ["where codebuddy", "which codebuddy"]) {
+    try { const out = execSync(cmd, { encoding: "utf8" }).split("\n")[0].trim(); if (out && fs.existsSync(out)) return out; } catch {}
+  }
+  const roots = [process.env.LOCALAPPDATA, process.env.APPDATA, process.env.HOME, "/opt", "/usr/local"]
+    .filter(Boolean)
+    .flatMap((r) => [
+      path.join(r, "Programs/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"),
+      path.join(r, "WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"),
+    ]);
+  if (process.platform === "win32") roots.push("C:/Program Files/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy");
+  for (const p of roots) if (fs.existsSync(p)) return p;
+  throw new Error("找不到 codebuddy CLI：请确认已安装桌面端，或用 CODEBUDDY_BIN=路径显式指定");
 }
 const CODEBUDDY_BIN = findCodebuddyBin();
 
@@ -103,7 +109,8 @@ async function captureRefreshToken() {
         } catch {}
         if (!newAt) newAt = reqAt.replace(/^Bearer\s+/i, "");
         if (!newRt) newRt = xRefresh;
-        return { uid: uid || "a06ef5f8-7d84-4be5-8485-e6b81c3ce62b", ent, domain, accessToken: newAt, refreshToken: newRt, expiresIn };
+        if (!uid) continue; // 无 uid 不收：防止把新号 token 写进旧号文件
+        return { uid, ent, domain, accessToken: newAt, refreshToken: newRt, expiresIn };
       }
     } catch {}
   }
@@ -136,9 +143,11 @@ async function main() {
     throw new Error(`未找到 codebuddy：${CODEBUDDY_BIN}\n请先安装 WorkBuddy 5.3.14 并登录一次（https://copilot.tencent.com）`);
   }
   await startWhistle();
-  // 若已有 auths 且未过期，直接刷新即可（无需 MITM）
+  const forceMitm = process.argv.some((a) => ["--force", "--new", "--mitm", "-f"].includes(String(a).toLowerCase()));
+  // 若已有 auths 且未过期，直接刷新即可（无需 MITM）；加新号时用 --force 跳过本段直抓包
   const existing = fs.existsSync(AUTH_DIR) ? fs.readdirSync(AUTH_DIR).filter(f => f.startsWith("workbuddy-") && f.endsWith(".json")) : [];
-  if (existing.length) {
+  if (!forceMitm) log(`[flow] 提示：追加新账号请加 --force（否则只 refresh 旧号）`);
+  if (existing.length && !forceMitm) {
     log(`[flow] 检测到已有 ${existing.join(", ")}，尝试直接 refresh...`);
     try {
       const j = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, existing[0]), "utf8"));
@@ -178,6 +187,19 @@ async function main() {
   const cap = await captureRefreshToken();
   if (!cap) throw new Error("未从 whistle 捕获到 token，请确认 WorkBuddy 已登录且能正常对话");
   await saveAuth(cap);
+  // 同步追加进 state.json（对话轮换只读 state，不读 auths 目录）
+  try {
+    const st = await import("./src/state.js");
+    const cfg = (st.loadProviderConfigs().workbuddy) || {};
+    const keys = [...(Array.isArray(cfg.keys) ? cfg.keys : [])];
+    const auths = [...(Array.isArray(cfg.auths) ? cfg.auths : [])];
+    const atIdx = auths.findIndex((a) => a.uid === cap.uid);
+    const authRow = { uid: cap.uid, domain: cap.domain || "www.codebuddy.cn", enterpriseId: cap.ent || "", refreshToken: cap.refreshToken };
+    if (atIdx >= 0) { keys[atIdx] = cap.accessToken; auths[atIdx] = authRow; }
+    else { keys.push(cap.accessToken); auths.push(authRow); }
+    st.saveProviderConfig("workbuddy", { baseUrl: cfg.baseUrl || "https://copilot.tencent.com", keys, auths });
+    log(`[flow] 已同步 state.json（现 ${keys.length} 个账号）`);
+  } catch (e) { log("[flow] 同步 state 失败（需手动 -provider add）:", e.message); }
   await stopWhistle();
   // 捕获后自动签到
   try { const { spawn } = await import("node:child_process"); spawn("node", [path.join(process.cwd(), "workbuddy-checkin.js")], { stdio: "inherit" }); } catch {}

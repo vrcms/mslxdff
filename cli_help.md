@@ -74,6 +74,8 @@
 | `mslxdff -provider <id> allowAny on\|off` | `--provider` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） | 是 | 热更新立即生效 |
 | `mslxdff -provider <id> del` | `--provider` | 删除整个供应商（清 `providerConfigs`/`providerKeys`/`share`，自动重启生效，`opencode` 不可删） | 是（删） | 自动重启 |
 | `mslxdff -providers list` | `--providers`, `-provider list` | 列出所有已部署上游供应商（opencode/openrouter/通用/workbuddy）及启用状态（含 allowlist 摘要） | 否 | 否 |
+| `mslxdff -provider workbuddy login` | — | WorkBuddy 设备授权加号（浏览器登录→自动轮询 5 分钟→落盘 `auths/workbuddy-<uid>.json` + state，不走抓包，追加新号首选；旧号重复 login 只更新凭证） | 是 | 热加载（网关建议 `-restart`） |
+| `mslxdff -provider workbuddy import [--file=路径]` | `MSLXDFF_WORKBUDDY_DESKTOP_INFO=路径` 显式指定（`MSLXDFF_WORKBUDDY_UA` 覆盖设备 UA 指纹，`CODEBUDDY_BIN=路径` 指定抓包用 CLI） | 从本机桌面端登录态直接导入：自动发现 `workbuddy-desktop.info`（Win 走 `%LOCALAPPDATA%`/`%APPDATA%`，mac 走 `~/Library/Application Support`，Linux 走 `~/.config`，按文件名搜、多命中取最新；找不到时用 `--file`/env 显式指定），桌面已切新号时最快，无需浏览器/抓包 | 是 | 热加载 |
 | `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发；daemon 默认每日 09:00 自动全号签到，`MSLXDFF_WORKBUDDY_CHECKIN=0` 关） | 否 | 否 |
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
@@ -733,10 +735,13 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   # 单号接入（禁手填，必须自动化）
   mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow1 allow2 ...]  # 仅当用户贴 eyJ 时可用，否则禁手填
 
-  # 多号追加（路径A，推荐，自动化）
+  # 多号追加（路径A，推荐，设备授权，无需抓包）
+  # 1) 项目根执行，浏览器用新账号登录即可（桌面端不用退旧号）
+  mslxdff -provider workbuddy login
+  # 多号追加（路径B，抓包兜底）
   # 1) WorkBuddy 桌面退出当前账号 → 用新账号重新登录 https://copilot.tencent.com（能对话即成功）
-  # 2) 项目根执行（whistle :8899 自动追加新号，不覆旧号）
-  node workbuddy-token-auto.js
+  # 2) 项目根执行（--force 跳过旧号 refresh 捷径直抓包；whistle :8899 自动追加新号，不覆旧号）
+  node workbuddy-token-auto.js --force
   mslxdff -workbuddy list                                 # 验证 2 行 uid
   mslxdff -workbuddy balance --json                       # 看 total/dailyPacks/nextExpire
 
