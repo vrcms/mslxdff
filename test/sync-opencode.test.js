@@ -146,6 +146,35 @@ describe("sync-opencode raw/dash + slash->dash alias", () => {
     assert.ok(data.provider.mslxdff.models["deepseek-v4-flash-free"]);
   });
 
+  test("prune: 未在 keep 中的旧模型被摘除（含 legacy 前缀与 slash 键）", async () => {
+    const file = tmpFile();
+    writeFileSync(file, JSON.stringify({
+      provider: {
+        mslxdff: { npm: "@ai-sdk/openai-compatible", name: "mslxdff", options: { baseURL: "http://127.0.0.1:8989/v1", apiKey: "old" }, models: {
+          "keep-me": { name: "keep-me" },
+          "drop-me": { name: "drop-me" },
+          "mslxdff-stale-legacy": { name: "mslxdff-stale-legacy" },
+          "bai/deepseek-v4-flash": { name: "x" },
+        } }
+      }
+    }, null, 2));
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    const r = await syncToOpencode({ id: "keep-me", token: "tok", port: 8989, file, keep: ["keep-me", "bai/deepseek-v4-flash"] });
+    assert.equal(r.pruned, 2);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(Object.keys(data.provider.mslxdff.models).sort(), ["bai/deepseek-v4-flash", "keep-me"]);
+  });
+
+  test("prune: 不传 keep 则一个不动（向后兼容）", async () => {
+    const file = tmpFile();
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    await syncToOpencode({ id: "keep-me", token: "tok", port: 8989, file });
+    const r = await syncToOpencode({ id: "other", token: "tok", port: 8989, file });
+    assert.equal(r.pruned, 0);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(Object.keys(data.provider.mslxdff.models).sort(), ["keep-me", "other"]);
+  });
+
   test("isOpencodeLocalUrl", async () => {
     const { isOpencodeLocalUrl } = await import("../src/sync-opencode.js");
     assert.equal(isOpencodeLocalUrl("http://127.0.0.1:8989/v1"), true);

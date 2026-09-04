@@ -116,6 +116,32 @@ describe("sync-workbuddy core", () => {
     assert.equal(isLocalUrl("http://localhost:8089/v1/chat/completions"), false);
   });
 
+  test("prune: 本地失效条目摘除，非本地条目不动", async () => {
+    const file = tmpFile();
+    writeFileSync(file, JSON.stringify([
+      { id: "keep-me", name: "keep-me", vendor: "Custom", url: "http://127.0.0.1:8989/v1/chat/completions", apiKey: "t" },
+      { id: "stale-local", name: "stale-local", vendor: "Custom", url: "http://127.0.0.1:8989/v1/chat/completions", apiKey: "t" },
+      { id: "foreign", name: "foreign", vendor: "Custom", url: "https://example.com/v1/chat/completions", apiKey: "k" },
+    ]));
+    const { syncToWorkbuddy } = await import("../src/sync-workbuddy.js");
+    const r = await syncToWorkbuddy({ id: "keep-me", token: "t", port: 8989, file, keep: ["keep-me"] });
+    assert.equal(r.pruned, 1);
+    const arr = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(arr.map((m) => m.id).sort(), ["foreign", "keep-me"]);
+  });
+
+  test("prune: picks 里 slash 形态与存储 dash 形态互认", async () => {
+    const file = tmpFile();
+    writeFileSync(file, JSON.stringify([
+      { id: "bai-deepseek-v4-flash", name: "x", vendor: "Custom", url: "http://127.0.0.1:8989/v1/chat/completions", apiKey: "t", _mslxdffOriginalId: "bai/deepseek-v4-flash" },
+    ]));
+    const { syncToWorkbuddy } = await import("../src/sync-workbuddy.js");
+    const r = await syncToWorkbuddy({ id: "bai/deepseek-v4-flash", token: "t", port: 8989, file, keep: ["bai/deepseek-v4-flash"] });
+    assert.equal(r.pruned, 0);
+    const arr = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(arr.length, 1);
+  });
+
   test("idempotent second sync does not duplicate", async () => {
     const file = tmpFile();
     const { syncToWorkbuddy } = await import("../src/sync-workbuddy.js");
