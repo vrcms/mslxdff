@@ -80,14 +80,15 @@
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
-| `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1） | 是 | 热重载 |
+| `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1；`picks` 非空时自动摘除未在 picks 的失效本地条目，非本地条目永不动） | 是 | 热重载 |
+| `mslxdff -setto chatgpt [modelId]` | `--setto`（`codex` 等价） | 设默认模型并写入 Codex/ChatGPT 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `http://127.0.0.1:<port>/v1` + Responses API，鉴权走 `mslxdff -showtoken` 命令不落盘） | 是 | Codex 重启/reload 生效 |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
 | `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
 | `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
-| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`） | 是（`opencode.json`） | 热重载 |
+| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
@@ -814,7 +815,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **流程**：
   1. 单条时 4s 超时尝试刷新模型列表，若 `id` 及其 `dash` 形态均不在 free 列表则 `warn` 但仍继续；批量时跳过校验直接同步。
   2. `loadToken()` 取 token，`getPort() || MSLXDFF_PORT || 8989` 取端口，`opencodeConfigPath()` 取文件（`OPENCODE_CONFIG` 可覆盖）。
-  3. `syncToOpencode({ id, token, port, file })`：`/`→`-` 转存储键，`/` 形态同时注册 `model-aliases.json` 的 `dash→slash` 映射；已存在（同存储键）则 `updated`，否则 `inserted`，保留其他 `provider`，原子写 `tmp→rename`，损坏备份 `.bak`。
+  3. `syncToOpencode({ id, token, port, file, keep })`：`/`→`-` 转存储键，`/` 形态同时注册 `model-aliases.json` 的 `dash→slash` 映射；已存在（同存储键）则 `updated`，否则 `inserted`，保留其他 `provider`，原子写 `tmp→rename`，损坏备份 `.bak`。
+  4. 剪枝（`keep = picks 非空 ? picks : null`，`null` 时跳过）：删 `provider.mslxdff.models` 里归一化（去 `mslxdff-` 前缀 + `/`→`-`）后不在 `keep ∪ {本次id}` 的键，输出 `pruned N 个失效模型`。
 - **输出**：
   ```
   default model set to: deepseek-v4-flash-free (daemon hot-reloads on next request)
@@ -846,7 +848,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **流程**：
   1. （可选）4s 超时尝试刷新模型列表，若 `id` 不在 free 列表则 `warn: "id" not in current free list (...)` 但仍继续同步。
   2. `loadToken()` 取 token，`getPort() || MSLXDFF_PORT || 8989` 取端口，`workbuddyModelsPath()` 取文件路径。
-  3. `syncToWorkbuddy({ id, token, port, file })`：若 `models.json` 不存在则插入 `127.0.0.1/v1` 条目，存在则更新其 `token/port/model`。
+  3. `syncToWorkbuddy({ id, token, port, file, keep })`：若 `models.json` 不存在则插入 `127.0.0.1/v1` 条目，存在则更新其 `token/port/model`。
+  4. 剪枝（`keep` 口径同上）：只删我们写的本地条目（`127.0.0.1`）中不在 `keep ∪ {本次id}` 的，非本地条目永不动，输出 `pruned N 个失效模型`。
 - **输出**：
   ```
   default model set to: <id> (daemon hot-reloads on next request)
@@ -860,6 +863,35 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -setto workbuddy openrouter/google/gemma-3-27b-it:free
   mslxdff -setto workbuddy   # 用当前首选同步
   ```
+
+### `-setto chatgpt [modelId]` / `--setto chatgpt [modelId]`
+
+- **语法**：`mslxdff -setto chatgpt [modelId]`（`codex` 等价，`--setto` 等价）。
+- **作用**：设默认模型并写入 Codex CLI / IDE 插件 / ChatGPT 桌面端三端共用的 `~/.codex/config.toml`（`CODEX_HOME` 可覆盖），把本地网关注册为 `model_providers.mslxdff` 自定义 provider。
+- **原理**：现行 Codex 自定义 provider 只认 Responses API（`wire_api` 唯一合法值 `responses`），所以网关侧新增 `POST /v1/responses`（`src/routes/responses-route.js`，复用 ChatPipeline 全链路，只做 Responses⇄Chat 形状翻译，见 `src/responses/translate.js`）。
+- **鉴权**：`[model_providers.mslxdff.auth]` 配绝对路径 `node + bin/mslxdff.js -showtoken`（Codex 起子进程不继承终端 PATH，裸 `mslxdff` 会 `program not found`；Windows 路径用 TOML 单引号防转义），Codex 定时调命令取 Bearer，token 永不落盘且 rotation 后自动生效。
+- **流程**：
+  1. 无 `modelId` 取当前首选，有则归一化后 `savePreferredModel`（`auto` 拒绝）。
+  2. `syncToCodex({ id, port, file })`：顶层 `model`/`model_provider = "mslxdff"` upsert + `[model_providers.mslxdff]` 整段替换（含 auth 子段），用户其他段（mcp 等）原样保留，原子写。
+- **输出**：
+  ```
+  synced to codex: updated "big-pickle" @ C:\Users\you\.codex\config.toml
+    url: http://127.0.0.1:8989/v1/responses (Responses API)
+    鉴权走 mslxdff -showtoken 命令（token 不落盘），直接 codex exec "hi" 验证
+  ```
+- **约束**：`previous_response_id` 多轮状态网关不存（stateless，每轮全量 input）；thinking 模型 reasoning 暂不透传，先用非 thinking 模型（如 `big-pickle`）；`GET /v1/models` 对 Codex 调用者（UA/originator `codex_*` 或 `?client_version=`）额外返回顶层 `models: []`（Codex 解码硬要该字段，填真目录会覆盖其内置 agent prompt，必须空；学 OmniRoute）；`response.completed` 的 `usage` 必须转 Responses 口径（`input_tokens/output_tokens`，Codex 硬解码，缺则整轮作废），done 事件带累积全文。
+- **排障**：`MSLXDFF_RESPONSES_DEBUG=1 mslxdff -restart` 后 `daemon.log` 看 `[responses]` 四段（`req` 请求摘要 → `chat` 翻译后 → `done-json` 上游结果 → `done-stream/done-resp` 发出统计：块数/字数/tool 调用/finish/usage），Codex 侧看 `~/.codex/logs_2.sqlite` 的 `Request completed ... 127.0.0.1 ... status=` 与 `failed to .../missing field` 行。
+- **示例**：
+  ```bash
+  mslxdff -setto chatgpt big-pickle
+  mslxdff -setto chatgpt   # 用当前首选同步
+  codex exec "hi"          # 验证走本地网关
+  ```
+- **切换模型（三选一，provider 不用动）**：
+  1. `mslxdff -setto chatgpt <modelId>` —— 1 秒重写 `model = ...` 行，最常用。
+  2. 单次覆盖：`codex exec -m <modelId> "提示词"`（CLI 参数优先，不改配置文件）。
+  3. 直接改 `~/.codex/config.toml` 第一行的 `model = "..."`，存盘即生效（桌面端重进会话）。
+  - 可填任何网关能服务的 id（free 列表、`-model list` 里的、`workbuddy/...` 等供应商前缀形态）；`model_provider = "mslxdff"` 保持不动。
 
 ---
 

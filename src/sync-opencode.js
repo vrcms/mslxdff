@@ -30,6 +30,12 @@ export function toStorageKey(canonical) {
   return internal.includes("/") ? internal.replace(/\//g, "-") : internal;
 }
 
+// 剪枝比较键：legacy 前缀剥掉 + / → -（picks 里 slash 形态与存储 dash 形态互认）
+export function normalizeOpencodeKey(k) {
+  const inner = toInternalId(String(k || ""));
+  return inner.includes("/") ? inner.replace(/\//g, "-") : inner;
+}
+
 // 从存储键还原为内部 canonical（需查 alias 表，调用方用 getModelAlias）
 export function storageKeyToCanonical(storageKey) {
   const s = String(storageKey || "").trim();
@@ -61,7 +67,18 @@ export function isOpencodeLocalUrl(url) {
   return u.includes("127.0.0.1") && u.includes("/v1");
 }
 
-export async function syncToOpencode({ id, token, port, file } = {}) {
+// 剪枝：删掉不在 keep（picks 口径）里的旧模型键。keep 为空/非数组时不动（向后兼容）。
+export function pruneOpencodeModels(models, keep, currentKey) {
+  if (!Array.isArray(keep) || !keep.length || !models || typeof models !== "object") return 0;
+  const keepSet = new Set([normalizeOpencodeKey(currentKey), ...keep.map(normalizeOpencodeKey)].filter(Boolean));
+  let pruned = 0;
+  for (const k of Object.keys(models)) {
+    if (!keepSet.has(normalizeOpencodeKey(k))) { delete models[k]; pruned++; }
+  }
+  return pruned;
+}
+
+export async function syncToOpencode({ id, token, port, file, keep } = {}) {
   const targetFile = file || opencodeConfigPath();
   const normalizedRaw = String(id || "").trim();
   if (!normalizedRaw) throw new Error("model id required");
@@ -101,15 +118,13 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
 
   let action;
   let effectiveId = storageKey;
+  let pruned = 0;
   if (oldProvider) {
     const oldModels = oldProvider.models && typeof oldProvider.models === "object" && !Array.isArray(oldProvider.models)
       ? oldProvider.models
       : {};
     // 归一所有旧 key 到 storageKey 维度，判断是否已存在（兼容 mslxdff- 前缀与 / 形态）
-    const normalizeToStorage = (k) => {
-      const inner = toInternalId(String(k));
-      return inner.includes("/") ? inner.replace(/\//g, "-") : inner;
-    };
+    const normalizeToStorage = normalizeOpencodeKey;
     let existingKey = null;
     for (const k of Object.keys(oldModels)) {
       if (normalizeToStorage(k) === storageKey) { existingKey = k; break; }
@@ -143,6 +158,7 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
       effectiveId = storageKey;
       action = "inserted";
     }
+    pruned = pruneOpencodeModels(nextModels, keep, storageKey);
     const nextProvider = {
       ...oldProvider,
       name: oldProvider.name || "mslxdff",
@@ -192,5 +208,5 @@ export async function syncToOpencode({ id, token, port, file } = {}) {
     }
   } catch {}
 
-  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey };
+  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey, pruned };
 }

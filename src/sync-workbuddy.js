@@ -13,6 +13,27 @@ export function workbuddyModelsPath() {
 // mslxdff 需保留原始 / 格式用于路由，所以同时存原始 id
 const toWorkbuddyId = (id) => String(id).replace(/\//g, "-");
 
+// 剪枝比较键：legacy 前缀剥掉 + / → -（picks 里 slash 形态与存储 dash 形态互认）
+export function normalizeWorkbuddyKey(k) {
+  const s = String(k || "");
+  const inner = s.startsWith("mslxdff-") ? s.slice("mslxdff-".length) : s;
+  return inner.includes("/") ? inner.replace(/\//g, "-") : inner;
+}
+
+// 剪枝：只删我们写的本地条目（127.0.0.1）中不在 keep 里的；非本地条目永不动
+export function pruneWorkbuddyEntries(arr, keep, currentId) {
+  if (!Array.isArray(keep) || !keep.length || !Array.isArray(arr)) return 0;
+  const keepSet = new Set([normalizeWorkbuddyKey(currentId), ...keep.map(normalizeWorkbuddyKey)].filter(Boolean));
+  let pruned = 0;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const m = arr[i];
+    if (!isLocalUrl(m?.url)) continue;
+    const keys = [normalizeWorkbuddyKey(m.id), normalizeWorkbuddyKey(m._mslxdffOriginalId)];
+    if (!keys.some((k) => k && keepSet.has(k))) { arr.splice(i, 1); pruned++; }
+  }
+  return pruned;
+}
+
 export function buildWorkbuddyEntry({ id, token, port }) {
   const p = Number(port) || 8989;
   const originalId = String(id);
@@ -46,7 +67,7 @@ function isTargetEntry(m, id) {
   return false;
 }
 
-export async function syncToWorkbuddy({ id, token, port, file } = {}) {
+export async function syncToWorkbuddy({ id, token, port, file, keep } = {}) {
   const targetFile = file || workbuddyModelsPath();
   const cleanId = String(id || "").trim();
   if (!cleanId) throw new Error("model id required");
@@ -107,6 +128,7 @@ export async function syncToWorkbuddy({ id, token, port, file } = {}) {
     arr.push(buildWorkbuddyEntry({ id: cleanId, token: cleanToken, port: p }));
     action = "inserted";
   }
+  const pruned = pruneWorkbuddyEntries(arr, keep, cleanId);
 
   // atomic write
   mkdirSync(dirname(targetFile), { recursive: true });
@@ -132,5 +154,5 @@ export async function syncToWorkbuddy({ id, token, port, file } = {}) {
     persistModelAliases();
   }
 
-  return { action, file: targetFile, id: cleanId, corrupted };
+  return { action, file: targetFile, id: cleanId, corrupted, pruned };
 }

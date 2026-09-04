@@ -74,6 +74,48 @@ test("models route returns the 7 free models in OpenAI shape", async () => {
   }
 });
 
+test("codex caller (UA codex_*) gets top-level models:[] alongside data", async () => {
+  const app = await boot({ models: ["big-pickle"] });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/models`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, "user-agent": "codex_cli_rs/0.153.0 (Windows 11; x86_64)" },
+    });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.ok(Array.isArray(json.data), "data[] intact for OpenAI consumers");
+    assert.deepEqual(json.models, [], "codex needs top-level models array (empty by design)");
+  } finally {
+    await app.close();
+  }
+});
+
+test("codex caller (?client_version=) gets models:[]", async () => {
+  const app = await boot({ models: ["big-pickle"] });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/models?client_version=0.153.0`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const json = await res.json();
+    assert.deepEqual(json.models, []);
+  } finally {
+    await app.close();
+  }
+});
+
+test("non-codex client keeps byte-identical shape (no models key)", async () => {
+  const app = await boot({ models: ["big-pickle"] });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/models`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, "user-agent": "OpenAI/Python 1.99.0" },
+    });
+    const json = await res.json();
+    assert.ok(Array.isArray(json.data));
+    assert.ok(!("models" in json));
+  } finally {
+    await app.close();
+  }
+});
+
 test("401 without token", async () => {
   const app = await boot();
   try {
