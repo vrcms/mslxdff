@@ -61,8 +61,9 @@
 | WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
 | 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |
-| 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy（原子写 `~/.workbuddy/models.json`，`127.0.0.1/v1`，多模型累积） |
-| 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks） |
+| 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy（原子写 `~/.workbuddy/models.json`，`127.0.0.1/v1`，多模型累积；picks 非空时摘除失效本地条目） |
+| 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks；picks 非空时摘除失效模型） |
+| 同步 chatgpt | `-setto chatgpt [modelId]` | 写 Codex 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `127.0.0.1/v1/responses`，鉴权走 `mslxdff -showtoken` 不落盘），换模型重跑 setto 或 `codex exec -m <id>` 单次覆盖，`codex exec "hi"` 验证；排障 `MSLXDFF_RESPONSES_DEBUG=1` 看 daemon.log `[responses]` |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
 | 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
 | 组同步 | `-group sync` | 刷新全组成员 |

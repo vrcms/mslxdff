@@ -2,8 +2,21 @@ import { json, errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { isModelAllowed } from "../state.js";
 
-export async function modelsHandler({ res, models, plugins }) {
+// Codex 自定义 provider 拉目录要顶层 `models` 数组（codex-rs endpoint/models.rs 解 ModelsResponse{models}），
+// 给它 OpenAI 标准 {object,data} 会报 missing field `models`。学 OmniRoute：仅 codex 调用者追加空数组
+// （填真目录反而会覆盖 codex 内置 agent prompt，必须空），其他客户端保持字节一致。
+export function isCodexModelsCaller(req) {
+  const h = req?.headers || {};
+  if (/^codex_/i.test(String(h["user-agent"] || ""))) return true;
+  if (/^codex_/i.test(String(h.originator || ""))) return true;
+  const q = String(req?.url || "").split("?")[1] || "";
+  return /(^|&)client_version=/.test(q);
+}
+
+export async function modelsHandler({ req, res, models, plugins }) {
   if (!models) return json(res, 501, { error: "Models service not configured" });
+  const codex = isCodexModelsCaller(req);
+  const withCodex = (out) => (codex && out && typeof out === "object" ? { ...out, models: [] } : out);
   try {
     let data = await models.get();
     // 插件 hook：models:list — 返回数组可替换对外模型列表（{object:"list",data:[...]} 或纯 id 数组）
@@ -15,10 +28,10 @@ export async function modelsHandler({ res, models, plugins }) {
         const out = idsOnly
           ? { object: "list", data: ml.value.map((id) => ({ id, object: "model", owned_by: "plugin" })) }
           : { object: "list", data: ml.value };
-        return json(res, 200, out);
+        return json(res, 200, withCodex(out));
       }
     }
-    json(res, 200, data);
+    json(res, 200, withCodex(data));
   } catch (err) {
     json(res, 502, { error: errMsg(err) });
   }
