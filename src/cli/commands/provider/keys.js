@@ -109,8 +109,8 @@ export async function handleProviderKeys(id, sub, rest, args) {
   }
   if (process.stdin.isTTY && process.stdout.isTTY) {
     const { loadProviderKeys, addProviderKey } = await import("../../../state.js");
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    const { createInterface } = await import("../../../readline-compat.js");
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     console.log(`Enter ${id} API keys, one per line (input hidden). Blank line to finish:`);
     const existing = loadProviderKeys(id);
     const collected = [];
