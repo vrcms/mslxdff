@@ -1,4 +1,5 @@
 import { joinUrl, sleep } from "../base.js";
+import { compatFetch } from "../../compat.js";
 
 /**
  * Cline Token 池：多账号 round-robin + refresh 换 accessToken + 冷却 + 队列
@@ -22,7 +23,7 @@ export function parseCooldown(body, status) {
  * 一次性 refresh：bench/诊断用，不落盘、不建池。
  * 返回 accessToken 或 null。
  */
-export async function refreshTokenForBase({ refreshToken, baseUrl = "https://api.cline.bot", fetchImpl = globalThis.fetch, dispatcher } = {}) {
+export async function refreshTokenForBase({ refreshToken, baseUrl = "https://api.cline.bot", fetchImpl = compatFetch, dispatcher } = {}) {
   const rt = String(refreshToken || "").trim();
   if (!rt) return null;
   const resolvedBase = String(baseUrl).trim().replace(/\/+$/, "") || "https://api.cline.bot";

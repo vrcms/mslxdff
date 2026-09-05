@@ -1,6 +1,7 @@
 import { clientIp, json, readBody, parseHops, errMsg } from "./helpers.js";
 import { DEFAULT_MAX_HOPS } from "../peers.js";
 import { enqueueRelay, dequeueRelayForPoll, resolveRelay, subscribeStream, unsubscribeStream } from "./relay-queue.js";
+import { compatFetch } from "../compat.js";
 
 export async function heartbeatHandler({ req, res, groups, bus, logs }) {
   const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
@@ -162,7 +163,7 @@ export async function forwardHandler({ req, res, groups, bus, logs }) {
   if (!isBb) {
     try {
       const fwdBody = body.body || body;
-      const r = await fetch(`${targetMember.url}/v1/chat/completions`, {
+      const r = await compatFetch(`${targetMember.url}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${targetMember.token || ""}`, "x-mslxdff-hops": String(hops + 1), "x-mslxdff-model-lock": fwdBody.model || "", "Accept": "text/event-stream" },
         body: JSON.stringify(fwdBody),

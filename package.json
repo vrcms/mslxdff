@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.95",
+  "version": "0.1.96",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
     "docs:check": "node scripts/docs-check.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=16"
   },
   "files": [
     "bin/",
@@ -28,6 +28,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "undici": "^8.10.0"
+    "undici": "^5.28.4"
   }
 }

@@ -5,6 +5,7 @@
  * 用于 `—test-concurrency>1` 并行与单测快速路径。
  */
 import { mergeState, COLD_WINS } from "./merge.js";
+import { clone } from "../compat.js";
 
 const memCache = new Map(); // file -> { data, dirty, timer, mtimeMs }
 const memDisk = new Map(); // file -> { obj, mtimeMs }
@@ -20,7 +21,7 @@ function getEntry(file) {
 
 function loadFromDiskMem(file) {
   const v = memDisk.get(file);
-  return v ? structuredClone(v.obj) : {};
+  return v ? clone(v.obj) : {};
 }
 function getMtimeMem(file) {
   const v = memDisk.get(file);
@@ -31,7 +32,7 @@ function atomicWriteSyncMem(file, data) {
   // ensure monotonic mtime
   const prev = memDisk.get(file)?.mtimeMs || 0;
   const mtime = now <= prev ? prev + 1 : now;
-  memDisk.set(file, { obj: structuredClone(data), mtimeMs: mtime });
+  memDisk.set(file, { obj: clone(data), mtimeMs: mtime });
   return mtime;
 }
 
@@ -49,7 +50,7 @@ function readState(file) {
     }
   }
   const disk = loadFromDiskMem(file);
-  e.data = disk && typeof disk === "object" ? structuredClone(disk) : {};
+  e.data = disk && typeof disk === "object" ? clone(disk) : {};
   e.mtimeMs = getMtimeMem(file) || Date.now();
   e.dirty = false;
   return e.data;
@@ -108,14 +109,14 @@ export function createMemoryState(file = "mem://default") {
   return {
     loadModelErrors: () => {
       const v = readState(f).modelErrors;
-      return v && typeof v === "object" && !Array.isArray(v) ? structuredClone(v) : {};
+      return v && typeof v === "object" && !Array.isArray(v) ? clone(v) : {};
     },
-    saveModelErrors: (errors) => { writeStateDeferred(f, { modelErrors: structuredClone(errors) }); return errors; },
+    saveModelErrors: (errors) => { writeStateDeferred(f, { modelErrors: clone(errors) }); return errors; },
     loadModelLatencies: () => {
       const v = readState(f).modelLatencies;
-      return v && typeof v === "object" && !Array.isArray(v) ? structuredClone(v) : {};
+      return v && typeof v === "object" && !Array.isArray(v) ? clone(v) : {};
     },
-    saveModelLatencies: (v) => { writeStateDeferred(f, { modelLatencies: structuredClone(v) }); return v; },
+    saveModelLatencies: (v) => { writeStateDeferred(f, { modelLatencies: clone(v) }); return v; },
     loadProviderKeys: (id) => {
       const keys = readState(f).providerKeys;
       const v = keys && typeof keys === "object" ? keys[id] : undefined;
@@ -147,9 +148,9 @@ export function createMemoryState(file = "mem://default") {
     },
     loadPeers: () => {
       const v = readState(f).peers;
-      return Array.isArray(v) ? structuredClone(v) : [];
+      return Array.isArray(v) ? clone(v) : [];
     },
-    savePeers: (peers) => { writeStateImmediate(f, { peers: structuredClone(peers) }); return peers; },
+    savePeers: (peers) => { writeStateImmediate(f, { peers: clone(peers) }); return peers; },
     flushSync: () => flushStateSync(f),
     clear: () => clearStateCache(f),
     _memDisk: memDisk,

@@ -1,3 +1,4 @@
+import { compatFetch, timeoutSignal } from "../../../compat.js";
 // mslxdff -provider workbuddy login — WorkBuddy 官方设备授权流（对标 clinebot login）。
 // 学自 Sliverkiss/workbuddy2api（cmd/login）：POST /v2/plugin/auth/state 拿 state+authUrl →
 // 浏览器登录 → GET /v2/plugin/auth/token?state= 轮询 → GET /v2/plugin/login/account?state= 拿 uid。
@@ -26,12 +27,12 @@ async function readEnvelope(res) {
   return j;
 }
 
-export async function requestDeviceState(fetchImpl = globalThis.fetch) {
+export async function requestDeviceState(fetchImpl = compatFetch) {
   const res = await fetchImpl(`${BASE}/v2/plugin/auth/state?platform=CLI`, {
     method: "POST",
     headers: baseHeaders(),
     body: "{}",
-    signal: AbortSignal.timeout(20000),
+    signal: timeoutSignal(20000),
   });
   const j = await readEnvelope(res);
   if (j.code !== 0 || !j.data?.state || !j.data?.authUrl) {
@@ -41,12 +42,12 @@ export async function requestDeviceState(fetchImpl = globalThis.fetch) {
 }
 
 // 单次轮询：pending（业务 code 非 0）返回 null；HTTP 5xx 抛错；成功返回 token bundle。
-export async function pollDeviceToken(fetchImpl = globalThis.fetch, state) {
+export async function pollDeviceToken(fetchImpl = compatFetch, state) {
   let res;
   try {
     res = await fetchImpl(`${BASE}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, {
       headers: baseHeaders(),
-      signal: AbortSignal.timeout(20000),
+      signal: timeoutSignal(20000),
     });
   } catch (e) { throw new Error(`轮询失败: ${e.message}`); }
   if (res.status >= 500) throw new Error(`token 端点故障: HTTP ${res.status}`);
@@ -60,10 +61,10 @@ export async function pollDeviceToken(fetchImpl = globalThis.fetch, state) {
   };
 }
 
-export async function fetchDeviceAccount(fetchImpl = globalThis.fetch, state, accessToken) {
+export async function fetchDeviceAccount(fetchImpl = compatFetch, state, accessToken) {
   const res = await fetchImpl(`${BASE}/v2/plugin/login/account?state=${encodeURIComponent(state)}`, {
     headers: { ...baseHeaders(), Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(20000),
+    signal: timeoutSignal(20000),
   });
   const j = await readEnvelope(res);
   if (j.code !== 0 || !j.data?.uid) throw new Error(`获取账号失败: code=${j.code} ${j.msg || ""}`.trim());
@@ -97,7 +98,7 @@ export async function handleWorkbuddyLogin(id, sub, rest = [], deps = {}) {
     process.exit(0);
   }
   if (sub !== "login" && sub !== "auth" && sub !== "oauth") return false;
-  const fetchImpl = deps.fetchImpl || globalThis.fetch;
+  const fetchImpl = deps.fetchImpl || compatFetch;
 
   console.log("🚀 启动 WorkBuddy 设备授权流程...\n");
   let dev;

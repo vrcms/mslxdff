@@ -1,4 +1,5 @@
 import { loadGroupsJoined } from "../state.js";
+import { compatFetch } from "../compat.js";
 
 const relayPending = new Map();
 const relayPendingByReqId = new Map();
@@ -118,7 +119,7 @@ export async function tryBroadbandRelay({ groups, token: myToken, model, body, h
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 5000);
-        const r = await fetch(`${g.leaderUrl}/v1/groups/join`, {
+        const r = await compatFetch(`${g.leaderUrl}/v1/groups/join`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${myToken}` },
           body: JSON.stringify({ name: g.name, memberName: g.memberName, url: g.myUrl, token: myToken }),
@@ -154,7 +155,7 @@ export async function tryBroadbandRelay({ groups, token: myToken, model, body, h
         } else {
           const ctrl = new AbortController();
           const t = setTimeout(() => ctrl.abort(), 35_000);
-          const r = await fetch(`${cand.leaderUrl}/v1/groups/relay/forward`, {
+          const r = await compatFetch(`${cand.leaderUrl}/v1/groups/relay/forward`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${myToken}`, "x-mslxdff-hops": String(hops + 1) },
             body: JSON.stringify({ group: cand.group, target: cand.target, body: { ...body, model }, hops: hops + 1, reqId }),

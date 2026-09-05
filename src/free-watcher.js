@@ -1,3 +1,4 @@
+import { compatFetch } from "./compat.js";
 const V2EX_LATEST = "https://www.v2ex.com/api/topics/latest.json";
 const V2EX_HOT = "https://www.v2ex.com/api/topics/hot.json";
 
@@ -15,7 +16,7 @@ async function fetchJson(url, timeoutMs = 6000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await compatFetch(url, {
       headers: { "User-Agent": "mslxdff/free-watcher", Accept: "application/json" },
       signal: ctrl.signal,
     });

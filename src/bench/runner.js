@@ -1,6 +1,7 @@
 import { joinUrl } from "../providers/base.js";
 import { computeMetrics, extractUsageFromJson } from "../metrics.js";
 import { createTransport } from "../transport/index.js";
+import { compatFetch } from "../compat.js";
 
 function extractInnerMessage(bodyText) {
   const t = String(bodyText || "");
@@ -37,7 +38,7 @@ export async function runOne({
   prompt = "hi",
   maxTokens = 32,
   timeoutMs = 30000,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = compatFetch,
 } = {}) {
   if (!baseUrl) return { id: model, ok: false, error: "missing baseUrl", label: "配置错误", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };
   if (!model) return { id: model, ok: false, error: "missing model", label: "配置错误", ttfbMs: null, totalMs: 0, tps: null, charsPerSec: null, tokens: null };

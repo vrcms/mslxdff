@@ -7,6 +7,7 @@ import { refreshTokenForBase } from "../../../providers/cline/auth.js";
 import { clineBenchOne } from "../../../bench/cline-bench.js";
 import { workbuddyBenchOne } from "../../../bench/workbuddy-bench.js";
 import { buildHeadersForProvider, filterBenchModels, handleVia } from "./bench-via.js";
+import { compatFetch } from "../../../compat.js";
 
 function parseBenchArgs(rest) {
   const opts = { json: false, prompt: "hi", maxTokens: 32, timeoutMs: 30000, via: false, includeOpencode: false, samples: 1, apply: false };
@@ -43,10 +44,10 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
     const loadBaseUrl = deps.loadProviderBaseUrl || stateMod.loadProviderBaseUrl;
     const viaPid = _isBenchViaAll ? "bench" : String(id || "").trim();
     if (!viaPid) { console.error("usage: mslxdff -provider <id> bench --via [--json] [--include-opencode]"); process.exit(1); }
-    await handleVia({ providerId: viaPid, opts, fetchImpl: deps.fetchImpl || globalThis.fetch, loadConfigs, loadKeys, loadAllowed, loadBaseUrl, loadAllowAny: deps.loadProviderAllowAnyModels || stateMod.loadProviderAllowAnyModels, loadModelPicks: deps.loadModelPicks, getOnlinePeersFn: deps.getOnlinePeers });
+    await handleVia({ providerId: viaPid, opts, fetchImpl: deps.fetchImpl || compatFetch, loadConfigs, loadKeys, loadAllowed, loadBaseUrl, loadAllowAny: deps.loadProviderAllowAnyModels || stateMod.loadProviderAllowAnyModels, loadModelPicks: deps.loadModelPicks, getOnlinePeersFn: deps.getOnlinePeers });
     return true;
   }
-  const fetchImpl = deps.fetchImpl || globalThis.fetch;
+  const fetchImpl = deps.fetchImpl || compatFetch;
   const loadConfigs = deps.loadProviderConfigs || (await import("../../../state.js")).loadProviderConfigs;
   const loadKeys = deps.loadProviderKeys || (await import("../../../state.js")).loadProviderKeys;
   const loadAllowed = deps.loadProviderAllowedModels || (await import("../../../state.js")).loadProviderAllowedModels;

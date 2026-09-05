@@ -1,13 +1,14 @@
 import { performance } from "node:perf_hooks";
 import { parseSse } from "./sse.js";
 import { DEFAULT_PORT } from "../state.js";
+import { compatFetch } from "../compat.js";
 
 /**
  * 网关深模块：POST 127.0.0.1:port/v1/chat/completions model:auto
  * 注入化：fetch/loadToken/getPort/readModelsJson 均可伪，便于单测
  */
 export function createGatewayClient({
-  fetchImpl = globalThis.fetch,
+  fetchImpl = compatFetch,
   loadToken,
   getPort,
   defaultPort = DEFAULT_PORT,

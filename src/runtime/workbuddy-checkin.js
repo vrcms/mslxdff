@@ -1,3 +1,4 @@
+import { compatFetch } from "../compat.js";
 // daemon 内置 WorkBuddy 每日自动签到（A 方案）：多账号全签 + 启动补签 + 每日定时。
 // 开关：MSLXDFF_WORKBUDDY_CHECKIN=0 关闭（默认开）；时间：MSLXDFF_WORKBUDDY_CHECKIN_HOUR（默认 9 点本地时）。
 // 幂等：上游 code 10001（今天已签）视为成功；落盘 workbuddyCheckin {date} 防重复。
@@ -68,7 +69,7 @@ export async function setupWorkbuddyCheckin({ bus, logs } = {}) {
       }
       // 先给过期 token 续期（复用 chat 同款 refresh，落盘回 state）
       const authService = createAuthService({
-        fetchImpl: globalThis.fetch,
+        fetchImpl: compatFetch,
         store: { keys, authList },
       });
       await Promise.all(authList.map(async (auth, i) => {

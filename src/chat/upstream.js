@@ -6,6 +6,7 @@ import { createUpstreamClient } from "../upstream.js";
 import { CHAT_TIMEOUT_MS, CHAT_GATEWAY_TIMEOUT_MS, CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
 import * as state from "../state.js";
 import { performance } from "node:perf_hooks";
+import { compatFetch } from "../compat.js";
 
 // 冷却深模块对接真实 state
 const cooling = createCooling({
@@ -25,11 +26,11 @@ const direct = createDirectClient({
   createUpstreamClient,
   chatTimeoutMs: CHAT_TIMEOUT_MS,
   env: process.env,
-  fetchImpl: globalThis.fetch,
+  fetchImpl: compatFetch,
 });
 
 const gateway = createGatewayClient({
-  fetchImpl: globalThis.fetch,
+  fetchImpl: compatFetch,
   loadToken: async () => {
     try { const l = await state.loadToken(); return String(l?.token || "").trim(); } catch { return ""; }
   },

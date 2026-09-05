@@ -1,6 +1,7 @@
 import { loadGroupsJoined } from "../state.js";
 import { errMsg } from "../cli/util.js";
 import { startBroadbandStream } from "./broadband-stream.js";
+import { compatFetch, timeoutSignal } from "../compat.js";
 
 /**
  * 宽带中继 — poll 模式（heartbeat + poll）与 stream 模式分发。
@@ -39,22 +40,22 @@ export function startBroadband({ token, upstream }) {
       result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: errMsg(err) }) };
     }
     try {
-      await fetch(`${g.leaderUrl}/v1/groups/relay/result`, {
+      await compatFetch(`${g.leaderUrl}/v1/groups/relay/result`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({ name: g.name, group: g.name, reqId, result }),
-        signal: AbortSignal.timeout(5000),
+        signal: timeoutSignal(5000),
       });
     } catch {}
   };
   const doHeartbeat = async () => {
     for (const g of broadbandGroups()) {
       try {
-        const res = await fetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
+        const res = await compatFetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({ name: g.name, group: g.name }),
-          signal: AbortSignal.timeout(5000),
+          signal: timeoutSignal(5000),
         });
         if (!res.ok) {
           const txt = await res.text().catch(() => "");
@@ -68,11 +69,11 @@ export function startBroadband({ token, upstream }) {
   const doPoll = async () => {
     for (const g of broadbandGroups()) {
       try {
-        const pollRes = await fetch(`${g.leaderUrl}/v1/groups/relay/poll`, {
+        const pollRes = await compatFetch(`${g.leaderUrl}/v1/groups/relay/poll`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({ name: g.name, group: g.name }),
-          signal: AbortSignal.timeout(8000),
+          signal: timeoutSignal(8000),
         });
         if (!pollRes.ok) continue;
         const data = await pollRes.json().catch(() => ({}));
