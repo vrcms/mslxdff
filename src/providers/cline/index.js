@@ -1,6 +1,7 @@
 import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath, saveProviderConfig } from "../../state.js";
 import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createChatRunner } from "../base.js";
+import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
 import { createAuthPool } from "./auth.js";
 import { clineHeaders, isRefreshToken } from "./headers.js";
@@ -34,7 +35,7 @@ export function createClineProvider({
   const resolvedModelsPath = modelsPath || (_cfgModels && _cfgModels !== "/models" ? _cfgModels : null) || "/ai/cline/recommended-models";
   const defaultChat = String(resolvedBase).includes("/api/v1") ? "/chat/completions" : "/api/v1/chat/completions";
   const resolvedChatPath = chatPath || loadProviderChatPath(id, file ? { file } : {}) || defaultChat;
-  if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
 
   const rawKeys = collectApiKeysGeneric(id, apiKeys, apiKey, (pid) => loadProviderKeys(pid, file ? { file } : {}));
   // 同时兼容 cline 与 clinebot 两个 id 的 keys（用户可能配在任一）

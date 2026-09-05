@@ -1,4 +1,5 @@
 import { joinUrl, getUndici } from "../base.js";
+import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
 
 const { UndiciFetch } = getUndici();
@@ -8,7 +9,7 @@ function isClineBotHost(baseUrl) {
 }
 
 export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispatcher, ring, loadKeys } = {}) {
-  if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
   const resolvedBase = String(baseUrl).trim().replace(/\/+$/, "");
   const resolvedPath = modelsPath || "/ai/cline/recommended-models";
   const CACHE_TTL = 10 * 60 * 1000;
