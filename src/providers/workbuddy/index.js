@@ -1,6 +1,7 @@
 import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, saveProviderConfig, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { compatFetch } from "../../compat.js";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { envInt, joinUrl, getUndici, createAgent } from "../base.js";
@@ -54,7 +55,7 @@ export function createWorkbuddyProvider({
   const resolvedBase = resolveBaseUrl(baseUrl);
   const resolvedModelsPath = modelsPath || loadProviderModelsPath(id, file ? { file } : {});
   const resolvedChatPath = chatPath || loadProviderChatPath(id, file ? { file } : {});
-  if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
 
   const keysFromState = loadProviderKeys(id, file ? { file } : {});
   const authsFromState = loadProviderAuths(id, file ? { file } : {});

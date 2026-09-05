@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
+import { compatFetch } from "./src/compat.js";
 
 const AUTH_DIR = process.env.WORKBUDDY_AUTH_DIR || path.join(process.cwd(), "auths");
 const PORT = Number(process.env.WHISTLE_PORT) || 8899;
@@ -36,7 +37,7 @@ function log(...a) { console.log(...a); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function whistleRunning() {
-  try { const r = await fetch(`http://127.0.0.1:${PORT}/cgi-bin/get-data`); return r.ok; } catch { return false; }
+  try { const r = await compatFetch(`http://127.0.0.1:${PORT}/cgi-bin/get-data`); return r.ok; } catch { return false; }
 }
 
 async function ensureWhistleInstalled() {
@@ -86,7 +87,7 @@ async function captureRefreshToken() {
   for (let i = 0; i < 10; i++) {
     await sleep(600);
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/cgi-bin/get-data?url=https://copilot.tencent.com/v2/plugin/auth/token/refresh`);
+      const res = await compatFetch(`http://127.0.0.1:${PORT}/cgi-bin/get-data?url=https://copilot.tencent.com/v2/plugin/auth/token/refresh`);
       const j = await res.json();
       const data = j?.data?.data || j?.data;
       for (const id of Object.keys(data || {}).reverse()) {
@@ -152,7 +153,7 @@ async function main() {
     try {
       const j = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, existing[0]), "utf8"));
       const at = j.auth.accessToken, rt = j.auth.refreshToken, uid = j.account.uid;
-      const res = await fetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
+      const res = await compatFetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

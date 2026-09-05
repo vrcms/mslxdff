@@ -1,4 +1,5 @@
 import { joinUrl } from "../base.js";
+import { compatFetch } from "../../compat.js";
 import { WORKBUDDY_DEFAULT_BASE_URL } from "../../state/schemas/provider.js";
 
 export function decodeJwtExp(token) {
@@ -45,15 +46,11 @@ export function createAuthService({
 } = {}) {
   const resolvedBase = baseUrl ? String(baseUrl).trim().replace(/\/+$/, "") : WORKBUDDY_DEFAULT_BASE_URL;
   if (!fetchImpl) {
-    try {
-      const { getUndici } = awaitImportUndici();
-      fetchImpl = getUndici()?.UndiciFetch || fetch;
-    } catch {
-      fetchImpl = fetch;
-    }
+    // 兼容层统一取（undici 优先，老 Node 兜底）
+    fetchImpl = compatFetch;
   }
   // lazy resolve UndiciFetch if not provided
-  if (!fetchImpl) fetchImpl = fetch;
+  if (!fetchImpl) fetchImpl = compatFetch;
 
   const inflightRefresh = new Map();
 
