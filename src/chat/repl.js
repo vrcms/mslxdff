@@ -5,6 +5,7 @@ import { loadHistory, saveHistory, histPath } from "./store.js";
 import { CHAT_PREFERRED } from "./config.js";
 import { createEngine } from "./engine.js";
 import { printBanner, printFooter, handleSlash, createReadline, createSpinner, estimateChars } from "./terminal.js";
+import { assertChatNode } from "../readline-compat.js";
 
 function trace(line) {
   if (process.env.MSLXDFF_CHAT_TRACE === "0") return;
@@ -12,6 +13,7 @@ function trace(line) {
 }
 
 export async function startRepl({ singleShot } = {}) {
+  if (!assertChatNode()) process.exit(1);
   const models = getModelsForPrompt();
   const system = buildSystemPrompt({ modelsOverride: models });
   let messages = [{ role: "system", content: system }];

@@ -1,4 +1,4 @@
-import readline from "node:readline/promises";
+import { createInterface } from "../readline-compat.js";
 import { stdin, stdout } from "node:process";
 import { formatBannerLines, formatStatsDetail, collectStats, probeGateway } from "./stats.js";
 import { createSpinner } from "./spinner.js";
@@ -89,7 +89,7 @@ export function handleSlash(line, ctx) {
 }
 
 export function createReadline(promptStr) {
-  return readline.createInterface({ input: stdin, output: stdout, prompt: promptStr });
+  return createInterface({ input: stdin, output: stdout, prompt: promptStr });
 }
 
 export { createSpinner, loadHistory, saveHistory, histPath, estimateChars };
