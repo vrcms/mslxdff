@@ -5,6 +5,7 @@ import { getViaRoute } from "../../bench/via-routes.js";
 import { loadProviderKeys } from "../../state.js";
 import { SHARE_KEYS_HEADER } from "../../providers/share-keys.js";
 import { errMsg } from "../helpers.js";
+import { compatFetch } from "../../compat.js";
 
 function shortLabel(p) {
   const raw = String(p?.name || p?.id || p?.url || "").trim();
@@ -81,7 +82,7 @@ export async function handleViaRoute({
     // workbuddyUid 透传
     if (handlerCtx.workbuddyUid) headers["x-mslxdff-workbuddy-uid"] = handlerCtx.workbuddyUid;
     evt("via-route-request", { reqId: handlerCtx.reqId, peer: peer.url, model, hops: hops + 1, hasShare: Boolean(shareHeader) });
-    upRes = await fetch(`${String(peer.url).replace(/\/+$/, "")}/v1/chat/completions`, {
+    upRes = await compatFetch(`${String(peer.url).replace(/\/+$/, "")}/v1/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({ ...body, model }),

@@ -1,3 +1,4 @@
+import { compatFetch, getUndici, timeoutSignal } from "../../../compat.js";
 export async function handleClineLogin(id, sub) {
   if (sub !== "login" && sub !== "auth" && sub !== "oauth") return false;
   if (id !== "cline" && id !== "clinebot" && id !== "cline-bot") return false;
@@ -13,7 +14,7 @@ export async function handleClineLogin(id, sub) {
   let dispatcher = null;
   if (PROXY_URL) {
     try {
-      const { ProxyAgent } = await import("undici");
+      const { ProxyAgent } = getUndici();
       dispatcher = new ProxyAgent(PROXY_URL);
     } catch (e) {
       console.error(`⚠️ 代理变量 ${PROXY_URL} 不可用（${e.message}），回退直连`);
@@ -35,7 +36,7 @@ export async function handleClineLogin(id, sub) {
     const body = new URLSearchParams(form).toString();
     let res;
     try {
-      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, ...extraOpts, signal: AbortSignal.timeout(20000) });
+      res = await compatFetch(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, ...extraOpts, signal: timeoutSignal(20000) });
     } catch (e) { throw new Error(`连不上 WorkOS：${netHint(e, url)}`); }
     const txt = await res.text();
     try { return JSON.parse(txt); } catch { throw new Error(`WorkOS 返回非 JSON: ${txt.slice(0, 200)}`); }
@@ -43,7 +44,7 @@ export async function handleClineLogin(id, sub) {
   async function postJson(url, obj) {
     let res;
     try {
-      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj), ...extraOpts, signal: AbortSignal.timeout(20000) });
+      res = await compatFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj), ...extraOpts, signal: timeoutSignal(20000) });
     } catch (e) { throw new Error(`连不上 Cline：${netHint(e, url)}`); }
     const txt = await res.text();
     try { return JSON.parse(txt); } catch { throw new Error(`Cline 返回非 JSON: ${txt.slice(0, 200)}`); }

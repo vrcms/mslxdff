@@ -1,6 +1,7 @@
 import { readPid, readPidVersion, isPidAlive, stopDaemon } from "../daemon.js";
 import { resolvePort } from "../server.js";
 import { getPort, loadGroupsJoined } from "../state.js";
+import { compatFetch } from "../compat.js";
 
 export function compareSemver(a, b) {
   const pa = a.split(".").map((x) => parseInt(x, 10) || 0);
@@ -39,7 +40,7 @@ export async function waitForHealth(port, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      const res = await compatFetch(`http://127.0.0.1:${port}/health`);
       if (res.ok) return;
     } catch {
       // not up yet

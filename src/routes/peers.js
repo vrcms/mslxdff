@@ -3,6 +3,7 @@ import { isAutoModel } from "../auto.js";
 import { errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
+import { compatFetch, timeoutSignal } from "../compat.js";
 
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
@@ -36,7 +37,7 @@ export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_
           "Authorization": `Bearer ${peer.token || ""}`,
           "Accept": "application/json",
         },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: timeoutSignal(timeoutMs),
       });
       if (!res.ok) return [];
       const j = await res.json().catch(() => ({}));
@@ -74,7 +75,7 @@ async function forwardToPeer(peer, body, model, hops) {
     // ADR-0008：该模型命中的供应商若开启 share → 附带瞬时 key 给组员借用（opencode 恒排除）
     const shareHeader = buildShareKeysHeader(model);
     if (shareHeader) headers[SHARE_KEYS_HEADER] = shareHeader;
-    return await fetch(`${peer.url}/v1/chat/completions`, {
+    return await compatFetch(`${peer.url}/v1/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({ ...body, model }),

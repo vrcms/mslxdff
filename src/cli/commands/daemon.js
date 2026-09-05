@@ -4,6 +4,7 @@ import { setPort } from "../../state.js";
 import { logDir, eventsFile, callsFile, errorsFile } from "../../logs.js";
 import { effectivePort, waitForHealth, stopDaemonIfOutdated, compareSemver, argValue } from "../policy.js";
 import { printStatus } from "../status.js";
+import { compatFetch, timeoutSignal } from "../../compat.js";
 
 export async function handleStop(args) {
   if (!(args.includes("-stop") || args.includes("--stop"))) return false;
@@ -35,7 +36,7 @@ export async function handleRestart(args, VERSION) {
   await waitForHealth(port, 4000);
   let ok = false;
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1200) });
+    const r = await compatFetch(`http://127.0.0.1:${port}/health`, { signal: timeoutSignal(1200) });
     ok = r.ok;
   } catch {}
   if (ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);

@@ -1,4 +1,5 @@
 import { readBody, json, authorized } from "./helpers.js";
+import { compatFetch } from "../compat.js";
 
 // POST /v1/relay  纯网络中继：A 把 targetUrl+headers+body 发给 B，B 原样 fetch 到上游再回给 A
 // B 侧不查本地 providerConfigs、不做 model 前缀路由、不验 allowlist，仅当 TCP 出口
@@ -42,7 +43,7 @@ export async function relayHandler({ req, res, token }) {
   const timer = setTimeout(() => controller.abort(new Error("relay timeout 30000ms")), 30000);
   try {
     const fetchBody = rawBody == null ? undefined : (typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody));
-    const r = await fetch(targetUrl, { method, headers: fwdHeaders, body: fetchBody, signal: controller.signal });
+    const r = await compatFetch(targetUrl, { method, headers: fwdHeaders, body: fetchBody, signal: controller.signal });
     const txt = await r.text();
     // 原样回透：状态码 + 头（仅透 content-type） + body
     res.statusCode = r.status;

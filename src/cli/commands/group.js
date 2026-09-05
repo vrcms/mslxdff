@@ -4,6 +4,7 @@ import { loadToken, loadGroupsJoined, saveGroupsJoined } from "../../state.js";
 import { groupIs, markJoined, probeHealth, syncAllJoinedGroups } from "../group-helpers.js";
 import { errMsg } from "../util.js";
 import { argValue } from "../policy.js";
+import { compatFetch, timeoutSignal } from "../../compat.js";
 
 export async function handleGroupCreate(args) {
   const createGroupArg = argValue(args, "-creategroup", "--creategroup") || groupIs("create", args);
@@ -50,7 +51,7 @@ export async function handleGroupCommand(args) {
       process.exit(0);
     }
     const { token } = await loadToken();
-    const fetchImpl = (url, opts) => fetch(url, { ...opts, signal: AbortSignal.timeout(1500) });
+    const fetchImpl = (url, opts) => compatFetch(url, { ...opts, signal: timeoutSignal(1500) });
     for (const g of joinedList) {
       const isLeader = !g.leaderUrl;
       let members;
@@ -169,7 +170,7 @@ export async function handleAddToGroup(args) {
     joinBody = { name, key: name, leaderUrl, myPort, token: myToken, kind: "static" };
   }
   try {
-    const res = await fetch(`${leaderUrl}/v1/groups/join`, {
+    const res = await compatFetch(`${leaderUrl}/v1/groups/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(joinBody),
@@ -219,7 +220,7 @@ export async function handleLeaveGroup(args) {
     if (g.leaderUrl) {
       const peersRemoved = peers.removeByGroup(g.name);
       try {
-        const res = await fetch(`${g.leaderUrl}/v1/groups/leave`, {
+        const res = await compatFetch(`${g.leaderUrl}/v1/groups/leave`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

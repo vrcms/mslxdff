@@ -24,6 +24,6 @@ test("for await 逐行可读 + prompt 可调（repl 用法）", async () => {
 });
 
 test("本机 Node 通过版本门", () => {
-  assert.ok(nodeMajor() >= 18);
+  assert.ok(nodeMajor() >= 16);
   assert.equal(assertChatNode(), true);
 });

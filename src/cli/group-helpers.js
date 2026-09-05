@@ -1,6 +1,7 @@
 import { loadToken, loadGroupsJoined, saveGroupsJoined } from "../state.js";
 import { refreshGroupMembers, syncPeersFromMembers } from "../groups.js";
 import { errMsg } from "./util.js";
+import { compatFetch, timeoutSignal } from "../compat.js";
 
 const HEALTH_TIMEOUT_MS = 4000;
 
@@ -28,7 +29,7 @@ export async function probeHealth({ id, url, kind, lastSeen, publicIp } = {}) {
   const base = String(url).replace(/\/+$/, "");
   const startedAt = Date.now();
   try {
-    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    const res = await compatFetch(`${base}/health`, { signal: timeoutSignal(HEALTH_TIMEOUT_MS) });
     if (!res.ok) return { id, url: base, fail: `HTTP ${res.status}`, rank: 2 };
     return { id, url: base, ms: Date.now() - startedAt, rank: 0 };
   } catch (err) {

@@ -2,12 +2,9 @@ import { performance } from "node:perf_hooks";
 import { resolveRetry, sleep, backoffDelay } from "./retry.js";
 import { createSseParser } from "./sse.js";
 import { createPool } from "./pool.js";
+import { compatFetch, getUndici } from "../compat.js";
 
-let UndiciFetch = null;
-try {
-  const mod = await import("undici");
-  UndiciFetch = mod.fetch;
-} catch {}
+const UndiciFetch = getUndici().fetch;
 
 const DEFAULT_RETRY = {
   network: { attempts: 2, delayMs: 300 },
@@ -27,7 +24,7 @@ export function createTransport({
   retry: defaultRetry = DEFAULT_RETRY,
   hooks,
 } = {}) {
-  if (!fetchImpl) fetchImpl = UndiciFetch || globalThis.fetch;
+  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
   const pool = keepAlive && !extDispatcher ? createPool({ keepAlive }) : null;
   const getDispatcher = () => extDispatcher || pool?.dispatcher || null;
 

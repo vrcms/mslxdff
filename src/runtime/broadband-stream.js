@@ -1,4 +1,5 @@
 import { errMsg } from "../cli/util.js";
+import { compatFetch } from "../compat.js";
 
 /**
  * 宽带 SSE 长连 — 单组成员订阅 + 指数退避重连 + ensure 定时器。
@@ -17,7 +18,7 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
       const controller = new AbortController();
       abort = controller;
       try {
-        const res = await fetch(url, {
+        const res = await compatFetch(url, {
           headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
           signal: controller.signal,
         });

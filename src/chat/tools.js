@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { FORBIDDEN } from "./config.js";
 import { logDir } from "../logs.js";
 import { defaultStateFile, loadProviderKeys, loadProviderConfigs } from "../state.js";
+import { compatFetch } from "../compat.js";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const allowedRoots = [
@@ -254,12 +255,8 @@ export async function curlTool({ url, method, headers, body, timeoutMs }) {
       }
     } catch {}
   }
-  // fetch 实现优先 undici，其次全局
-  let fetchImpl = globalThis.fetch;
-  try {
-    const mod = await import("undici");
-    if (mod?.fetch) fetchImpl = mod.fetch;
-  } catch {}
+  // fetch 走兼容层（undici 优先，老 Node 兜底）
+  const fetchImpl = compatFetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`curl timed out after ${timeout}ms`)), timeout);
   const t0 = performance.now();

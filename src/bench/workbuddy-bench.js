@@ -1,5 +1,6 @@
 import { computeMetrics } from "../metrics.js";
 import { createTransport } from "../transport/index.js";
+import { compatFetch } from "../compat.js";
 
 function buildWorkbuddyHeaders(apiKey, auth) {
   const h = {
@@ -22,7 +23,7 @@ function sseContent(obj) {
   return typeof c === "string" ? c : "";
 }
 
-export async function workbuddyBenchOne({ baseUrl, chatPath = "/v2/chat/completions", model, apiKey, auth, prompt = "hi", maxTokens = 5, timeoutMs = 30000, fetchImpl = globalThis.fetch }) {
+export async function workbuddyBenchOne({ baseUrl, chatPath = "/v2/chat/completions", model, apiKey, auth, prompt = "hi", maxTokens = 5, timeoutMs = 30000, fetchImpl = compatFetch }) {
   const tr = createTransport({ fetchImpl, keepAlive: false, retry: {}, timeoutMs });
   let ttfbMs = null;
   let totalMs = null;

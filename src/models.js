@@ -3,6 +3,7 @@ const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_REFRESH_MS = 2 * 60 * 60 * 1000;
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { compatFetch } from "./compat.js";
 
 export function isFreeModel(id) {
   return (typeof id === "string" && id.endsWith("-free")) ||
@@ -197,7 +198,7 @@ async function attemptFetch(url, headers, connectTimeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
   try {
-    return await fetch(url, { headers, signal: controller.signal });
+    return await compatFetch(url, { headers, signal: controller.signal });
   } catch (err) {
     return err;
   } finally {
