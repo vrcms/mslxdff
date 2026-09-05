@@ -6,6 +6,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { compatFetch } from "./src/compat.js";
 
 const AUTH_DIR = process.env.WORKBUDDY_AUTH_DIR || path.join(process.cwd(), "auths");
 const asJson = process.argv.includes("--json");
@@ -37,7 +38,7 @@ async function main() {
     Origin: "https://www.codebuddy.cn",
     Referer: "https://www.codebuddy.cn/",
   };
-  const res = await fetch("https://copilot.tencent.com/console/enterprises/personal/models", { headers });
+  const res = await compatFetch("https://copilot.tencent.com/console/enterprises/personal/models", { headers });
   if (!res.ok) throw new Error(`models ${res.status} ${await res.text().then(t=>t.slice(0,300))}`);
   const obj = await res.json();
   const models = obj.data.models;
@@ -70,7 +71,7 @@ async function main() {
       PackageEndTimeRangeBegin: new Date().toISOString().slice(0,19).replace("T"," "),
       PackageEndTimeRangeEnd: new Date(Date.now()+365*101*24*3600*1000).toISOString().slice(0,19).replace("T"," "),
     });
-    const r2 = await fetch("https://www.codebuddy.cn/v2/billing/meter/get-user-resource", {
+    const r2 = await compatFetch("https://www.codebuddy.cn/v2/billing/meter/get-user-resource", {
       method: "POST",
       headers: { Authorization: `Bearer ${at}`, "Content-Type": "application/json", "X-User-Id": uid, "X-Domain": domain },
       body,

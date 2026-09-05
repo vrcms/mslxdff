@@ -21,7 +21,7 @@ export function clearPeerHealthCache() {
   healthInflight.clear();
 }
 
-export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_MS, fetchImpl = fetch } = {}) {
+export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_MS, fetchImpl = compatFetch } = {}) {
   const key = peer?.url || "";
   const ttl = peerHealthTtlMs();
   if (ttl > 0) {

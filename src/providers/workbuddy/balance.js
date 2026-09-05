@@ -1,3 +1,5 @@
+import { compatFetch } from "../../compat.js";
+
 const BALANCE_TTL_MS = 5 * 60 * 1000;
 
 export function createBalanceCache({ ttlMs = BALANCE_TTL_MS, now = Date.now } = {}) {
@@ -24,7 +26,7 @@ export function createBalanceCache({ ttlMs = BALANCE_TTL_MS, now = Date.now } = 
     const u = uid || auth?.uid || "";
     const d = domain || auth?.domain || "www.codebuddy.cn";
     if (!u || !at) return null;
-    const fetcher = fetchImpl || fetch;
+    const fetcher = fetchImpl || compatFetch;
     const body = JSON.stringify({
       PageNumber: 1, PageSize: 100, ProductCode: "p_tcaca", Status: [0, 3],
       PackageEndTimeRangeBegin: "2026-08-01 00:00:00",

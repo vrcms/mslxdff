@@ -1,6 +1,7 @@
 import { createKeyRing } from "./keyring.js";
 import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath } from "../state.js";
 import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createChatRunner, createListModelsRunner, createPreheatRunner } from "./base.js";
+import { compatFetch } from "../compat.js";
 
 const { UndiciFetch } = getUndici();
 
@@ -36,7 +37,7 @@ export function createGenericProvider({
   if (!id) throw new Error("generic provider requires id");
   const resolvedBase = resolveBaseUrl(id, baseUrl);
   if (!resolvedBase) throw new Error(`generic provider ${id}: missing baseUrl`);
-  if (!fetchImpl) fetchImpl = UndiciFetch || fetch;
+  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
   const resolvedModelsPath = modelsPath || loadProviderModelsPath(id, file ? { file } : {});
   const resolvedChatPath = chatPath || loadProviderChatPath(id, file ? { file } : {});
   const ring = createKeyRing(collectApiKeysGeneric(id, apiKeys, apiKey, loadProviderKeys), { cooldownMs });

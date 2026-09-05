@@ -1,4 +1,5 @@
 import { timingSafeEqual, createHash } from "node:crypto";
+import { compatFetch } from "./compat.js";
 import { loadGroups, saveGroups, loadBans, saveBans } from "./state.js";
 import { normalizePeerUrl } from "./peers.js";
 
@@ -159,7 +160,7 @@ export function createGroupsService({ file } = {}) {
 
 // Re-register with the leader (join is idempotent) and return the fresh member list.
 // No key is needed once registered: the leader verifies our bearer token.
-export async function refreshGroupMembers(name, { leaderUrl, memberName, url, token, kind, fetchImpl = fetch } = {}) {
+export async function refreshGroupMembers(name, { leaderUrl, memberName, url, token, kind, fetchImpl = compatFetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
   try {

@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { compatFetch } from "./src/compat.js";
 
 const AUTH_DIR = process.env.WORKBUDDY_AUTH_DIR || path.join(process.cwd(), "auths");
 const asJson = process.argv.includes("--json");
@@ -35,7 +36,7 @@ async function checkinOne({ uid, at, domain, enterpriseId }) {
   let last = null;
   for (const url of ENDPOINTS) {
     try {
-      const res = await fetch(url, { method: "POST", headers, body: "{}" });
+      const res = await compatFetch(url, { method: "POST", headers, body: "{}" });
       const text = await res.text();
       let j; try { j = JSON.parse(text); } catch { j = { code: res.status, msg: text.slice(0, 200) }; }
       last = { url, status: res.status, body: j };
@@ -57,7 +58,7 @@ async function getBalance({ uid, at, domain }) {
       PackageEndTimeRangeBegin: "2026-08-01 00:00:00",
       PackageEndTimeRangeEnd: "2030-01-01 00:00:00",
     });
-    const r = await fetch("https://www.codebuddy.cn/v2/billing/meter/get-user-resource", {
+    const r = await compatFetch("https://www.codebuddy.cn/v2/billing/meter/get-user-resource", {
       method: "POST",
       headers: { Authorization: `Bearer ${at}`, "Content-Type": "application/json", "X-User-Id": uid, "X-Domain": domain || "www.codebuddy.cn" },
       body,
@@ -79,7 +80,7 @@ async function processOne(f) {
   try {
     const exp = doc.auth.expiresAt || 0;
     if (exp && exp - Date.now()/1000 < 3600 && doc.auth.refreshToken) {
-      const rr = await fetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
+      const rr = await compatFetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
         method: "POST",
         headers: { "Content-Type":"application/json", Authorization:`Bearer ${at}`, "X-Refresh-Token": doc.auth.refreshToken, "X-User-Id": uid, "X-Domain": domain, "User-Agent":"CLI/2.115.0", Origin:"https://www.codebuddy.cn" },
         body: "{}",
