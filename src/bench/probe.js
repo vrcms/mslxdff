@@ -1,6 +1,7 @@
 import { joinUrl } from "../providers/base.js";
 import { getCustomNormalizer } from "../providers/registry.js";
 import { createTransport } from "../transport/index.js";
+import { compatFetch } from "../compat.js";
 
 function normalizeModelsPayload(json, baseUrl = "") {
   if (!json) return [];
@@ -32,7 +33,7 @@ export async function probeModels({
   modelsPath,
   chatPath,
   headers = {},
-  fetchImpl = globalThis.fetch,
+  fetchImpl = compatFetch,
   timeoutMs = 8000,
 } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");

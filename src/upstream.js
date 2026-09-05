@@ -7,9 +7,10 @@ import { isFreeModel } from "./models.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 import { createTransport } from "./transport/index.js";
 import { isResponsesModel, chatToResponsesBody, toChatResponse } from "./upstream-responses.js";
+import { uuid } from "./compat.js";
 
 function genId(prefix) {
-  return `${prefix}${crypto.randomUUID().replace(/-/g, "")}`;
+  return `${prefix}${uuid().replace(/-/g, "")}`;
 }
 function envInt(name, fallback) {
   const v = Number(process.env[name]);

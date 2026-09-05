@@ -15,12 +15,12 @@ export function nodeMajor() {
   return Number(String(process.versions?.node || "0").split(".")[0]) || 0;
 }
 
-// -chat 全链路依赖 global fetch（Node 18+），老 Node 放行只会崩得更难看，
-// 不如在入口给一句人话。返回 true=通过，false=已打印升级指引。
-export function assertChatNode({ min = 18 } = {}) {
+// -chat 依赖 fetch（<18 由 src/compat.js 用 undici polyfill），低于 engines 下限
+// 直接给一句人话。返回 true=通过，false=已打印升级指引。
+export function assertChatNode({ min = 16 } = {}) {
   const major = nodeMajor();
   if (major >= min) return true;
-  console.error(`Node 版本过旧（当前 v${process.versions.node}），-chat 需要 Node ${min}+（推荐 20+，见 package.json engines）。`);
+  console.error(`Node 版本过旧（当前 v${process.versions.node}），-chat 需要 Node ${min}+（推荐 20+）。`);
   console.error("先升级 Node 再重试：nvm install 20 && nvm use 20，或到 https://nodejs.org/ 下 LTS。");
   return false;
 }

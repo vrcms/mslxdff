@@ -1,6 +1,7 @@
 import { joinUrl } from "../providers/base.js";
 import { computeMetrics, extractUsageFromJson } from "../metrics.js";
 import { createTransport } from "../transport/index.js";
+import { compatFetch } from "../compat.js";
 
 function extractInnerMessage(bodyText) {
   const t = String(bodyText || "");
@@ -35,7 +36,7 @@ export async function viaProbe({
   prompt = "hi",
   maxTokens = 5,
   timeoutMs = 30000,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = compatFetch,
   clock = Date.now,
   shareKeys,
   shareKeysHeader,

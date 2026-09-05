@@ -1,13 +1,8 @@
 import { createKeyRing } from "./keyring.js";
 import { joinModelId } from "./model-id.js";
+import { getUndici as compatGetUndici, compatFetch } from "../compat.js";
 
-let UndiciAgent = null;
-let UndiciFetch = null;
-try {
-  const mod = await import("undici");
-  UndiciAgent = mod.Agent;
-  UndiciFetch = mod.fetch;
-} catch {}
+const { fetch: UndiciFetch, Agent: UndiciAgent } = compatGetUndici();
 
 export function envInt(name, fallback) {
   const v = Number(process.env[name]);
@@ -27,7 +22,7 @@ export function sleep(ms) {
 }
 
 export function getUndici() {
-  return { UndiciAgent, UndiciFetch };
+  return { UndiciAgent, UndiciFetch, fetch: UndiciFetch || compatFetch, Agent: UndiciAgent };
 }
 
 export function createAgent({ keepAliveTimeout = 30_000, keepAliveMaxTimeout = 60_000, connections = 20 } = {}) {

@@ -5,6 +5,7 @@ import { logDir, callsFile, errorsFile, recentCalls, lastError } from "../logs.j
 import { fmtShanghai } from "../time.js";
 import { CHAT_PREFERRED, CHAT_FALLBACK } from "./config.js";
 import { normalizeFullId } from "../providers/model-id.js";
+import { compatFetch } from "../compat.js";
 
 function readLinesCount(file) {
   try {
@@ -146,7 +147,7 @@ export async function probeGateway(port, timeoutMs = 800) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
+    const r = await compatFetch(url, { signal: ctrl.signal });
     clearTimeout(t);
     return { alive: r.ok, status: r.status, ms: 0 };
   } catch (e) {

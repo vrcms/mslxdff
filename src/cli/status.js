@@ -14,6 +14,7 @@ import { fmtShanghaiYMDHM } from "../time.js";
 import { fmtStatus, fmtUptime, fmtTs } from "./format.js";
 import { compareSemver } from "./policy.js";
 import { buildProviderRows, formatProviderRow, formatProviderSection } from "./provider-row.js";
+import { compatFetch, timeoutSignal } from "../compat.js";
 
 export async function printStatus(VERSION) {
   const daemon = readPid();
@@ -37,7 +38,7 @@ export async function printStatus(VERSION) {
   let healthLine = "";
   try {
     const t0 = Date.now();
-    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1200) });
+    const r = await compatFetch(`http://127.0.0.1:${port}/health`, { signal: timeoutSignal(1200) });
     const ms = Date.now() - t0;
     healthLine = r.ok ? `health ok ${ms}ms` : `health HTTP ${r.status} ${ms}ms`;
   } catch (e) {
@@ -175,7 +176,7 @@ export async function printStatus(VERSION) {
       if (isLeader) {
         members = groups.list()[g.name]?.members ?? {};
       } else {
-        const fetchImpl = (url, opts) => fetch(url, { ...opts, signal: AbortSignal.timeout(1500) });
+        const fetchImpl = (url, opts) => compatFetch(url, { ...opts, signal: timeoutSignal(1500) });
         try {
           members = await refreshGroupMembers(g.name, {
             leaderUrl: g.leaderUrl,

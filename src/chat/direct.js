@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { compatFetch } from "../compat.js";
 
 function isInput400(status, msg, hasTools) {
   return status === 400 && /prompt|messages/i.test(String(msg || "")) && hasTools;
@@ -8,7 +9,7 @@ function isInput400(status, msg, hasTools) {
  * 直连深模块：mimo/pickle 经 createUpstreamClient 的 stream:false 调用
  * 注入化：便于用 fake client 触发 400→去 tools 重试
  */
-export function createDirectClient({ createUpstreamClient, chatTimeoutMs = 15000, env = process.env, fetchImpl = globalThis.fetch } = {}) {
+export function createDirectClient({ createUpstreamClient, chatTimeoutMs = 15000, env = process.env, fetchImpl = compatFetch } = {}) {
   const _create = createUpstreamClient || (() => { throw new Error("createUpstreamClient not injected"); });
 
   async function doChat({ messages, tools, model }, withoutTools) {

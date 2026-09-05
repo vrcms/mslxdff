@@ -1,10 +1,6 @@
-let UndiciAgent = null;
-try {
-  const mod = await import("undici");
-  UndiciAgent = mod.Agent;
-} catch {
-  UndiciAgent = null;
-}
+import { getUndici } from "../compat.js";
+
+const UndiciAgent = getUndici().Agent;
 
 function envInt(name, fallback) {
   const v = Number(process.env[name]);
