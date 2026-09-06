@@ -30,7 +30,10 @@ export async function createChatSession({ token, fetchImpl, dispatcher, baseUrl 
   const id = data?.data?.biz_data?.chat_session?.id ?? data?.data?.biz_data?.id;
   if (!res.ok || data?.data?.biz_code !== 0 || !id) {
     const msg = data?.data?.biz_msg || data?.msg || "响应缺少会话 id";
-    throw new Error(`DeepSeek 会话创建失败: ${msg}${res.ok ? "" : ` (http ${res.status})`}`);
+    const err = new Error(`DeepSeek 会话创建失败: ${msg}${res.ok ? "" : ` (http ${res.status})`}`);
+    // 401/403 = 凭据被拒：带 status 供上层 rotateAuth（与 completion 阶段 classifyFailure 对齐）
+    if (res.status === 401 || res.status === 403) err.status = res.status;
+    throw err;
   }
   return id;
 }
