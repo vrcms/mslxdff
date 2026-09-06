@@ -57,21 +57,36 @@ for (const c of citedFiles) {
 }
 if (fwdMiss === 0 && citedFiles.size) ok(`树引用文件存在性通过 (${citedFiles.size} 个)`);
 
-// --- 2. 目录级孤儿：某目录及全部祖先都无树引用 = 新增能力域未登记 ---
-const anchoredDir = (dir) => {
-  const parts = dir.split("/");
-  for (let i = parts.length; i >= 1; i--) {
-    const sub = parts.slice(0, i).join("/");
-    if ([...citedFiles].some((c) => c === sub || c.startsWith(sub + "/"))) return true;
-  }
-  return false;
+// --- 2. 目录级孤儿：新增能力目录未登记 ---
+// 锚定判定一律【向下】：目录 D 被锚定 ⟺ 树引用了 D 内(含 D 本身或后代)的真实文件。
+// 注意绝不能【向上】查 D 的祖先——否则只要树引用了任意一个 src/xxx，
+// 根 src 就被锚定，从而所有 src/* 子目录都放行，反向校验形同虚设。
+const citedArr = [...citedFiles];
+const anchoredDir = (dir) => citedArr.some((c) => c === dir || c.startsWith(dir + "/"));
+// 父目录判定（realDir 均为相对 src 的路径）
+const parentDir = (d) => {
+  const i = d.lastIndexOf("/");
+  return i < 0 ? null : d.slice(0, i);
 };
-let orphanDirs = [...realDirs].filter((d) => !anchoredDir(d)).sort();
+// 只报【最浅未锚定能力域入口】：D 未锚定且父目录已锚定（或 D 是能力根）。
+// 父也未锚定的深层目录被父那条覆盖，避免同一块报多层噪音；补一片叶即可覆盖整块。
+let orphanDirs = [...realDirs]
+  .filter((d) => !anchoredDir(d))
+  .filter((d) => {
+    const p = parentDir(d);
+    return !p || anchoredDir(p);
+  })
+  .sort();
 // 文件孤儿（兜底，目录锚定时应为 0；仅软告警不拦）
-const fileOrphans = realFiles.filter((f) => !citedFiles.has(f) && !anchoredDir(f));
+const fileOrphans = realFiles.filter((f) => {
+  const i = f.lastIndexOf("/");
+  const d = i < 0 ? "" : f.slice(0, i); // 根文件目录为空串
+  const dirAnchored = d === "" ? citedArr.length > 0 : anchoredDir(d); // 根有任一引用即算锚定
+  return !citedFiles.has(f) && !dirAnchored;
+});
 if (orphanDirs.length) orphanDirs.forEach((d) => fail(`src 新增了树未锚定的能力目录（补 FEATURE_TREE 一片叶）：${d}/`));
 else ok(`目录锚定覆盖通过（全部 ${realDirs.size} 个含 js 目录均被树锚定）`);
-if (fileOrphans.length) fileOrphans.forEach((f) => warn(`支撑文件未显式入树（其目录已锚定，可不处理）：${f}`));
+if (fileOrphans.length) fileOrphans.forEach((f) => warn(`支撑文件未显式入树（其目录也未锚定，建议并入对应能力叶）：${f}`));
 
 // --- 3. 汇总 ---
 console.log(failures ? `\n${failures} 项功能树检查失败 — 补 docs/FEATURE_TREE.md 叶子（见该文件顶说明）` : "\n功能树一致性检查全部通过");
