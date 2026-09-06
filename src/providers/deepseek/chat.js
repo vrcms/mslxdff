@@ -183,17 +183,26 @@ export async function runDeepseekChat({ body, authPool, fetchImpl, dispatcher, b
 
   const maxAttempts = maxAuthRetries ?? Math.max(1, authPool.size);
   for (let attempt = 0; attempt <= maxAttempts; attempt++) {
-    const token = authPool.requireToken();
+    // 并发闸门：每 token 在途限 1（MSLXDFF_DEEPSEEK_MAX_CONCURRENT），全忙排队，超时人话 429
+    const slot = await authPool.acquireSlot({});
+    if (!slot) {
+      throw upstreamError("DeepSeek: 所有账号都在忙（并发闸门排队超时），稍后重试或调大 MSLXDFF_DEEPSEEK_QUEUE_TIMEOUT_MS / MSLXDFF_DEEPSEEK_MAX_CONCURRENT", { status: 429 });
+    }
+    const { token, release } = slot;
     try {
       const out = prompt.length > threshold
         ? await runChunked({ token, flags, prompt, isStream, fetchImpl, dispatcher, baseUrl, connectTimeoutMs, threshold })
         : await runOnce({ token, flags, prompt, isStream, fetchImpl, dispatcher, baseUrl, connectTimeoutMs });
       if (out.kind === "stream") {
+        // 流式：槽位由 cleanup 链释放（buildOpenAiSseStream 的 done/error/cancel），此处不放
+        const prevCleanup = out.cleanup;
         return {
           kind: "stream",
           res: out.res,
           token,
-          cleanup: () => deleteChatSession({ token: out.token, sessionId: out.sessionId, fetchImpl, dispatcher, baseUrl }),
+          cleanup: async () => {
+            try { await prevCleanup?.(); } finally { release(); }
+          },
         };
       }
       const sseText = await readBodyText(out.res);
@@ -209,11 +218,15 @@ export async function runDeepseekChat({ body, authPool, fetchImpl, dispatcher, b
         dsDump("aggregate", "EMPTY aggregate content! full sseText", sseText, 8000);
       }
       await deleteChatSession({ token: out.token, sessionId: out.sessionId, fetchImpl, dispatcher, baseUrl });
+      release(); // 聚合成功：槽位随会话删除一并释放
       return { kind: "json", data };
     } catch (err) {
+      release(); // 失败（含 rotateAuth 重试）：立即释放，避免槽位泄漏
       dsError(`chat attempt=${attempt}`, err);
       if (err?._rotateAuth) authPool.onError(token, { cooldownMs: err._cooldownMs });
-      if (!err?._rotateAuth || attempt >= maxAttempts - 1) throw err;
+      // 会话创建/删除阶段的 401/403 也属凭据被拒（session.js 带 status），与 completion 阶段对齐
+      else if (err?.status === 401 || err?.status === 403) authPool.onError(token, { cooldownMs: COOLDOWN_PRESETS.default });
+      if (!(err?._rotateAuth || err?.status === 401 || err?.status === 403) || attempt >= maxAttempts - 1) throw err;
     }
   }
   throw upstreamError("DeepSeek: 所有账号均不可用", {});
