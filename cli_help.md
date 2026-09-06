@@ -67,6 +67,8 @@
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
+| `mslxdff -provider deepseek login [--token <userToken> \| <email\|mobile> <password>]` | `--provider` | DeepSeek 官网免费对话接入（ADR-0014）：贴浏览器 `userToken` 或账密登录（Android 协议），落盘 `providerConfigs.deepseek.keys`。模型 `deepseek/{chat,reasoner,chat-search,reasoner-search,chat-expert,reasoner-expert}-free`（快速=不传 model_type，专家=model_type:"expert"）；无参数打印取 token 图文引导 | 是 | 重启生效 |
+| `mslxdff -provider deepseek health [--json]` | `--provider` | 逐账号探活（防禁言体系）：PoW + 最小请求检测禁言/限频/凭据坏；禁言账号自动冷却 5min（解封后再探自动恢复）；网络失败不误伤；`--json` 供脚本 | 是 | 即时 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -604,6 +606,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   - **不写 state（除 --apply）**：默认仅打印 `stdout`，不改 `preferredModel`/`allowlist`；`--apply` 时落盘 `via-routes.json`（`~/.config/mslxdff/via-routes.json`，随 `MSLXDFF_STATE_FILE` 派生，`MSLXDFF_VIA_ROUTES_FILE` 可覆盖，`MSLXDFF_VIA_ROUTE_TTL_MS=0` 默认不过期）。
   - **串行省额度**：同一模型对 `direct + 每个 peer` 串行发 `POST <baseUrl><chatPath>` 轻探针（`max_tokens=5 prompt=hi stream:false`，剥 `provider/` 前缀），每个结果记 `TTFB/总耗时/TPS/ok/error/label`。
   - **额度保护**：默认**跳过** `opencode` 供应商（`opencode` 为免费共享池，走 `peer` 对冲会烧组员额度）。如确需包含，必须加 `--include-opencode`，且 **TTY 二次确认 `y/N`**（`[bench-via] 组员额度保护：默认跳过 opencode … --include-opencode y/N > `），`非 TTY`（脚本/CI）直接跳过并提示。
+  - **DeepSeek 一律跳过**（0.1.98 防禁言）：`deepseek` 网页通道（本机私有凭据）bench 轰炸易触发禁言/频率风控——显式 `-provider deepseek bench`（含 `ds` 别名、含/不含 `--via`）都会被拦截并提示改用 `mslxdff -provider deepseek health` 轻量体检；`-provider bench --via`（all 形态）在候选收集处直接排除 `deepseek`（即使 allowlist 非空）。
   - **空状态**：无已加入组或全离线时直接空状态引导 ` -group list`（不发起任何探针），`direct` 与 `via` 共用同一 `runOne` 测 `TTFB`，统一 `formatViaReport` 打印 `bench-via: direct vs via` 头、`★` 最快、`— offline`。
   - **`--json`**：`stdout` 纯 `{"meta":{"provider","model","samples","timeoutMs","includeOpencode"},"results":[…],"advice":"…"}`，进度与告警走 `stderr`（便于 `jq`）；`--apply` 时落盘信息亦走 `stderr`。
   - **`--apply` 动态择路**：落盘后网关对显式锁模型（如 `clinebot/z-ai/glm-5.3-flash`）按 `best` 单路径择路（工作 `workbuddy→direct`、`clinebot→172`、`bai/aihubmix→leader` 已验证），`via:host:port` 失败自动回落 `direct`，`workbuddy` 等 `stream:true` 走 peer 的 `x-mslxdff-share-keys` 透传，`B` 无配置也能借 `A` 的 key。
@@ -643,6 +646,53 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -restart                         # 重启使新账号生效
   mslxdff -provider clinebot bench --json  # 测速 deepseek-v4-flash 是否 200
   ```
+
+#### `mslxdff -provider deepseek login`（DeepSeek 官网免费对话接入：userToken / 账密，ADR-0014）
+
+- **语法**：
+  ```bash
+  mslxdff -provider deepseek login --token <userToken>      # 方式 1（推荐）：浏览器贴 token，免密码
+  mslxdff -provider deepseek login you@example.com <password>   # 方式 2：邮箱账密
+  mslxdff -provider deepseek login 13800138000 <password>       # 方式 2：手机号账密
+  mslxdff -provider deepseek login                          # 无参数：打印取 token 图文引导
+  ```
+- **userToken 怎么拿**（方式 1）：浏览器登录 https://chat.deepseek.com → F12 → Application → Local Storage → `https://chat.deepseek.com` → 复制 `userToken` 值。
+- **作用**：把 chat.deepseek.com 的免费网页对话包装成 OpenAI 兼容模型（Android 协议通道，`device_id` 任意字符串免浏览器指纹）。token 落盘 `providerConfigs.deepseek.keys`（多账号自动轮换，401/403/429/验证码自动切号冷却）。每次对话自动：建无痕会话 → 算 PoW（DeepSeekHashV1，纯 JS ~0.6s）→ 补全 → 删会话。
+- **模型**（`model` 字段带 `deepseek/` 前缀，对应官网 UI 模式）：
+  | 模型 | 官网 UI | 上游 body |
+  |---|---|---|
+  | `deepseek/deepseek-chat-free` | 快速（不思考） | `thinking_enabled:false`（不传 model_type） |
+  | `deepseek/deepseek-reasoner-free` | 快速 + 深度思考 | `thinking_enabled:true` |
+  | `deepseek/deepseek-chat-search-free` | 快速 + 联网 | `search_enabled:true` |
+  | `deepseek/deepseek-reasoner-search-free` | 快速 + 深度思考 + 联网 | 两者同开 |
+  | `deepseek/deepseek-chat-expert-free` | 专家（不思考） | `model_type:"expert"` |
+  | `deepseek/deepseek-reasoner-expert-free` | 专家 + 深度思考 | `model_type:"expert"` + thinking |
+
+  思考内容走 `reasoning_content`；`-free` 后缀对齐网关免费过滤（ADR-0002），上游 flags 按名字 includes 判定不受后缀影响。
+- **限制**：单账号同时仅 1 路输出（多账号横向扩并发）；触发数美验证码时报人话引导换号；v1 不支持 tools/文件上传。
+- **示例**：
+  ```bash
+  mslxdff -provider deepseek login --token <userToken>
+  mslxdff -provider deepseek allowAny on    # 默认 allowlist 空=全 blocked，需放行
+  mslxdff -restart
+  curl http://127.0.0.1:8989/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
+    -d '{"model":"deepseek/deepseek-reasoner","messages":[{"role":"user","content":"你好"}]}'
+  ```
+
+#### `mslxdff -provider deepseek health`（逐账号探活：禁言/限频/凭据体检，0.1.98）
+
+- **语法**：
+  ```bash
+  mslxdff -provider deepseek health            # 逐账号探活，✓/✗ 打印 + 汇总
+  mslxdff -provider deepseek health --json     # JSON 输出（[{tokenTail, ok, detail}]）
+  ```
+- **作用**：对池内**每个**账号发最小真实请求（PoW + Hello world completion），检测：
+  - 禁言（`user is muted`）→ ✗ 且**自动冷却该账号 5 分钟**，解封后再次探活自动恢复
+  - 频率风控（「消息发送过于频繁」）→ ✗ 默认冷却（禁言前兆预警）
+  - 凭据被拒（401/403）→ ✗ 提示重新 login
+  - 网络失败 → ✗ 但**不冷却**（不误伤可用账号）
+- **何时用**：怀疑被禁言/限频时；对话报「消息发送过于频繁」后想确认账号状态；追加新账号后验证可用性。
+- **注意**：探活是真实请求（每账号 1-3 个小请求），不要高频连打。
 
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
 

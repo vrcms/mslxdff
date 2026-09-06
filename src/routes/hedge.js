@@ -13,11 +13,13 @@ function isFastFailStatus(status) {
   return s === 429 || s === 502 || s === 503 || s === 504;
 }
 
-function shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers }) {
+function shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) {
   if (!isStream) return false;
   if (!canForwardPeers) return false;
   if (!hasPeers) return false;
   if (!d || d <= 0) return false;
+  // deepseek = 本机私有凭据供应商（组员节点没有凭据），对冲必败且 both-fail 会误杀本地慢首块流（reasoner 思考 3-30s），不走组员
+  if (String(model || "").startsWith("deepseek/")) return false;
   return true;
 }
 

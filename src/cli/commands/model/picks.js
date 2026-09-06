@@ -15,8 +15,11 @@ export async function handlePicksCommand(args, idx, sub) {
     process.exit(0);
   }
   if (sub === "pick" && args[idx + 2] && args[idx + 2] !== "clear") {
-    const picks = [...new Set([...loadModelPicks(), args[idx + 2]])];
+    // 多 id 勾选：`-model pick a b c`（空格分隔）与 `-model pick a,b`（逗号）均支持
+    const ids = args.slice(idx + 2).flatMap((x) => String(x).split(",")).map((x) => x.trim()).filter(Boolean);
+    const picks = [...new Set([...loadModelPicks(), ...ids])];
     saveModelPicks(picks);
+    console.log(`picked ${ids.length} model(s): ${ids.join(", ")}`);
     console.log(`picked: ${picks.join(", ") || "(none)"} (auto will pick within these)`);
     process.exit(0);
   }
@@ -26,8 +29,10 @@ export async function handlePicksCommand(args, idx, sub) {
     process.exit(0);
   }
   if (sub === "unpick" && args[idx + 2]) {
-    const picks = loadModelPicks().filter((x) => x !== args[idx + 2]);
+    const removeSet = new Set(args.slice(idx + 2).flatMap((x) => String(x).split(",")).map((x) => x.trim()).filter(Boolean));
+    const picks = loadModelPicks().filter((x) => !removeSet.has(x));
     saveModelPicks(picks);
+    console.log(`unpicked ${removeSet.size}: ${[...removeSet].join(", ")}`);
     console.log(`picked: ${picks.join(", ") || "(none)"}${picks.length === 0 ? " (auto uses full list)" : ""}`);
     process.exit(0);
   }

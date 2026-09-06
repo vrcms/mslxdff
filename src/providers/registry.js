@@ -15,6 +15,11 @@ export const customProviders = [
     match: (id, baseUrl) => id === "cline" || id === "clinebot" || String(baseUrl).includes("cline.bot"),
     load: () => import("./cline.js").then((m) => m.createClineProvider),
   },
+  {
+    id: "deepseek",
+    match: (id, baseUrl) => id === "deepseek" || String(baseUrl).includes("chat.deepseek.com"),
+    load: () => import("./deepseek.js").then((m) => m.createDeepseekProvider),
+  },
 ];
 
 // 供 bench/probe 等需要定制化解析模型列表的场景
