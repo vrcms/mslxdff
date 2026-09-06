@@ -12,6 +12,10 @@ free-anon-extra.txt
 **/*key*.json
 *.mslxdff-state.json
 
+# WorkBuddy 账号凭据目录：含明文 accessToken/refreshToken，绝不入库
+auths/
+**/auths/
+
 # 开发过程文件，不公开到 git
 AGENTS.md
 CLAUDE.md

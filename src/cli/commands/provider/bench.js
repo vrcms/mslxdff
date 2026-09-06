@@ -36,6 +36,14 @@ export async function handleProviderBench(id, sub, rest, args, deps = {}) {
   const isBench = sub === "bench" || sub === "benchmark" || sub === "eval" || sub === "test" || _isBenchViaAll;
   if (!isBench) return false;
   const opts = parseBenchArgs(_restArr);
+  // DeepSeek 网页通道防禁言：bench 轰炸易触发 muted/频率风控，一律跳过（体检用 health 探活代替）
+  const benchPidLower = String(id || "").trim().toLowerCase();
+  if (benchPidLower === "deepseek" || benchPidLower === "ds") {
+    const advice = "DeepSeek 网页通道（本机私有凭据）易触发禁言/频率风控，不支持 bench 测速。请用轻量体检：mslxdff -provider deepseek health";
+    if (opts.json) console.log(JSON.stringify({ ok: false, skipped: "deepseek", advice }, null, 2));
+    else console.log(`跳过 deepseek bench —— ${advice}`);
+    return true;
+  }
   if (opts.via) {
     const stateMod = await import("../../../state.js");
     const loadConfigs = deps.loadProviderConfigs || stateMod.loadProviderConfigs;

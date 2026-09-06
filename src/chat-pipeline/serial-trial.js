@@ -112,7 +112,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       const isStream = Boolean(body.stream);
       const d = hedgeDelayMs();
       const hasPeers = Boolean(peers) && peers.ordered().length > 0;
-      const doHedge = shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers }) && upRes.status === 200 && upRes.body;
+      const doHedge = shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) && upRes.status === 200 && upRes.body;
       if (doHedge) {
         const hr = await hedge({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res, hedgeDelayMs: d });
         if (hr.handled) return { done: true };

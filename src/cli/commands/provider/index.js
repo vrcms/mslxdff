@@ -65,6 +65,10 @@ export async function handleProvider(args) {
   }
   const { handleClineLogin } = await import("./cline-login.js");
   if (await handleClineLogin(id, sub)) return true;
+  const { handleDeepseekLogin } = await import("./deepseek-login.js");
+  if (await handleDeepseekLogin(id, sub, rest)) return true;
+  const { handleDeepseekHealth } = await import("./deepseek-health.js");
+  if (await handleDeepseekHealth(id, sub, rest)) return true;
   const { handleWorkbuddyLogin } = await import("./workbuddy-login.js");
   if (await handleWorkbuddyLogin(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");

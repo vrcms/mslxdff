@@ -72,4 +72,43 @@ describe("bench via CLI", () => {
       try { await import("node:fs/promises").then((m) => m.unlink(tmp)); } catch {}
     }
   });
+
+  it("deepseek bench 显式拦截：不发起任何测速，提示改用 health", async () => {
+    const { handleProviderBench } = await import("../src/cli/commands/provider/bench.js");
+    const deps = {
+      loadProviderConfigs: () => ({ deepseek: {} }),
+      loadProviderKeys: () => ["tk-x"],
+      loadProviderAllowedModels: () => ["deepseek-chat-free"],
+      loadProviderAllowAnyModels: () => false,
+      loadProviderBaseUrl: () => "https://chat.deepseek.com",
+      fetchImpl: async () => { throw new Error("SHOULD_NOT_FETCH"); },
+    };
+    const r = await handleProviderBench("deepseek", "bench", ["bench", "--json"], [], deps);
+    assert.equal(r, true);
+    assert.equal(exitCode, null); // 未触发 process.exit（干净跳过）
+    const out = logs.join("\n");
+    const j = JSON.parse(out);
+    assert.equal(j.ok, false);
+    assert.equal(j.skipped, "deepseek");
+    assert.match(j.advice, /health/);
+  });
+
+  it("deepseek bench --via 同样拦截（含 ds 别名）", async () => {
+    const { handleProviderBench } = await import("../src/cli/commands/provider/bench.js");
+    const deps = {
+      loadProviderConfigs: () => ({ deepseek: {} }),
+      loadProviderKeys: () => ["tk-x"],
+      loadProviderAllowedModels: () => ["deepseek-chat-free"],
+      loadProviderAllowAnyModels: () => false,
+      loadProviderBaseUrl: () => "https://chat.deepseek.com",
+      fetchImpl: async () => { throw new Error("SHOULD_NOT_FETCH"); },
+    };
+    for (const pid of ["deepseek", "ds"]) {
+      logs.length = 0;
+      const r = await handleProviderBench(pid, "bench", ["bench", "--via"], [], deps);
+      assert.equal(r, true);
+      assert.match(logs.join("\n"), /跳过 deepseek/);
+    }
+    assert.equal(exitCode, null);
+  });
 });

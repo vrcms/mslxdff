@@ -42,9 +42,11 @@
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
 | 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`--json` 供脚本） |
-| 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick |
-| 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
+| 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick；**deepseek 网页通道不支持 bench**（防禁言，改用 `-provider deepseek health` 体检） |
+| 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；**deepseek 一律跳过**（防禁言）；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
 | Cline 登录 | `-provider clinebot login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`clinebot` 走 `refresh→workos:token`+指纹头，deepseek-v4-flash 免 403（强制 stream 聚合）；多账号重复 login 追加；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
+| DeepSeek 登录 | `-provider deepseek login --token <userToken>` 或 `login <email\|mobile> <password>` | DeepSeek 官网免费对话接入（ADR-0014）：userToken 在 chat.deepseek.com F12→Local Storage；无参数打印图文引导；落盘后 `allowAny on` + `-restart`；模型 `deepseek/{chat,reasoner,chat-search,reasoner-search}`；单账号 1 路并发，多号轮换 |
+| DeepSeek 探活 | `-provider deepseek health [--json]` | 逐账号体检（防禁言）：检测禁言（自动冷却 5min）/限频前兆/凭据坏；网络失败不误伤；禁言解封后再探自动恢复 |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |

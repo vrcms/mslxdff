@@ -76,7 +76,8 @@ export async function setupProviders() {
       const customFactory = await getCustomProviderFactory(gid, base);
       if (customFactory) {
         if (gid === "workbuddy" && !keys.length) continue;
-        if (gid !== "workbuddy" && (!base || !keys.length)) continue;
+        if (gid === "deepseek" && !keys.length) continue;
+        if (gid !== "workbuddy" && gid !== "deepseek" && (!base || !keys.length)) continue;
         try {
           const provider = gid === "workbuddy"
             ? await customFactory({ baseUrl: base || "https://copilot.tencent.com", apiKeys: keys, auths })

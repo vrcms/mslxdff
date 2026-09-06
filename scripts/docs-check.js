@@ -68,5 +68,15 @@ try {
   fail(`体积检查执行失败: ${String(e?.message || e)}`);
 }
 
+// 5. 功能树一致性：FEATURE_TREE.md ↔ src/ 双向锁定（引用存在 + 目录级孤儿 = 新增能力域漏登记）
+try {
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(process.execPath, [join(root, "scripts", "check-feature-tree.js")], { stdio: "inherit" });
+  if (r.status === 0) ok("功能树一致性检查通过");
+  else fail("功能树一致性检查失败 — 补 docs/FEATURE_TREE.md 叶子（见 check-feature-tree.js 顶部说明）");
+} catch (e) {
+  fail(`功能树一致性检查执行失败: ${String(e?.message || e)}`);
+}
+
 console.log(failures ? `\n${failures} 项检查失败 — 请同步文档（见 docs/ARCHITECTURE.md §1 变更契约）` : "\n文档就绪检查全部通过");
 process.exit(failures ? 1 : 0);
