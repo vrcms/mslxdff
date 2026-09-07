@@ -78,7 +78,43 @@ export function pruneOpencodeModels(models, keep, currentKey) {
   return pruned;
 }
 
-export async function syncToOpencode({ id, token, port, file, keep } = {}) {
+// 补齐：把 ensureAll（picks 口径）里缺失的键写入 models（slash → dash + alias 注册）。
+// 返回 { nextModels, backfilled }；ensureAll 非数组或为空时原样返回（backfilled=0）。
+// 注意：需在剪枝之前调用——先补 picks 缺失，再剪 picks 外旧键，结果集恰为 picks ∪ currentKey。
+export async function ensureAllOpencodeModels(models, ensureAll) {
+  if (!Array.isArray(ensureAll) || !ensureAll.length || !models || typeof models !== "object") {
+    return { nextModels: models, backfilled: 0 };
+  }
+  const existing = new Set(Object.keys(models).map(normalizeOpencodeKey));
+  let backfilled = 0;
+  let aliasDirty = false;
+  for (const raw of ensureAll) {
+    const internal = toInternalId(String(raw || "").trim());
+    if (!internal || internal === "auto") continue;
+    const storageKey = internal.includes("/") ? internal.replace(/\//g, "-") : internal;
+    if (!storageKey || existing.has(storageKey)) continue;
+    models[storageKey] = { name: storageKey };
+    existing.add(storageKey);
+    backfilled++;
+    if (internal.includes("/") && storageKey !== internal) {
+      try {
+        const { loadModelAliases, registerModelAlias } = await import("./providers/model-id.js");
+        loadModelAliases();
+        registerModelAlias(storageKey, internal);
+        aliasDirty = true;
+      } catch {}
+    }
+  }
+  if (aliasDirty) {
+    try {
+      const { persistModelAliases } = await import("./providers/model-id.js");
+      persistModelAliases();
+    } catch {}
+  }
+  return { nextModels: models, backfilled };
+}
+
+export async function syncToOpencode({ id, token, port, file, keep, ensureAll } = {}) {
   const targetFile = file || opencodeConfigPath();
   const normalizedRaw = String(id || "").trim();
   if (!normalizedRaw) throw new Error("model id required");
@@ -119,6 +155,7 @@ export async function syncToOpencode({ id, token, port, file, keep } = {}) {
   let action;
   let effectiveId = storageKey;
   let pruned = 0;
+  let backfilled = 0;
   if (oldProvider) {
     const oldModels = oldProvider.models && typeof oldProvider.models === "object" && !Array.isArray(oldProvider.models)
       ? oldProvider.models
@@ -158,6 +195,8 @@ export async function syncToOpencode({ id, token, port, file, keep } = {}) {
       effectiveId = storageKey;
       action = "inserted";
     }
+    const ensured = await ensureAllOpencodeModels(nextModels, ensureAll);
+    backfilled = ensured.backfilled;
     pruned = pruneOpencodeModels(nextModels, keep, storageKey);
     const nextProvider = {
       ...oldProvider,
@@ -177,6 +216,8 @@ export async function syncToOpencode({ id, token, port, file, keep } = {}) {
     if (!data.provider.mslxdff.models[storageKey]) {
       data.provider.mslxdff.models = { [storageKey]: { name: storageKey } };
     }
+    const ensured = await ensureAllOpencodeModels(data.provider.mslxdff.models, ensureAll);
+    backfilled = ensured.backfilled;
     action = "inserted";
   }
 
@@ -208,5 +249,5 @@ export async function syncToOpencode({ id, token, port, file, keep } = {}) {
     }
   } catch {}
 
-  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey, pruned };
+  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey, pruned, backfilled };
 }

@@ -84,7 +84,7 @@ export async function handleSetto(args) {
           if (!norm || norm === "auto") continue;
           // 首次循环也同步 preferred（保持 daemon 热重载语义）
           if (rawId === list[0]) savePreferredModel(norm);
-          const r = await syncToOpencode({ id: norm, token, port, file, keep: pruneKeep() });
+          const r = await syncToOpencode({ id: norm, token, port, file, keep: pruneKeep(), ensureAll: pruneKeep() });
           if (r.action === "inserted") inserted++; else updated++;
           prunedTotal += r.pruned || 0;
           console.log(`  ${r.action} "${r.id}" -> ${r.internal} @ ${file}`);
@@ -156,8 +156,9 @@ export async function handleSetto(args) {
       const envPort = Number(process.env.MSLXDFF_PORT);
       const port = persisted !== null ? persisted : (Number.isInteger(envPort) && envPort > 0 ? envPort : 8989);
       const file = opencodeConfigPath();
-      const r = await syncToOpencode({ id, token, port, file, keep: pruneKeep() });
+      const r = await syncToOpencode({ id, token, port, file, keep: pruneKeep(), ensureAll: pruneKeep() });
       console.log(`synced to opencode: ${r.action} "${r.id}" @ ${file}`);
+      if (r.backfilled) console.log(`  backfilled ${r.backfilled} 个 picks 模型（此前 pick 了但未同步过，现已补齐）`);
       if (r.pruned) console.log(`  pruned ${r.pruned} 个失效模型（未在 picks，不再于 opencode 显示）`);
       console.log(`  url: http://127.0.0.1:${port}/v1`);
       console.log(`  opencode 选 mslxdff/${r.id} 直达本地 ${r.internal}${r.storageKey !== r.internal ? ` (dash→${r.internal} 自动映射)` : ""}`);

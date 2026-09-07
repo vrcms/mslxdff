@@ -183,3 +183,94 @@ describe("sync-opencode raw/dash + slash->dash alias", () => {
     assert.equal(isOpencodeLocalUrl("https://example.com/v1"), false);
   });
 });
+
+describe("sync-opencode ensureAll（picks 全量补齐，修 pick 了却不见 + 列表越积越多）", () => {
+  test("US1: ensureAll 补齐 picks 缺失键（backfilled 计数）", async () => {
+    const file = tmpFile();
+    writeFileSync(file, JSON.stringify({
+      provider: { mslxdff: { npm: "@ai-sdk/openai-compatible", name: "mslxdff", options: { baseURL: "http://127.0.0.1:8989/v1", apiKey: "old" }, models: {
+        "big-pickle": { name: "big-pickle" },
+        "muse-spark-1.2-contributor-free": { name: "muse-spark-1.2-contributor-free" },
+      } } }
+    }, null, 2));
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    const r = await syncToOpencode({
+      id: "big-pickle", token: "tok", port: 8989, file,
+      keep: ["big-pickle", "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"],
+      ensureAll: ["big-pickle", "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"],
+    });
+    assert.equal(r.backfilled, 1);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    const keys = Object.keys(data.provider.mslxdff.models).sort();
+    assert.deepEqual(keys, ["big-pickle", "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"]);
+  });
+
+  test("US2: ensureAll+keep 联动，picks 外旧键仍被移除", async () => {
+    const file = tmpFile();
+    writeFileSync(file, JSON.stringify({
+      provider: { mslxdff: { npm: "@ai-sdk/openai-compatible", name: "mslxdff", options: { baseURL: "http://127.0.0.1:8989/v1", apiKey: "old" }, models: {
+        "keep-me": { name: "keep-me" },
+        "stale-old": { name: "stale-old" },
+      } } }
+    }, null, 2));
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    const r = await syncToOpencode({
+      id: "keep-me", token: "tok", port: 8989, file,
+      keep: ["keep-me"], ensureAll: ["keep-me"],
+    });
+    assert.equal(r.pruned, 1);
+    assert.equal(r.backfilled, 0);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(Object.keys(data.provider.mslxdff.models), ["keep-me"]);
+  });
+
+  test("US3: 当前 id 不在 ensureAll/keep 也保留", async () => {
+    const file = tmpFile();
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    const r = await syncToOpencode({
+      id: "fresh-choice", token: "tok", port: 8989, file,
+      keep: ["other"], ensureAll: ["other"],
+    });
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    const keys = Object.keys(data.provider.mslxdff.models).sort();
+    assert.deepEqual(keys, ["fresh-choice", "other"]);
+    assert.equal(r.backfilled, 1, "other 由 ensureAll 补齐");
+  });
+
+  test("US4: keep/ensureAll 为 null 时不补齐不剪枝（向后兼容）", async () => {
+    const file = tmpFile();
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    await syncToOpencode({ id: "keep-me", token: "tok", port: 8989, file });
+    const r = await syncToOpencode({ id: "other", token: "tok", port: 8989, file, keep: null, ensureAll: null });
+    assert.equal(r.pruned, 0);
+    assert.equal(r.backfilled, 0);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(Object.keys(data.provider.mslxdff.models).sort(), ["keep-me", "other"]);
+  });
+
+  test("US5: ensureAll 里 slash 形态 → dash 键落盘 + alias 注册", async () => {
+    const file = tmpFile();
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    await syncToOpencode({
+      id: "big-pickle", token: "tok", port: 8989, file,
+      keep: ["big-pickle", "workbuddy/deepseek-v4-flash"],
+      ensureAll: ["big-pickle", "workbuddy/deepseek-v4-flash"],
+    });
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    assert.ok(data.provider.mslxdff.models["workbuddy-deepseek-v4-flash"], "slash pick 应落 dash 键");
+    const { getModelAlias } = await import("../src/providers/model-id.js");
+    assert.equal(getModelAlias("workbuddy-deepseek-v4-flash"), "workbuddy/deepseek-v4-flash");
+  });
+
+  test("US6: 幂等——第二次调用 backfilled=0 无重复键", async () => {
+    const file = tmpFile();
+    const { syncToOpencode } = await import("../src/sync-opencode.js");
+    const picks = ["big-pickle", "muse-spark-1.3-contributor-free"];
+    await syncToOpencode({ id: "big-pickle", token: "tok", port: 8989, file, keep: picks, ensureAll: picks });
+    const r2 = await syncToOpencode({ id: "big-pickle", token: "tok", port: 8989, file, keep: picks, ensureAll: picks });
+    assert.equal(r2.backfilled, 0);
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    const keys = Object.keys(data.provider.mslxdff.models).sort();
+    assert.deepEqual(keys, ["big-pickle", "muse-spark-1.3-contributor-free"]);
+  });
+});
