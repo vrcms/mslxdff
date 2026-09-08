@@ -49,6 +49,8 @@ export async function run(args = process.argv.slice(2)) {
   if (await handleLeaveGroup(args)) return;
   if (await handleDelGroup(args)) return;
 
+  const { handleUseGroup } = await import("./commands/use-group.js");
+  if (await handleUseGroup(args)) return;
   const { handlePort, handleDaemonFlag, handleBareRun } = await import("./commands/daemon.js");
   if (await handlePort(args)) return;
   if (await handleDaemonFlag(args, VERSION)) return;

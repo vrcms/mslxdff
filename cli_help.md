@@ -68,7 +68,6 @@
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider deepseek login [--token <userToken> \| <email\|mobile> <password>]` | `--provider` | DeepSeek 官网免费对话接入（ADR-0014）：贴浏览器 `userToken` 或账密登录（Android 协议），落盘 `providerConfigs.deepseek.keys`。模型 `deepseek/{chat,reasoner,chat-search,reasoner-search,chat-expert,reasoner-expert}-free`（快速=不传 model_type，专家=model_type:"expert"）；无参数打印取 token 图文引导 | 是 | 重启生效 |
-| `mslxdff -provider deepseek health [--json]` | `--provider` | 逐账号探活（防禁言体系）：PoW + 最小请求检测禁言/限频/凭据坏；禁言账号自动冷却 5min（解封后再探自动恢复）；网络失败不误伤；`--json` 供脚本 | 是 | 即时 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -100,6 +99,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
+| `mslxdff -use-group [on\|off]` | `--use-group` | opencode 供应商本机失败时是否走组员网络（默认 on；`off` 则 opencode 仅本机，不走 peer/broadband/hedge 组员中继，其他供应商不受影响；`MSLXDFF_USE_GROUP` 环境变量可覆盖） | 是（`useGroup`） | 热重载（下次请求生效） |
 | `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：`mimo-v2.5-free → big-pickle → 本地网关 auto:8989` 三级兜底（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，失败自动切本地 `http://127.0.0.1:8989/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer），模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
@@ -606,7 +606,6 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   - **不写 state（除 --apply）**：默认仅打印 `stdout`，不改 `preferredModel`/`allowlist`；`--apply` 时落盘 `via-routes.json`（`~/.config/mslxdff/via-routes.json`，随 `MSLXDFF_STATE_FILE` 派生，`MSLXDFF_VIA_ROUTES_FILE` 可覆盖，`MSLXDFF_VIA_ROUTE_TTL_MS=0` 默认不过期）。
   - **串行省额度**：同一模型对 `direct + 每个 peer` 串行发 `POST <baseUrl><chatPath>` 轻探针（`max_tokens=5 prompt=hi stream:false`，剥 `provider/` 前缀），每个结果记 `TTFB/总耗时/TPS/ok/error/label`。
   - **额度保护**：默认**跳过** `opencode` 供应商（`opencode` 为免费共享池，走 `peer` 对冲会烧组员额度）。如确需包含，必须加 `--include-opencode`，且 **TTY 二次确认 `y/N`**（`[bench-via] 组员额度保护：默认跳过 opencode … --include-opencode y/N > `），`非 TTY`（脚本/CI）直接跳过并提示。
-  - **DeepSeek 一律跳过**（0.1.98 防禁言）：`deepseek` 网页通道（本机私有凭据）bench 轰炸易触发禁言/频率风控——显式 `-provider deepseek bench`（含 `ds` 别名、含/不含 `--via`）都会被拦截并提示改用 `mslxdff -provider deepseek health` 轻量体检；`-provider bench --via`（all 形态）在候选收集处直接排除 `deepseek`（即使 allowlist 非空）。
   - **空状态**：无已加入组或全离线时直接空状态引导 ` -group list`（不发起任何探针），`direct` 与 `via` 共用同一 `runOne` 测 `TTFB`，统一 `formatViaReport` 打印 `bench-via: direct vs via` 头、`★` 最快、`— offline`。
   - **`--json`**：`stdout` 纯 `{"meta":{"provider","model","samples","timeoutMs","includeOpencode"},"results":[…],"advice":"…"}`，进度与告警走 `stderr`（便于 `jq`）；`--apply` 时落盘信息亦走 `stderr`。
   - **`--apply` 动态择路**：落盘后网关对显式锁模型（如 `clinebot/z-ai/glm-5.3-flash`）按 `best` 单路径择路（工作 `workbuddy→direct`、`clinebot→172`、`bai/aihubmix→leader` 已验证），`via:host:port` 失败自动回落 `direct`，`workbuddy` 等 `stream:true` 走 peer 的 `x-mslxdff-share-keys` 透传，`B` 无配置也能借 `A` 的 key。
@@ -678,21 +677,6 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   curl http://127.0.0.1:8989/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
     -d '{"model":"deepseek/deepseek-reasoner","messages":[{"role":"user","content":"你好"}]}'
   ```
-
-#### `mslxdff -provider deepseek health`（逐账号探活：禁言/限频/凭据体检，0.1.98）
-
-- **语法**：
-  ```bash
-  mslxdff -provider deepseek health            # 逐账号探活，✓/✗ 打印 + 汇总
-  mslxdff -provider deepseek health --json     # JSON 输出（[{tokenTail, ok, detail}]）
-  ```
-- **作用**：对池内**每个**账号发最小真实请求（PoW + Hello world completion），检测：
-  - 禁言（`user is muted`）→ ✗ 且**自动冷却该账号 5 分钟**，解封后再次探活自动恢复
-  - 频率风控（「消息发送过于频繁」）→ ✗ 默认冷却（禁言前兆预警）
-  - 凭据被拒（401/403）→ ✗ 提示重新 login
-  - 网络失败 → ✗ 但**不冷却**（不误伤可用账号）
-- **何时用**：怀疑被禁言/限频时；对话报「消息发送过于频繁」后想确认账号状态；追加新账号后验证可用性。
-- **注意**：探活是真实请求（每账号 1-3 个小请求），不要高频连打。
 
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
 
@@ -1073,6 +1057,21 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -resetban 1.2.3.4
   ```
 
+### `-use-group [on|off]` / `--use-group [on|off]`
+
+- **语法**：`mslxdff -use-group`（查询）或 `mslxdff -use-group on|off`（设置）/ `--use-group=off`
+- **作用**：控制 **opencode 供应商**在本机上游失败时是否走组员网络（peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**仅 opencode 裸 id 与 `opencode/` 前缀模型**在本机失败时不再尝试组员，**其他供应商（workbuddy/deepseek/通用等）不受影响**仍可走组员。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
+- **输出**：
+  - 查询：`use-group: on (effective) / stored: on / env ...`
+  - 设置：`use-group set to off (stored in state.json) / opencode 供应商：本机失败时不再通过组员网络请求上游`
+- **示例**：
+  ```bash
+  mslxdff -use-group          # 查询当前
+  mslxdff -use-group off      # 仅本机，不走组员（特殊排查/限流时）
+  mslxdff -use-group on       # 恢复默认
+  MSLXDFF_USE_GROUP=0 mslxdff -d  # 临时关闭（env 覆盖）
+  ```
+
 ---
 
 ## 9. 对话终端
@@ -1171,6 +1170,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_PEER_RACE_LIMIT` | — | 组员并发竞速限制 |
 | `MSLXDFF_BAN_WINDOW_MS` | `172800000` (48h) | 加群失败封禁窗口 |
 | `MSLXDFF_BAN_THRESHOLD` | `5` | 封禁阈值（窗口内失败次数） |
+| `MSLXDFF_USE_GROUP` | `1` (on) | opencode 组员中继总开关（`0/off` 关闭后 opencode 仅本机，不走 peer/broadband/hedge；其他供应商不受影响；可被 `-use-group` state 覆盖，env 优先级更高） |
 | `MSLXDFF_HEDGE_DELAY_MS` | `1000` | 首块对冲等待（`0/off` 关闭，显式锁模型按 `via-routes.json` 单路径择路，不经 hedge） |
 | `MSLXDFF_VIA_ROUTES_FILE` | `~/.config/mslxdff/via-routes.json` | via-routes 落盘路径（随 `MSLXDFF_STATE_FILE` 派生） |
 | `MSLXDFF_VIA_ROUTE_TTL_MS` | `0` | via-routes 条目 TTL（`0`=不过期，手动 `bench --via --apply` 重跑即更新） |
@@ -1208,6 +1208,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
     "createdAt": "2026-08-27 08:00:00",
     "timezone": "Asia/Shanghai",
     "port": 8989,
+    "useGroup": true,
     "preferredModel": "big-pickle",
     "modelPicks": ["big-pickle", "openrouter/..."],
     "providerKeys": { "openrouter": ["sk-...","sk-..."] },

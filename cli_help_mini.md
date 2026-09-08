@@ -75,6 +75,7 @@
 | 全部离开 | `-leavegroup` / `--leavegroup` | 离开所有成员组 |
 | 解散组 | `-delgroup <name>` / `--delgroup` | 仅 leader 解散 |
 | 解封禁 | `-resetban [ip]` / `--resetban [ip]` | 清加组封禁 |
+| 组员开关 | `-use-group [on\|off]` / `--use-group [on\|off]` | opencode 本机失败时是否走组员（默认 on，off 则仅本机，其他供应商不受影响；`MSLXDFF_USE_GROUP` 可覆盖） |
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
 | 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |

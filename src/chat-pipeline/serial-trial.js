@@ -9,6 +9,7 @@ import { handlePeerRelay } from "../routes/chat/peer-handler.js";
 import { handleBroadbandRelay } from "../routes/chat/broadband-handler.js";
 import { handleViaRoute } from "../routes/chat/via-route-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
+import { shouldUseGroupForModel } from "../state/schemas/use-group.js";
 
 /**
  * 串行 trial — 从 engine.js 抽出的第二段：via-route 单路径 → 串行 trial →
@@ -112,7 +113,8 @@ export async function runSerialTrial(ctx, deps = {}) {
       const isStream = Boolean(body.stream);
       const d = hedgeDelayMs();
       const hasPeers = Boolean(peers) && peers.ordered().length > 0;
-      const doHedge = shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) && upRes.status === 200 && upRes.body;
+      const canUseGroup = shouldUseGroupForModel(model);
+      const doHedge = canUseGroup && shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) && upRes.status === 200 && upRes.body;
       if (doHedge) {
         const hr = await hedge({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res, hedgeDelayMs: d });
         if (hr.handled) return { done: true };
@@ -128,12 +130,20 @@ export async function runSerialTrial(ctx, deps = {}) {
       }
     }
     if (canForwardPeers) {
-      const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
-      if (pr.handled) return { done: true };
+      if (!shouldUseGroupForModel(model)) {
+        evt("group-skip", { reqId, model, reason: "useGroup=off for opencode (peer)" });
+      } else {
+        const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
+        if (pr.handled) return { done: true };
+      }
     }
     if (groups) {
-      const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, stages, res, startedAt, plugins });
-      if (br.handled) return { done: true };
+      if (!shouldUseGroupForModel(model)) {
+        evt("group-skip", { reqId, model, reason: "useGroup=off for opencode (broadband)" });
+      } else {
+        const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, stages, res, startedAt, plugins });
+        if (br.handled) return { done: true };
+      }
     }
     if (canFallback) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }
     await exhaustedLocal({ res, body, lastErr, order, handlerCtx: { ...handlerCtx, model, reqId }, evt, logCall, mark, perf0, stages, done, requested, useAuto });
