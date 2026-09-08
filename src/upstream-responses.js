@@ -17,10 +17,35 @@ export function chatToResponsesBody(chatBody) {
     return `${m.role}: ${String(c || "")}`;
   });
   const input = inputParts.join("\n\n") || "hi";
-  const out = { model: chatBody.model, input, stream: chatBody.stream !== false };
+  const out = { model: chatBody.model, input, stream: false };
   if (system) out.instructions = system;
-  if (chatBody.tools) out.tools = chatBody.tools;
-  if (chatBody.tool_choice) out.tool_choice = chatBody.tool_choice;
+  // responses 的 tools 形状为平铺 {type,name,description,parameters}，而 chat 为 {type,function:{name,...}}
+  if (Array.isArray(chatBody.tools) && chatBody.tools.length) {
+    const mapped = chatBody.tools.map((t) => {
+      if (!t || typeof t !== "object") return null;
+      if (t.type === "function" && t.function && typeof t.function === "object") {
+        const fn = t.function;
+        const nt = { type: "function", name: fn.name, description: fn.description || undefined, parameters: fn.parameters || undefined };
+        // 清理 undefined
+        Object.keys(nt).forEach((k) => nt[k] === undefined && delete nt[k]);
+        return nt.name ? nt : null;
+      }
+      // 已是平铺形态或未知形态，透传但确保 name 存在
+      if (t.name) return t;
+      return null;
+    }).filter(Boolean);
+    if (mapped.length) out.tools = mapped;
+  }
+  if (chatBody.tool_choice) {
+    const tc = chatBody.tool_choice;
+    // chat: "auto" | {type:"auto"} | {type:"function", function:{name}} -> responses: "auto" | {type:"function", name}
+    if (typeof tc === "string") out.tool_choice = tc;
+    else if (tc && typeof tc === "object") {
+      if (tc.type === "function" && tc.function?.name) out.tool_choice = { type: "function", name: tc.function.name };
+      else if (tc.type) out.tool_choice = tc;
+      else out.tool_choice = tc;
+    }
+  }
   if (chatBody.temperature != null) out.temperature = chatBody.temperature;
   if (chatBody.max_tokens != null) out.max_output_tokens = chatBody.max_tokens;
   return out;
