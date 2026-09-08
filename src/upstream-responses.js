@@ -12,9 +12,17 @@ export function chatToResponsesBody(chatBody) {
   const nonSystem = msgs.filter((m) => m.role !== "system");
   const inputParts = nonSystem.map((m) => {
     const c = m.content;
-    if (typeof c === "string") return `${m.role}: ${c}`;
-    if (Array.isArray(c)) return `${m.role}: ${c.map((x) => x.text || "").join("")}`;
-    return `${m.role}: ${String(c || "")}`;
+    let base;
+    if (typeof c === "string") base = `${m.role}: ${c}`;
+    else if (Array.isArray(c)) base = `${m.role}: ${c.map((x) => x.text || x.content || "").join("")}`;
+    else base = `${m.role}: ${String(c || "")}`;
+    // 保留 tool_calls / tool 结果，避免多轮丢失
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const tcStr = m.tool_calls.map((tc) => `${tc.function?.name || "tool"}(${tc.function?.arguments || ""})`).join("; ");
+      base += ` [tool_calls: ${tcStr}]`;
+    }
+    if (m.role === "tool" && m.tool_call_id) base += ` (call_id=${m.tool_call_id})`;
+    return base;
   });
   const input = inputParts.join("\n\n") || "hi";
   const out = { model: chatBody.model, input, stream: false };
@@ -25,25 +33,31 @@ export function chatToResponsesBody(chatBody) {
       if (!t || typeof t !== "object") return null;
       if (t.type === "function" && t.function && typeof t.function === "object") {
         const fn = t.function;
+        // 去掉 responses 不支持的 strict 等字段，parameters 原样透传
         const nt = { type: "function", name: fn.name, description: fn.description || undefined, parameters: fn.parameters || undefined };
         // 清理 undefined
         Object.keys(nt).forEach((k) => nt[k] === undefined && delete nt[k]);
         return nt.name ? nt : null;
       }
-      // 已是平铺形态或未知形态，透传但确保 name 存在
-      if (t.name) return t;
+      // 已是平铺形态或未知形态，透传但确保 name 存在，清理 strict
+      if (t.name) {
+        const { strict, ...rest } = t;
+        return rest;
+      }
       return null;
     }).filter(Boolean);
     if (mapped.length) out.tools = mapped;
   }
   if (chatBody.tool_choice) {
     const tc = chatBody.tool_choice;
-    // chat: "auto" | {type:"auto"} | {type:"function", function:{name}} -> responses: "auto" | {type:"function", name}
-    if (typeof tc === "string") out.tool_choice = tc;
-    else if (tc && typeof tc === "object") {
-      if (tc.type === "function" && tc.function?.name) out.tool_choice = { type: "function", name: tc.function.name };
-      else if (tc.type) out.tool_choice = tc;
-      else out.tool_choice = tc;
+    // responses 仅支持 "auto"（实测 required/named 均 400），一律归一为 auto
+    if (typeof tc === "string") {
+      out.tool_choice = tc === "auto" ? "auto" : "auto";
+    } else if (tc && typeof tc === "object") {
+      if (tc.type === "auto" || tc.type === "required") out.tool_choice = "auto";
+      else if (tc.type === "function") out.tool_choice = "auto";
+      else if (tc.type) out.tool_choice = "auto";
+      else out.tool_choice = "auto";
     }
   }
   if (chatBody.temperature != null) out.temperature = chatBody.temperature;
@@ -53,15 +67,22 @@ export function chatToResponsesBody(chatBody) {
 
 export function responsesToChatJson(respJson) {
   let text = "";
+  const toolCalls = [];
   for (const item of respJson.output || []) {
     if (item.type === "message" && item.role === "assistant") {
       for (const c of item.content || []) {
         if (c.type === "output_text") text += c.text || "";
         else if (c.type === "text") text += c.text || "";
       }
+    } else if (item.type === "function_call") {
+      toolCalls.push({
+        id: item.call_id || item.id || `call_${toolCalls.length}`,
+        type: "function",
+        function: { name: item.name || "", arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || "") },
+      });
     }
   }
-  if (!text) {
+  if (!text && toolCalls.length === 0) {
     for (const item of respJson.output || []) {
       if (item.type === "message") {
         const t = item.content?.[0]?.text;
@@ -69,12 +90,18 @@ export function responsesToChatJson(respJson) {
       }
     }
   }
+  const message = { role: "assistant", content: text };
+  if (toolCalls.length) {
+    message.tool_calls = toolCalls;
+    // 有 tool_calls 时 content 可为 ""，finish_reason 应为 tool_calls
+  }
+  const finish = toolCalls.length ? "tool_calls" : (respJson.status === "completed" ? "stop" : "length");
   const chatJson = {
     id: respJson.id || `resp_${Date.now()}`,
     object: "chat.completion",
     created: Math.floor((respJson.created_at || Date.now() / 1000)),
     model: respJson.model,
-    choices: [{ index: 0, finish_reason: respJson.status === "completed" ? "stop" : "length", message: { role: "assistant", content: text } }],
+    choices: [{ index: 0, finish_reason: finish, message }],
     usage: respJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
   return chatJson;
@@ -102,6 +129,7 @@ export function reshapeResponsesSse(res, fallbackModel) {
   let respModel = fallbackModel || "";
   let created = Math.floor(Date.now() / 1000);
   let hasSentRole = false;
+  const toolMap = new Map(); // output_index -> {idx, id, name}
 
   function chatChunk(delta, finish) {
     const id = respId || `resp_${Date.now()}`;
@@ -155,37 +183,75 @@ export function reshapeResponsesSse(res, fallbackModel) {
           if (data.response?.created_at) created = Math.floor(data.response.created_at);
           if (data.response?.id && !respId) respId = data.response.id;
           // 关注 output_text.delta
-          if (curEvent === "response.output_text.delta" || data.type === "response.output_text.delta") {
-            const deltaText = data.delta || "";
-            if (deltaText) {
-              if (!hasSentRole) {
-                hasSentRole = true;
-                out += chatChunk({ role: "assistant" }, null);
-              }
-              out += chatChunk({ content: deltaText }, null);
-            }
-          } else if (curEvent === "response.completed" || data.type === "response.completed") {
-            const usage = data.response?.usage || null;
-            const finish = data.response?.status === "completed" ? "stop" : null;
-            // 末帧带 usage
-            const id = respId || `resp_${Date.now()}`;
-            const payload = {
-              id,
-              object: "chat.completion.chunk",
-              created,
-              model: respModel,
-              choices: [{ index: 0, delta: {}, finish_reason: finish }],
-              usage: usage || undefined,
-            };
-            out += `data: ${JSON.stringify(payload)}\n\n`;
-          } else if (data.type === "response.output_item.added" && data.item?.type === "message") {
-            // message 开始，可发送 role
-            if (!hasSentRole) {
-              hasSentRole = true;
-              out += chatChunk({ role: "assistant" }, null);
-            }
-          }
-          // reasoning 加密块忽略
+           if (curEvent === "response.output_text.delta" || data.type === "response.output_text.delta") {
+             const deltaText = data.delta || "";
+             if (deltaText) {
+               if (!hasSentRole) {
+                 hasSentRole = true;
+                 out += chatChunk({ role: "assistant" }, null);
+               }
+               out += chatChunk({ content: deltaText }, null);
+             }
+           } else if (curEvent === "response.completed" || data.type === "response.completed") {
+             const usage = data.response?.usage || null;
+             // 若有 tool_calls，finish 应为 tool_calls
+             const hasTools = toolMap.size > 0;
+             const finish = hasTools ? "tool_calls" : (data.response?.status === "completed" ? "stop" : null);
+             // 末帧带 usage
+             const id = respId || `resp_${Date.now()}`;
+             const payload = {
+               id,
+               object: "chat.completion.chunk",
+               created,
+               model: respModel,
+               choices: [{ index: 0, delta: {}, finish_reason: finish }],
+               usage: usage || undefined,
+             };
+             out += `data: ${JSON.stringify(payload)}\n\n`;
+           } else if (data.type === "response.output_item.added" && data.item?.type === "message") {
+             // message 开始，可发送 role
+             if (!hasSentRole) {
+               hasSentRole = true;
+               out += chatChunk({ role: "assistant" }, null);
+             }
+           } else if (data.type === "response.output_item.added" && data.item?.type === "function_call") {
+             const outIdx = Number(data.output_index ?? 1);
+             const toolIdx = Math.max(0, outIdx - 1);
+             const callId = data.item?.call_id || data.item?.id || "";
+             const name = data.item?.name || "";
+             toolMap.set(outIdx, { idx: toolIdx, id: callId, name });
+             if (!hasSentRole) {
+               hasSentRole = true;
+               out += chatChunk({ role: "assistant" }, null);
+             }
+             const tc = { index: toolIdx, id: callId, type: "function", function: { name, arguments: "" } };
+             // 清理空字符串，避免 undefined
+             if (!callId) delete tc.id;
+             if (!name) delete tc.function.name;
+             out += chatChunk({ tool_calls: [tc] }, null);
+           } else if (data.type === "response.function_call_arguments.delta") {
+             const outIdx = Number(data.output_index ?? 1);
+             const entry = toolMap.get(outIdx) || { idx: Math.max(0, outIdx - 1) };
+             const deltaArgs = data.delta || "";
+             if (deltaArgs) {
+               if (!hasSentRole) {
+                 hasSentRole = true;
+                 out += chatChunk({ role: "assistant" }, null);
+               }
+               out += chatChunk({ tool_calls: [{ index: entry.idx, function: { arguments: deltaArgs } }] }, null);
+             }
+           } else if (data.type === "response.function_call_arguments.done") {
+             const outIdx = Number(data.output_index ?? 1);
+             const entry = toolMap.get(outIdx) || { idx: Math.max(0, outIdx - 1) };
+             const args = data.arguments || "";
+             if (args && !toolMap.get(outIdx)?._done) {
+               // done 可能带全量，若未通过 delta 发送过，补发
+               // 已通过 delta 流式发送则忽略，避免重复
+             }
+           } else if (data.type === "response.output_item.done" && data.item?.type === "function_call") {
+             // 可忽略，已通过 added+delta 完整
+           }
+           // reasoning 加密块忽略
         }
         if (out) controller.enqueue(encoder.encode(out));
       } catch {
