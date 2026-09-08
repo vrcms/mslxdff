@@ -30,10 +30,14 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     }
 
     // order 推导 + plugin model:select 可改
+    // 语义：指定模型 = 死锁单模型（本机→组员同款，挂了就报挂，不兜其他 picks）；只有 auto 才轮 picks
     let order;
     if (lockModel) order = [requested];
     else if (useAuto) order = auto ? await auto.candidates() : [""];
-    else order = auto ? await auto.candidatesFor(requested) : [requested];
+    else {
+      if (auto && requested) { try { await auto.candidatesFor(requested); } catch {} }
+      order = [requested];
+    }
     if (!order.length) order = [""];
     const canFallback = order.length > 1;
     const canForwardPeers = Boolean(peers) && hops < (maxHops ?? 3);
