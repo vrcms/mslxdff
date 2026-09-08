@@ -17,7 +17,7 @@ export function chatToResponsesBody(chatBody) {
     return `${m.role}: ${String(c || "")}`;
   });
   const input = inputParts.join("\n\n") || "hi";
-  const out = { model: chatBody.model, input, stream: false };
+  const out = { model: chatBody.model, input, stream: chatBody.stream !== false };
   if (system) out.instructions = system;
   if (chatBody.tools) out.tools = chatBody.tools;
   if (chatBody.tool_choice) out.tool_choice = chatBody.tool_choice;
@@ -61,4 +61,121 @@ export function toChatResponse(res, respJson) {
   const headers = new Headers(res.headers);
   headers.set("content-type", "application/json");
   return new Response(JSON.stringify(chatJson), { status: res.status, headers });
+}
+
+export function reshapeResponsesSse(res, fallbackModel) {
+  try {
+    const ct = res.headers?.get?.("content-type") || "";
+    if (res.status !== 200 || !ct.includes("text/event-stream") || !res.body) return res;
+  } catch { return res; }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buf = "";
+  let evtType = "";
+  let respId = "";
+  let respModel = fallbackModel || "";
+  let created = Math.floor(Date.now() / 1000);
+  let hasSentRole = false;
+
+  function chatChunk(delta, finish) {
+    const id = respId || `resp_${Date.now()}`;
+    const payload = {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: respModel,
+      choices: [{ index: 0, delta: delta || {}, finish_reason: finish || null }],
+    };
+    return `data: ${JSON.stringify(payload)}\n\n`;
+  }
+
+  let closed = false;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (closed) { try { controller.close(); } catch {} return; }
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          closed = true;
+          if (buf.trim()) {
+            // 残余缓冲尝试处理
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+          return;
+        }
+        buf += decoder.decode(value, { stream: true });
+        let out = "";
+        // 按 \n\n 分事件
+        while (true) {
+          const sep = buf.indexOf("\n\n");
+          if (sep < 0) break;
+          const raw = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const lines = raw.split("\n");
+          let curEvent = evtType;
+          let dataStr = "";
+          for (const line of lines) {
+            if (line.startsWith("event:")) curEvent = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+          }
+          if (!dataStr) { evtType = ""; continue; }
+          evtType = "";
+          let data;
+          try { data = JSON.parse(dataStr); } catch { continue; }
+          // 记录 id/model/created
+          if (data.response?.id) respId = data.response.id;
+          if (data.response?.model) respModel = data.response.model;
+          if (data.response?.created_at) created = Math.floor(data.response.created_at);
+          if (data.response?.id && !respId) respId = data.response.id;
+          // 关注 output_text.delta
+          if (curEvent === "response.output_text.delta" || data.type === "response.output_text.delta") {
+            const deltaText = data.delta || "";
+            if (deltaText) {
+              if (!hasSentRole) {
+                hasSentRole = true;
+                out += chatChunk({ role: "assistant" }, null);
+              }
+              out += chatChunk({ content: deltaText }, null);
+            }
+          } else if (curEvent === "response.completed" || data.type === "response.completed") {
+            const usage = data.response?.usage || null;
+            const finish = data.response?.status === "completed" ? "stop" : null;
+            // 末帧带 usage
+            const id = respId || `resp_${Date.now()}`;
+            const payload = {
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model: respModel,
+              choices: [{ index: 0, delta: {}, finish_reason: finish }],
+              usage: usage || undefined,
+            };
+            out += `data: ${JSON.stringify(payload)}\n\n`;
+          } else if (data.type === "response.output_item.added" && data.item?.type === "message") {
+            // message 开始，可发送 role
+            if (!hasSentRole) {
+              hasSentRole = true;
+              out += chatChunk({ role: "assistant" }, null);
+            }
+          }
+          // reasoning 加密块忽略
+        }
+        if (out) controller.enqueue(encoder.encode(out));
+      } catch {
+        closed = true;
+        try { controller.close(); } catch {}
+      }
+    },
+    cancel() {
+      closed = true;
+      try { reader.cancel(); } catch {}
+    },
+  });
+  const headers = new Headers(res.headers);
+  headers.set("content-type", "text/event-stream");
+  const out = new Response(body, { status: res.status, statusText: res.statusText, headers });
+  try { out._t = res._t; } catch {}
+  return out;
 }

@@ -2,6 +2,7 @@ import { joinUrl } from "../base.js";
 import { isAuthError, isInsufficientStatus } from "./auth.js";
 import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
+import { reshapeWorkbuddySse } from "./reshape.js";
 
 function buildAuthHeaders(key, auth) {
   const h = {
@@ -86,7 +87,7 @@ export function createChatService({
     let res;
     try { res = await fetchOnce(url, body, key, auth); }
     catch (e) { throw e; }
-    if (res.status < 400) return res;
+    if (res.status < 400) return reshapeWorkbuddySse(res);
     let txt = "";
     try { txt = await res.text(); } catch {}
     if (!isAuthError(res.status, txt)) return res;
@@ -105,7 +106,7 @@ export function createChatService({
     if (stillAuth || res2.status === 429 || res2.status >= 500) try { ring.onError(newKey); } catch {}
     doLog({ uid: uid2, model: _modelForLog(), totalMs: Math.round(nowMs(clock) - _t0()), balanceHit: false, error: stillAuth ? `still auth ${res2.status}` : undefined });
     if (stillAuth) throw failErr(`workbuddy auth still failing after refresh for ${uid2}: ${stillTxt.slice(0, 120)}`, _t0(), clock);
-    return res2;
+    return reshapeWorkbuddySse(res2);
   }
 
   let _t0Val = 0;

@@ -31,7 +31,8 @@ export const MAX_STREAM_MS = (() => {
 export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, fallback } = {}) {
   const t0 = performance.now();
   const contentType = upRes.headers.get("content-type") || "";
-  const isStream = Boolean(body?.stream) || contentType.includes("text/event-stream");
+  // 需同时满足：客户端要流 + 上游真的是 SSE；避免 muse-spark 聚合 JSON 被误判为流式，或 workbuddy SSE 被聚合
+  const isStream = Boolean(body?.stream) && contentType.includes("text/event-stream");
   res.statusCode = upRes.status;
   // propagate workbuddy uid / allowlist headers
   try {

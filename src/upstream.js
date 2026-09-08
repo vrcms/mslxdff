@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { isFreeModel } from "./models.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 import { createTransport } from "./transport/index.js";
-import { isResponsesModel, chatToResponsesBody, toChatResponse } from "./upstream-responses.js";
+import { isResponsesModel, chatToResponsesBody, toChatResponse, reshapeResponsesSse } from "./upstream-responses.js";
 import { uuid } from "./compat.js";
 
 function genId(prefix) {
@@ -110,7 +110,7 @@ export function createUpstreamClient({
     const reqBody = isResp ? chatToResponsesBody(body) : body;
     const t0 = performance.now();
 
-    // 首发请求（transport 已处理 network/429 等重试）
+     // 首发请求（transport 已处理 network/429 等重试）
     let res;
     try {
       res = await transport.request({
@@ -151,15 +151,21 @@ export function createUpstreamClient({
           // responses 模型需转回 chat 形状（复用 upstream-responses）
           let outAnon = anonRes;
           if (isResp && anonRes.ok) {
-            try {
-              const txt = await anonRes.text();
-              const j = JSON.parse(txt);
-              if (j && Array.isArray(j.output)) {
-                outAnon = toChatResponse(anonRes, j);
-              } else {
-                outAnon = new Response(txt, { status: anonRes.status, headers: anonRes.headers });
-              }
-            } catch { outAnon = anonRes; }
+            const ctAnon = anonRes.headers.get("content-type") || "";
+            const isStreamAnon = body?.stream !== false && ctAnon.includes("text/event-stream");
+            if (isStreamAnon) {
+              outAnon = reshapeResponsesSse(anonRes, body.model);
+            } else {
+              try {
+                const txt = await anonRes.text();
+                const j = JSON.parse(txt);
+                if (j && Array.isArray(j.output)) {
+                  outAnon = toChatResponse(anonRes, j);
+                } else {
+                  outAnon = new Response(txt, { status: anonRes.status, headers: anonRes.headers });
+                }
+              } catch { outAnon = anonRes; }
+            }
           }
           outAnon._t = { ...(outAnon._t || {}), anonTried: true, anonAttempts: i + 1, totalMs: Math.round(performance.now() - t0) };
           consecutiveHits += 1;
@@ -180,6 +186,13 @@ export function createUpstreamClient({
 
     // responses 模型成功态转 chat（复用 upstream-responses）
     if (isResp && res.ok) {
+      const ct = res.headers.get("content-type") || "";
+      const isStream = body?.stream !== false && ct.includes("text/event-stream");
+      if (isStream) {
+        const transformed = reshapeResponsesSse(res, body.model);
+        transformed._t = { ...(res._t || {}), totalMs: Math.round(performance.now() - t0) };
+        return transformed;
+      }
       try {
         const txt = await res.text();
         const j = JSON.parse(txt);
