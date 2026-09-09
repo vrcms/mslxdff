@@ -28,15 +28,12 @@ export async function handleProviderModels(id, sub, args, rest) {
   try {
     const { createGenericProvider } = await import("../../../providers/generic.js");
     const { createWorkbuddyProvider } = await import("../../../providers/workbuddy.js");
-    const { createDeepseekProvider } = await import("../../../providers/deepseek.js");
     const baseUrl = cfg?.baseUrl || (id === "workbuddy" ? "https://copilot.tencent.com" : "");
     const keys = loadProviderKeys(id);
     const auths = cfg?.auths || [];
     let provider;
     if (id === "workbuddy") {
       provider = createWorkbuddyProvider({ baseUrl, apiKeys: keys, auths, file: defaultStateFile() });
-    } else if (id === "deepseek") {
-      provider = createDeepseekProvider({ apiKeys: keys, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);

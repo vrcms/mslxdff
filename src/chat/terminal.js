@@ -3,10 +3,25 @@ import { stdin, stdout } from "node:process";
 import { formatBannerLines, formatStatsDetail, collectStats, probeGateway } from "./stats.js";
 import { createSpinner } from "./spinner.js";
 import { normalizeFullId } from "../providers/model-id.js";
+import { isFreeModel } from "../models.js";
+import { getModelsForPrompt } from "./prompt.js";
 import { loadHistory, saveHistory, clearHistory, histPath, estimateChars } from "./store.js";
+
+// -chat 只用 opencode 上游的免费模型：裸 id（无供应商前缀）+ free 池
+const FALLBACK_FREE_POOL = ["big-pickle", "mimo-v2.5-free", "ling-3.0-flash-fin-free", "deepseek-v4-flash-free", "nemotron-3.5-lightning-free", "nemotron-3-ultra-free", "muse-spark-1.3-contributor-free", "muse-spark-1.2-contributor-free"];
+
+function freePoolNow() {
+  try {
+    const ids = getModelsForPrompt().filter((id) => typeof id === "string" && !id.includes("/") && isFreeModel(id));
+    if (ids.length) return ids;
+  } catch {}
+  return FALLBACK_FREE_POOL;
+}
 
 export const SLASH_HELP = `自然语言直接说，斜杠快捷：
   /help     本帮助
+  /model    查看/锁定模型（仅限 opencode free 池；锁定后严格只用该模型，不通即报错）
+            /model mimo-v2.5-free 锁定 · /model auto 解除锁定（回默认 mimo→pickle→auto 链）
   /stats    详细统计（网关 -d 的请求/延迟/模型）
   /history  查看对话历史
   /clear    清空历史
@@ -66,6 +81,31 @@ export function handleSlash(line, ctx) {
   if (["/help", "help", "/h", "?"].includes(low)) {
     console.log(SLASH_HELP);
     return { handled: true };
+  }
+  if (low.startsWith("/model")) {
+    const arg = raw.slice(6).trim();
+    if (!arg) {
+      if (ctx.pinnedModel) console.log(`\x1b[36m当前锁定模型：${ctx.pinnedModel}（严格单模型，不通即报错）\x1b[0m`);
+      else console.log(`\x1b[90m未锁定模型 · 默认链：mimo-v2.5-free → big-pickle → 网关 auto\x1b[0m`);
+      return { handled: true };
+    }
+    if (arg === "auto" || arg === "clear" || arg === "off" || arg === "解锁" || arg === "解除") {
+      console.log(`\x1b[90m已解除模型锁定 · 回默认链：mimo-v2.5-free → big-pickle → 网关 auto\x1b[0m`);
+      return { handled: true, pinnedModel: null };
+    }
+    const id = arg;
+    if (id.includes("/")) {
+      console.log(`\x1b[31m[拒绝] ${id} 带供应商前缀 — -chat 只支持 opencode 上游模型（裸 id，直连 opencode.ai 免费池）\x1b[0m`);
+      console.log(`\x1b[90m其他供应商（deepseek/ workbuddy/ clinebot/ 等）请走网关：mslxdff -model set <id> 或 curl 本机 /v1/chat/completions\x1b[0m`);
+      return { handled: true };
+    }
+    if (!isFreeModel(id) || !freePoolNow().includes(id)) {
+      console.log(`\x1b[31m[拒绝] ${id} 不在 opencode free 池 — -chat 只能用 opencode 免费模型\x1b[0m`);
+      console.log(`\x1b[90m当前 free 池：${freePoolNow().join(", ")}\x1b[0m`);
+      return { handled: true };
+    }
+    console.log(`\x1b[36m[已锁定] ${id} · 严格只用该模型，不通即报错（不自动换模型）· 解除：/model auto\x1b[0m`);
+    return { handled: true, pinnedModel: id };
   }
   if (["/stats", "/status", "stats", "status"].includes(low)) {
     console.log(formatStatsDetail());

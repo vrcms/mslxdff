@@ -236,8 +236,9 @@ test("http 429 records limit status, later success resets to normal", async () =
     },
   });
   try {
+    // 显式指定 = 死锁单模型：429 直接透传给客户端（不 fallback 到 mimo）
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 429);
     const st = auto.errors()["deepseek-v4-flash-free"];
     assert.equal(st.status, "limit");
     assert.equal(st.code, 429);
@@ -405,7 +406,7 @@ test("auto: all candidates fail, last upstream error relayed and all recorded", 
   }
 });
 
-test("explicit model falls back on error and records it", async () => {
+test("explicit model error relays upstream 400 without fallback (deadlock single model)", async () => {
   const seen = [];
   const auto = createAutoSelector({ loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {}, cooldownMs: 60_000 });
   const app = await boot({
@@ -424,17 +425,15 @@ test("explicit model falls back on error and records it", async () => {
   });
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
-    assert.equal(res.status, 200);
-    const json = await res.json();
-    assert.equal(json.model, "mimo-v2.5-free");
-    assert.deepEqual(seen, ["deepseek-v4-flash-free", "mimo-v2.5-free"], "falls back within the same request");
+    assert.equal(res.status, 400);
+    assert.deepEqual(seen, ["deepseek-v4-flash-free"], "显式指定失败即报错，不尝试其他模型");
     assert.ok(auto.errors()["deepseek-v4-flash-free"]);
   } finally {
     await app.close();
   }
 });
 
-test("explicit model that errors falls back to the next candidate", async () => {
+test("explicit model that errors does not fall back to other candidates", async () => {
   const seen = [];
   const auto = createAutoSelector({ loadCandidates: async () => ["big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {}, latencies: {}, cooldownMs: 60_000, file: tmpStateFile() });
   const app = await boot({
@@ -453,11 +452,8 @@ test("explicit model that errors falls back to the next candidate", async () => 
   });
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
-    assert.equal(res.status, 200);
-    const json = await res.json();
-    // with no latency history, fallback respects original order
-    assert.equal(json.model, "big-pickle");
-    assert.deepEqual(seen, ["deepseek-v4-flash-free", "big-pickle"]);
+    assert.equal(res.status, 400);
+    assert.deepEqual(seen, ["deepseek-v4-flash-free"], "显式指定 = 死锁单模型，order 也不含其他候选");
   } finally {
     await app.close();
   }
@@ -516,7 +512,7 @@ test("explicit model outside cooldown is tried first again", async () => {
   }
 });
 
-test("all explicit candidates fail, last upstream error relayed", async () => {
+test("explicit model 503 relays last upstream error without fallback", async () => {
   const seen = [];
   const auto = createAutoSelector({ loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"], errors: {}, cooldownMs: 60_000 });
   const app = await boot({
@@ -531,9 +527,9 @@ test("all explicit candidates fail, last upstream error relayed", async () => {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 503);
     assert.deepEqual(await res.json(), { error: "down" });
-    assert.deepEqual(seen, ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+    assert.ok(seen.length >= 1 && seen.every((m) => m === "deepseek-v4-flash-free"), "显式指定不 fallback，mimo 不应被打");
     assert.ok(auto.errors()["deepseek-v4-flash-free"]);
-    assert.ok(auto.errors()["mimo-v2.5-free"]);
+    assert.equal(auto.errors()["mimo-v2.5-free"], undefined);
   } finally {
     await app.close();
   }

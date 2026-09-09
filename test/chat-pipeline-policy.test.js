@@ -51,4 +51,17 @@ describe("chat-pipeline/policy - 纯函数 PolicyStage", () => {
     const r = analyzePolicy({ headers: { "x-mslxdff-hops": "2" }, body: { model: "a" } });
     assert.equal(r.hops, 2);
   });
+  it("x-mslxdff-auto-provider 头解析（opencode scope）", () => {
+    const r = analyzePolicy({ headers: { "x-mslxdff-auto-provider": "opencode" }, body: { model: "auto" } });
+    assert.equal(r.autoProvider, "opencode");
+    assert.equal(r.useAuto, true);
+  });
+  it("无 auto-provider 头时为 null", () => {
+    const r = analyzePolicy({ headers: {}, body: { model: "auto" } });
+    assert.equal(r.autoProvider, null);
+  });
+  it("auto-provider 头大小写归一", () => {
+    const r = analyzePolicy({ headers: { "X-Mslxdff-Auto-Provider": " OpenCode " }, body: { model: "auto" } });
+    assert.equal(r.autoProvider, "opencode");
+  });
 });

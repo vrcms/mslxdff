@@ -31,6 +31,12 @@ export async function startRepl({ singleShot } = {}) {
     curlTool,
     onTrace: trace,
   });
+  let pinnedModel = null; // /model 锁定的模型：严格单模型，不通即报错（null=默认链）
+
+  function applyPrompt() {
+    const label = pinnedModel || CHAT_PREFERRED.split("-")[0];
+    rl.setPrompt(`\x1b[36m${label}>\x1b[0m `);
+  }
 
   if (singleShot) {
     const text = String(singleShot).trim();
@@ -47,22 +53,24 @@ export async function startRepl({ singleShot } = {}) {
 
   await printBanner();
   const rl = createReadline(`\x1b[36m${CHAT_PREFERRED.split("-")[0]}>\x1b[0m `);
+  applyPrompt();
   rl.prompt();
   for await (const line of rl) {
     const raw = String(line || "").trim();
     if (!raw) { rl.prompt(); continue; }
-    const slash = handleSlash(raw, { messages, system });
+    const slash = handleSlash(raw, { messages, system, pinnedModel });
     if (slash.handled) {
       if (slash.exit) { console.log("再见"); saveHistory(messages.slice(1)); rl.close(); return; }
       if (slash.messages) messages = slash.messages;
+      if ("pinnedModel" in slash) { pinnedModel = slash.pinnedModel; applyPrompt(); }
       rl.prompt();
       continue;
     }
     try {
-      const spinner = createSpinner("已发送给 AI，等待回复中");
+      const spinner = createSpinner(pinnedModel ? `已发送给 ${pinnedModel}，等待回复中` : "已发送给 AI，等待回复中");
       spinner.start();
       let r;
-      try { r = await engine.runTurn(raw, messages); }
+      try { r = await engine.runTurn(raw, messages, pinnedModel); }
       finally { spinner.stop(`\x1b[90m✓ AI 已回复\x1b[0m`); }
       if (r.text && !r.text.startsWith("OK") && !r.text.startsWith("FAIL")) console.log(r.text);
       if (r.model || r.latency) printFooter(r);

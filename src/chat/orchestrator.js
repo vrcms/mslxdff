@@ -53,6 +53,13 @@ export function createOrchestrator({
 
   async function chatWithFallback(opts) {
     if (chatWithFallbackImpl) return chatWithFallbackImpl(opts);
+    // 严格模式：显式指定了具体模型（非 auto/空）→ 只用该模型，失败即报错，绝不降级到其他模型
+    const pinned = String(opts?.model || "").trim();
+    if (pinned && pinned.toLowerCase() !== "auto") {
+      const r = await safeChatOnce(opts, pinned);
+      if (r.ok) return { ...r, model: pinned };
+      return { ok: false, error: `指定模型 ${pinned} 失败：${r.error}（已锁定不自动换模型；如需自动择优请输入 /model auto）`, status: r.status || 502, pinnedModel: pinned };
+    }
     const TRACE = env.MSLXDFF_CHAT_TRACE !== "0";
     const HEDGE_MS = (() => {
       const v = Number(env.MSLXDFF_HEDGE_DELAY_MS);

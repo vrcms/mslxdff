@@ -89,6 +89,38 @@ describe("C3 sse 聚合", () => {
     assert.match(r.message.content, /gateway hello/);
     assert.equal(r.viaGateway, true);
   });
+
+  test("gateway 请求默认带 x-mslxdff-auto-provider: opencode 头（-chat 只用 opencode 上游）", async () => {
+    let seenHeaders = null;
+    const fakeFetch = async (_url, init) => {
+      seenHeaders = init.headers;
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "hi" } }], model: "mimo-v2.5-free" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { chatViaGateway } = createGatewayClient({
+      fetchImpl: fakeFetch,
+      loadToken: async () => "tok",
+      getPort: () => 8989,
+      defaultPort: 8989,
+      readModelsJson: async () => ({ data: [] }),
+      gatewayTimeoutMs: 25000,
+      env: { MSLXDFF_CHAT_TRACE: "0" },
+    });
+    await chatViaGateway({ messages: [{ role: "user", content: "hi" }] });
+    assert.equal(seenHeaders["x-mslxdff-auto-provider"], "opencode");
+    // 显式传 autoProvider=null 时不带头
+    let seen2 = null;
+    const { chatViaGateway: gw2 } = createGatewayClient({
+      fetchImpl: async (_u, init) => { seen2 = init.headers; return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], model: "m" }), { status: 200, headers: { "Content-Type": "application/json" } }); },
+      loadToken: async () => "tok",
+      getPort: () => 8989,
+      defaultPort: 8989,
+      readModelsJson: async () => ({ data: [] }),
+      gatewayTimeoutMs: 25000,
+      env: { MSLXDFF_CHAT_TRACE: "0" },
+    });
+    await gw2({ messages: [{ role: "user", content: "hi" }], autoProvider: null });
+    assert.equal("x-mslxdff-auto-provider" in seen2, false);
+  });
 });
 
 describe("C3 gateway provider 回溯", () => {

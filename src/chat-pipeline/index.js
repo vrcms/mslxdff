@@ -3,6 +3,7 @@ import { analyzePolicy } from "./policy.js";
 import { planRoute } from "./planner.js";
 import { createEngine } from "./engine.js";
 import { runHook } from "../plugins.js";
+import { isFreeModel } from "../models.js";
 import { clientIp, summarizePrompt } from "../routes/helpers.js";
 
 /**
@@ -21,7 +22,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const mark = (name) => stages.push([name, Math.round(performance.now() - perf0)]);
 
     const policy = analyzePolicy({ headers: req?.headers || {}, body: req?.body || {} });
-    const { requested, useAuto, lockModel, hops, shareKeys, workbuddyUid, aliasInfo } = policy;
+    const { requested, useAuto, autoProvider, lockModel, hops, shareKeys, workbuddyUid, aliasInfo } = policy;
     mark("parsed");
     if (aliasInfo) { try { res?.setHeader?.("x-mslxdff-alias", aliasInfo); } catch {} }
     // mslxdff/ 前缀或 alias 命中时，把 body.model 改写为还原后的模型（与原 gateway 语义一致）
@@ -31,10 +32,20 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
 
     // order 推导 + plugin model:select 可改
     // 语义：指定模型 = 死锁单模型（本机→组员同款，挂了就报挂，不兜其他 picks）；只有 auto 才轮 picks
+    // x-mslxdff-auto-provider 头可把 auto 候选限定到单供应商（opencode=裸 id 免费池），-chat 默认带
     let order;
     if (lockModel) order = [requested];
-    else if (useAuto) order = auto ? await auto.candidates() : [""];
-    else {
+    else if (useAuto) {
+      let cands = auto ? await auto.candidates() : [""];
+      if (autoProvider) {
+        const before = cands.length;
+        cands = cands.filter((m) => (autoProvider === "opencode"
+          ? !String(m).includes("/") && isFreeModel(m)
+          : String(m).startsWith(`${autoProvider}/`)));
+        evt("auto-scope", { reqId, provider: autoProvider, before, after: cands.length });
+      }
+      order = cands;
+    } else {
       if (auto && requested) { try { await auto.candidatesFor(requested); } catch {} }
       order = [requested];
     }
