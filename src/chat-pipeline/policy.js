@@ -13,6 +13,8 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
   const shareKeys = parseShareKeysHeader(headers[SHARE_KEYS_HEADER] || headers["x-mslxdff-share-keys"] || "");
   const workbuddyUid = (headers["x-mslxdff-workbuddy-uid"] || headers["x-workbuddy-uid"] || "").toString().trim();
   const lockModel = (headers["x-mslxdff-model-lock"] || headers["X-Mslxdff-Model-Lock"] || "").toString();
+  // auto 范围限定：x-mslxdff-auto-provider: opencode → auto 候选只留该供应商（opencode=裸 id 免费池）
+  const autoProvider = (headers["x-mslxdff-auto-provider"] || headers["X-Mslxdff-Auto-Provider"] || "").toString().trim().toLowerCase() || null;
   const rawModel = body.model || "";
 
   let normalizedRequested = normalizeModel(lockModel || rawModel || "");
@@ -64,6 +66,7 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
     normalizedForUpstream,
     aliasInfo,
     useAuto,
+    autoProvider,
     shareKeys,
     workbuddyUid: extractedUid,
     lockModel,

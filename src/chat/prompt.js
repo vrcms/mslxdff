@@ -22,8 +22,8 @@ function readModels() {
       if (ids.length) return ids;
     }
   } catch {}
-  // 兜底：硬编码常见 free 模型，供离线时参考
-  return ["mimo-v2.5-free", "big-pickle", "deepseek-v4-flash-free", "hy3-free", "laguna-free", "kimi-k2-free", "nemotron-3-nano-free", "big-pickle"];
+  // 兜底：硬编码常见 free 模型，供离线时参考（2026-09 实测 /zen/v1/models free 池）
+  return ["big-pickle", "mimo-v2.5-free", "ling-3.0-flash-fin-free", "deepseek-v4-flash-free", "nemotron-3.5-lightning-free", "nemotron-3-ultra-free", "muse-spark-1.3-contributor-free", "muse-spark-1.2-contributor-free"];
 }
 
 export function buildSystemPrompt({ modelsOverride } = {}) {

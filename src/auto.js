@@ -29,10 +29,10 @@ export const DEFAULT_AUTO_MODELS = [
   PREFERRED_MODEL,
   "mimo-v2.5-free",
   "deepseek-v4-flash-free",
-  "ling-3.0-flash-free",
+  "ling-3.0-flash-fin-free",
   "nemotron-3-ultra-free",
-  "north-mini-code-free",
-  "laguna-s-2.1-free",
+  "nemotron-3.5-lightning-free",
+  "muse-spark-1.3-contributor-free",
 ].filter((id, i, arr) => id && arr.indexOf(id) === i);
 
 export function isAutoModel(model) {

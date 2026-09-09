@@ -18,8 +18,7 @@ function shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, mod
   if (!canForwardPeers) return false;
   if (!hasPeers) return false;
   if (!d || d <= 0) return false;
-  // deepseek = 本机私有凭据供应商（组员节点没有凭据），对冲必败且 both-fail 会误杀本地慢首块流（reasoner 思考 3-30s），不走组员
-  if (String(model || "").startsWith("deepseek/")) return false;
+  // 不做供应商级禁对冲特判：对冲仅按 useGroup/流式/peer 可用性决定
   // muse-spark 走 /responses 流式（event: 包装 + 加密 reasoning），组员旧版无此整形且聚合 JSON 带错 header，必抢赢本地慢首块，需本地直出
   if (String(model || "").toLowerCase().startsWith("muse-spark")) return false;
   return true;

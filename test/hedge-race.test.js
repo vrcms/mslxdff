@@ -46,11 +46,8 @@ describe("hedge config", () => {
     assert.equal(shouldHedge({ isStream: true, canForwardPeers: true, hedgeDelayMs: 1000, hasPeers: true }), true);
   });
 
-  test("shouldHedge: deepseek 本机私有凭据模型禁对冲（组员无凭据必败）", () => {
+  test("shouldHedge: 供应商级禁对冲特判已随 deepseek 供应商移除（按通用规则判定）", () => {
     const base = { isStream: true, canForwardPeers: true, hedgeDelayMs: 1000, hasPeers: true };
-    assert.equal(shouldHedge({ ...base, model: "deepseek/deepseek-reasoner-free" }), false);
-    assert.equal(shouldHedge({ ...base, model: "deepseek/deepseek-reasoner-expert-free" }), false);
-    assert.equal(shouldHedge({ ...base, model: "deepseek/deepseek-chat-free" }), false);
     assert.equal(shouldHedge({ ...base, model: "opencode/big-pickle" }), true);
     assert.equal(shouldHedge({ ...base, model: "workbuddy/coding-glm-5.3-free" }), true);
   });

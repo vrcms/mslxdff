@@ -41,7 +41,7 @@ export function createGatewayClient({
     return { data: [] };
   });
 
-  async function chatViaGateway({ messages, tools }) {
+  async function chatViaGateway({ messages, tools, autoProvider = "opencode" }) {
     const TRACE = env.MSLXDFF_CHAT_TRACE !== "0";
     const t0 = TRACE ? performance.now() : 0;
     let port = defaultPort;
@@ -72,7 +72,11 @@ export function createGatewayClient({
       const timer = setTimeout(() => controller.abort(), gatewayTimeoutMs);
       const res = await _fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: {
+          "Content-Type": "application/json",
+          ...(autoProvider ? { "x-mslxdff-auto-provider": autoProvider } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });

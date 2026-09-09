@@ -54,13 +54,6 @@ export function filterBenchModels({ providerId, allowed, picks, allowAny = false
 }
 
 export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, loadKeys, loadAllowed, loadBaseUrl, loadAllowAny, loadModelPicks, getOnlinePeersFn }) {
-  // DeepSeek 防禁言：via 也不测（显式传入直接返回；all 形态在 targetIds 收集处排除）
-  if (String(providerId || "").trim().toLowerCase() === "deepseek") {
-    const msg = "跳过 deepseek bench-via —— 网页通道易触发禁言/频率风控，体检用 mslxdff -provider deepseek health";
-    if (opts.json) console.log(JSON.stringify({ meta: { at: new Date().toISOString(), samples: opts.samples, timeout: opts.timeoutMs, includeOpencode: false, peers: [], opencodeSkipped: true, deepseekSkipped: true }, results: [], advice: msg }, null, 2));
-    else console.log(msg);
-    return;
-  }
   const { getOnlinePeers, orchestrateVia, resolveIncludeOpencode } = await import("../../../bench/via.js");
   const peers = await (typeof getOnlinePeersFn === "function" ? getOnlinePeersFn() : getOnlinePeers());
   if (!peers.length) {
@@ -106,8 +99,6 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
     const ids = new Set(Object.keys(configs));
     ids.add("opencode"); ids.add("openrouter");
     for (const pid of [...ids]) {
-      // DeepSeek 网页通道防禁言：all 形态直接排除，即使 allowlist 非空也不进候选
-      if (String(pid).toLowerCase() === "deepseek") continue;
       const allowed = loadAllowed(pid) || [];
       if (allowed.length) targetIds.push(pid);
     }

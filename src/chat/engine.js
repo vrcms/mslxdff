@@ -43,7 +43,7 @@ export function createEngine({
     return next;
   }
 
-  async function runTurn(userText, messages) {
+  async function runTurn(userText, messages, modelOverride) {
     const tools = GTOOLS();
     messages.push({ role: "user", content: userText });
     let loops = 0;
@@ -70,7 +70,7 @@ export function createEngine({
       const tCall = performance.now();
       let res;
       const activeTools = forceNoTools ? [] : tools;
-      res = await CWF({ messages, tools: activeTools });
+      res = await CWF({ messages, tools: activeTools, model: modelOverride || undefined });
       if (forceNoTools && res.ok && res.message?.tool_calls?.length) {
         onTrace(`[guard] 禁工具模式下仍收到 tool_calls，已拦截`);
         res.message.tool_calls = [];

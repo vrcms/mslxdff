@@ -67,7 +67,6 @@
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
-| `mslxdff -provider deepseek login [--token <userToken> \| <email\|mobile> <password>]` | `--provider` | DeepSeek 官网免费对话接入（ADR-0014）：贴浏览器 `userToken` 或账密登录（Android 协议），落盘 `providerConfigs.deepseek.keys`。模型 `deepseek/{chat,reasoner,chat-search,reasoner-search,chat-expert,reasoner-expert}-free`（快速=不传 model_type，专家=model_type:"expert"）；无参数打印取 token 图文引导 | 是 | 重启生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -646,38 +645,6 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider clinebot bench --json  # 测速 deepseek-v4-flash 是否 200
   ```
 
-#### `mslxdff -provider deepseek login`（DeepSeek 官网免费对话接入：userToken / 账密，ADR-0014）
-
-- **语法**：
-  ```bash
-  mslxdff -provider deepseek login --token <userToken>      # 方式 1（推荐）：浏览器贴 token，免密码
-  mslxdff -provider deepseek login you@example.com <password>   # 方式 2：邮箱账密
-  mslxdff -provider deepseek login 13800138000 <password>       # 方式 2：手机号账密
-  mslxdff -provider deepseek login                          # 无参数：打印取 token 图文引导
-  ```
-- **userToken 怎么拿**（方式 1）：浏览器登录 https://chat.deepseek.com → F12 → Application → Local Storage → `https://chat.deepseek.com` → 复制 `userToken` 值。
-- **作用**：把 chat.deepseek.com 的免费网页对话包装成 OpenAI 兼容模型（Android 协议通道，`device_id` 任意字符串免浏览器指纹）。token 落盘 `providerConfigs.deepseek.keys`（多账号自动轮换，401/403/429/验证码自动切号冷却）。每次对话自动：建无痕会话 → 算 PoW（DeepSeekHashV1，纯 JS ~0.6s）→ 补全 → 删会话。
-- **模型**（`model` 字段带 `deepseek/` 前缀，对应官网 UI 模式）：
-  | 模型 | 官网 UI | 上游 body |
-  |---|---|---|
-  | `deepseek/deepseek-chat-free` | 快速（不思考） | `thinking_enabled:false`（不传 model_type） |
-  | `deepseek/deepseek-reasoner-free` | 快速 + 深度思考 | `thinking_enabled:true` |
-  | `deepseek/deepseek-chat-search-free` | 快速 + 联网 | `search_enabled:true` |
-  | `deepseek/deepseek-reasoner-search-free` | 快速 + 深度思考 + 联网 | 两者同开 |
-  | `deepseek/deepseek-chat-expert-free` | 专家（不思考） | `model_type:"expert"` |
-  | `deepseek/deepseek-reasoner-expert-free` | 专家 + 深度思考 | `model_type:"expert"` + thinking |
-
-  思考内容走 `reasoning_content`；`-free` 后缀对齐网关免费过滤（ADR-0002），上游 flags 按名字 includes 判定不受后缀影响。
-- **限制**：单账号同时仅 1 路输出（多账号横向扩并发）；触发数美验证码时报人话引导换号；v1 不支持 tools/文件上传。
-- **示例**：
-  ```bash
-  mslxdff -provider deepseek login --token <userToken>
-  mslxdff -provider deepseek allowAny on    # 默认 allowlist 空=全 blocked，需放行
-  mslxdff -restart
-  curl http://127.0.0.1:8989/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
-    -d '{"model":"deepseek/deepseek-reasoner","messages":[{"role":"user","content":"你好"}]}'
-  ```
-
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
 
 - **语法**：
@@ -1060,7 +1027,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 ### `-use-group [on|off]` / `--use-group [on|off]`
 
 - **语法**：`mslxdff -use-group`（查询）或 `mslxdff -use-group on|off`（设置）/ `--use-group=off`
-- **作用**：控制 **opencode 供应商**在本机上游失败时是否走组员网络（peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**仅 opencode 裸 id 与 `opencode/` 前缀模型**在本机失败时不再尝试组员，**其他供应商（workbuddy/deepseek/通用等）不受影响**仍可走组员。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
+- **作用**：控制 **opencode 供应商**在本机上游失败时是否走组员网络（peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**仅 opencode 裸 id 与 `opencode/` 前缀模型**在本机失败时不再尝试组员，**其他供应商（workbuddy/clinebot/通用等）不受影响**仍可走组员。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
 - **输出**：
   - 查询：`use-group: on (effective) / stored: on / env ...`
   - 设置：`use-group set to off (stored in state.json) / opencode 供应商：本机失败时不再通过组员网络请求上游`
@@ -1079,9 +1046,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 ### `-chat ["prompt"]` / `--chat ["prompt"]`
 
 - **语法**：`mslxdff -chat`（进入常驻 REPL）或 `mslxdff -chat "把 hy3 设为默认模型"`（单次执行后退出）
-- **作用**：自然语言转精确 CLI 命令并执行。背后是 `src/chat/*` 独立模块，**三级兜底 `mimo-v2.5-free → big-pickle → 本地网关 auto:8989`**（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，均失败则自动切本地 `http://127.0.0.1:<port>/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer 完整链路，30s 超时，`gateway no choice` 等会透传），把用户说的简称（如 `hy3`）自行查可用模型列表补全为全称（如 `hy3-free`）再调用工具。失败时 REPL 尾部会显示 `mimo→big-pickle` 或 `gateway auto` 的 `fallback/gateway-fallback` 标记及耗时。
+- **作用**：自然语言转精确 CLI 命令并执行。背后是 `src/chat/*` 独立模块，**三级兜底 `mimo-v2.5-free → big-pickle → 本地网关 auto:8989`**（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，均失败则自动切本地 `http://127.0.0.1:<port>/v1/chat/completions` 的 `auto` 择优——**带 `x-mslxdff-auto-provider: opencode` 头，auto 候选也限定在 opencode 免费池**，不会用到 workbuddy/deepseek 等其他供应商；30s 超时，`gateway no choice` 等会透传），把用户说的简称（如 `hy3`）自行查可用模型列表补全为全称（如 `hy3-free`）再调用工具。失败时 REPL 尾部会显示 `mimo→big-pickle` 或 `gateway auto` 的 `fallback/gateway-fallback` 标记及耗时。**`/model <id>` 锁定后退出三级兜底**：严格只用该模型，失败即报错不换模型（opencode 上游 free 池限定，见下）。**-chat 整体只支持 opencode 上游模型**（直连 opencode.ai 免费池），其他供应商（deepseek/ workbuddy/ clinebot/ 等）走网关 `curl` 探活。
 - **交互**：
-  - `mimo> ` 提示符，支持上下历史、`/help`（看可用说法）、`/clear`（清历史）、`/history`（看条数）、`/exit`/`quit`/`退出`/`Ctrl+D` 退出。
+  - `mimo> ` 提示符，支持上下历史、`/help`（看可用说法）、`/model`（查看/锁定模型）、`/clear`（清历史）、`/history`（看条数）、`/exit`/`quit`/`退出`/`Ctrl+D` 退出。
+  - `/model <id>`：锁定会话模型，**仅限 opencode 上游免费池**（裸 id 无供应商前缀，`-free` 后缀或 `big-pickle`，共 8 个：`mimo-v2.5-free`、`big-pickle`、`ling-3.0-flash-fin-free`、`deepseek-v4-flash-free`、`nemotron-3.5-lightning-free`、`nemotron-3-ultra-free`、`muse-spark-1.3-contributor-free`、`muse-spark-1.2-contributor-free`）；**带供应商前缀（`deepseek/chat-free` 等）一律拒绝**，非 free 模型拒绝并列当前 free 池。锁定后**严格单模型**：该模型失败直接报错（含失败原因与"不自动换模型"提示），绝不降级到 mimo/big-pickle/auto；提示符变为 `<id>>`；`/model auto`（或 `clear`）解除回默认三级链；`/model` 无参显示当前锁定。锁定为会话内存态，退出 REPL 即失效。
   - 单次模式：`mslxdff -chat "查看组列表"` 直接执行一次后退出，适合管道/脚本。
 - **工具**（3 类 + 纯回答）：
   - `run_command`：执行 `cli_help.md` 所列任意命令（不含 `mslxdff` 前缀），**仅拦截 `-uninstall`**，`-stop`/`-port` 等可执行；模糊匹配与精确性由大模型负责，进程侧不做二次归一。
@@ -1218,7 +1186,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
     "groups": { "my@mslxd": { "members": { "leader": {...}, "http://...": {...} } } },
     "groupsJoined": [{ "name": "my@mslxd", "leaderUrl": "http://...", "myUrl": "...", "memberName": "...", "kind": "static|broadband" }],
     "bans": { "1.2.3.4": 1234567890 },
-    "modelErrors": { "deepseek-...": { "status": "error", "at": 123, "code": 429 } },
+    "modelErrors": { "some-model-free": { "status": "error", "at": 123, "code": 429 } },
     "modelLatencies": { "big-pickle": 123 }
   }
   ```
