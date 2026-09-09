@@ -35,7 +35,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   const workbuddyUid = ctx.workbuddyUid ?? ctx.policy?.workbuddyUid ?? null;
 
   let viaRouteLastErr = null;
-  if (!useAuto && requested && requested.includes("/") && canForwardPeers && !lockModel && peers) {
+  if (!useAuto && requested && requested.includes("/") && canForwardPeers && !lockModel && peers && shouldUseGroupForModel(requested)) {
     try {
       const vr = await viaRoute({ model: requested, body, peers, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res, requested, useAuto, lockModel, auto });
       if (vr.handled) return { done: true };
@@ -131,7 +131,7 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     if (canForwardPeers) {
       if (!shouldUseGroupForModel(model)) {
-        evt("group-skip", { reqId, model, reason: "useGroup=off for opencode (peer)" });
+        evt("group-skip", { reqId, model, reason: "useGroup=off (peer)" });
       } else {
         const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
         if (pr.handled) return { done: true };
@@ -139,7 +139,7 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     if (groups) {
       if (!shouldUseGroupForModel(model)) {
-        evt("group-skip", { reqId, model, reason: "useGroup=off for opencode (broadband)" });
+        evt("group-skip", { reqId, model, reason: "useGroup=off (broadband)" });
       } else {
         const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, stages, res, startedAt, plugins });
         if (br.handled) return { done: true };

@@ -82,6 +82,73 @@ test("cline: listModels only returns free array with provider prefix", async () 
   assert.deepEqual(models.map((m) => m.id), ["clinebot/deepseek/deepseek-v4-flash", "clinebot/poolside/laguna-s-2.1:free"]);
 });
 
+test("cline: models 401 falls back to bundled free list incl glm-5.3-flash", async () => {
+  let seenUrl = "";
+  async function fetchImpl(url, opts) {
+    if (String(url).includes("recommended-models")) {
+      seenUrl = String(url);
+      return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    }
+    return new Response("", { status: 404 });
+  }
+  const p = createClineProvider({ id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl });
+  const models = await p.listModels();
+  assert.ok(seenUrl.endsWith("/api/v1/ai/cline/recommended-models"), `models url must be normalized, got ${seenUrl}`);
+  const ids = models.map((m) => m.id);
+  assert.ok(ids.includes("clinebot/z-ai/glm-5.3-flash"), "fallback must include glm-5.3-flash");
+});
+
+test("cline: refresh URL not doubled when baseUrl already has /api/v1", async () => {
+  const { createAuthPool } = await import("../src/providers/cline/auth.js");
+  let seenUrl = "";
+  const pool = createAuthPool({
+    id: "clinebot",
+    baseUrl: "https://api.cline.bot/api/v1",
+    keys: [DUMMY_RT],
+    fetchImpl: async (url, opts) => {
+      seenUrl = String(url);
+      return new Response(JSON.stringify({ data: { accessToken: "at_ok", refreshToken: DUMMY_RT, expiresAt: Date.now() + 600000 } }), { status: 200 });
+    },
+  });
+  const at = await pool.refreshOne(pool.getAccounts()[0]);
+  assert.equal(at, "at_ok");
+  assert.ok(seenUrl === "https://api.cline.bot/api/v1/auth/refresh", `refresh url must not double, got ${seenUrl}`);
+});
+
+test("cline: version-hint 401 must not mark dead (only invalid_grant kills)", async () => {
+  const { createAuthPool, isInvalidGrant } = await import("../src/providers/cline/auth.js");
+  const versionMsg = "Unauthorized: Please make sure you're using the latest version of Cline and re-authenticate your Cline account.";
+  assert.equal(isInvalidGrant(versionMsg, 401), false, "version 401 must not be invalid_grant");
+  assert.equal(isInvalidGrant('{"error":"invalid_grant"}', 400), true);
+  const pool = createAuthPool({
+    id: "clinebot",
+    baseUrl: "https://api.cline.bot/api/v1",
+    keys: [DUMMY_RT],
+    fetchImpl: async () => new Response(versionMsg, { status: 401 }),
+  });
+  await assert.rejects(() => pool.refreshOne(pool.getAccounts()[0]), /refresh_failed/);
+  assert.equal(pool.getAccounts()[0].dead, undefined, "version 401 must cool down, not kill");
+});
+
+test("cline: invalid_grant marks account dead, transient failure does not", async () => {
+  const { createAuthPool } = await import("../src/providers/cline/auth.js");
+  const deadPool = createAuthPool({
+    id: "clinebot",
+    keys: [DUMMY_RT],
+    fetchImpl: async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+  });
+  await assert.rejects(() => deadPool.refreshOne(deadPool.getAccounts()[0]), /invalid_grant/);
+  assert.equal(deadPool.getAccounts()[0].dead, true, "invalid_grant must mark dead");
+  await assert.rejects(() => deadPool.refreshOne(deadPool.getAccounts()[0]), /invalid_grant/);
+  const livePool = createAuthPool({
+    id: "clinebot",
+    keys: [DUMMY_RT],
+    fetchImpl: async () => new Response("boom", { status: 500 }),
+  });
+  await assert.rejects(() => livePool.refreshOne(livePool.getAccounts()[0]), /refresh_failed/);
+  assert.equal(livePool.getAccounts()[0].dead, undefined, "transient 500 must not mark dead");
+});
+
 test("cline: refresh failure cools account and retry hits next", async () => {
   let n = 0;
   async function fetchImpl(url, opts) {

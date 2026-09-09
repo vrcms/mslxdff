@@ -155,9 +155,14 @@ export function createChatService({
     const sessionId = genSessionId();
     const isStream = body?.stream === true;
     const upstreamModel = stripProviderPrefix(model);
+    // token 口径双写：对标官方 withMaxCompletionTokensForReasoningModels——
+    // cline 上游默认 reasoning_effort high，推理模型认 max_completion_tokens，
+    // 只发 max_tokens 会被部分通道拒；双写兼容最稳。
+    const tokLimit = body?.max_tokens || body?.max_completion_tokens || 4096;
     const upstreamBody = {
       model: upstreamModel,
-      max_tokens: body?.max_tokens || body?.max_completion_tokens || 4096,
+      max_tokens: tokLimit,
+      max_completion_tokens: tokLimit,
       session_id: sessionId,
       reasoning_effort: body?.reasoning_effort || body?.reasoningEffort || "high",
       messages: body?.messages || [],

@@ -35,19 +35,8 @@ export function getEffectiveUseGroup({ file = defaultStateFile() } = {}) {
   return loadUseGroup({ file });
 }
 
-// 仅对 opencode 供应商生效：opencode 的模型为裸 id 或 opencode/ 前缀
+// 全局开关：off 则所有供应商都不走组员网络（via-route/hedge/peer/broadband 全禁），仅本机直连
 export function shouldUseGroupForModel(model, { file = defaultStateFile() } = {}) {
-  const m = String(model || "").trim();
-  if (!m) return getEffectiveUseGroup({ file });
-  // 带前缀：判断是否为 opencode
-  if (m.includes("/")) {
-    const head = m.split("/")[0].trim().toLowerCase();
-    if (head === "opencode" || head === "oc") {
-      return getEffectiveUseGroup({ file });
-    }
-    return true; // 其他供应商不受此开关限制
-  }
-  // 裸 id 视为 opencode
   return getEffectiveUseGroup({ file });
 }
 
