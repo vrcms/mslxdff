@@ -98,7 +98,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
-| `mslxdff -use-group [on\|off]` | `--use-group` | opencode 供应商本机失败时是否走组员网络（默认 on；`off` 则 opencode 仅本机，不走 peer/broadband/hedge 组员中继，其他供应商不受影响；`MSLXDFF_USE_GROUP` 环境变量可覆盖） | 是（`useGroup`） | 热重载（下次请求生效） |
+| `mslxdff -use-group [on\|off]` | `--use-group` | 本机失败时是否走组员网络（默认 on；`off` 则所有供应商仅本机，不走 via-route/hedge/peer/broadband 组员中继；`MSLXDFF_USE_GROUP` 环境变量可覆盖） | 是（`useGroup`） | 热重载（下次请求生效） |
 | `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：`mimo-v2.5-free → big-pickle → 本地网关 auto:8989` 三级兜底（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，失败自动切本地 `http://127.0.0.1:8989/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer），模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
@@ -1027,10 +1027,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 ### `-use-group [on|off]` / `--use-group [on|off]`
 
 - **语法**：`mslxdff -use-group`（查询）或 `mslxdff -use-group on|off`（设置）/ `--use-group=off`
-- **作用**：控制 **opencode 供应商**在本机上游失败时是否走组员网络（peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**仅 opencode 裸 id 与 `opencode/` 前缀模型**在本机失败时不再尝试组员，**其他供应商（workbuddy/clinebot/通用等）不受影响**仍可走组员。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
+- **作用**：控制本机上游失败时是否走组员网络（via-route/peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**所有供应商**在本机失败时都不再尝试组员，仅本机直连。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
 - **输出**：
   - 查询：`use-group: on (effective) / stored: on / env ...`
-  - 设置：`use-group set to off (stored in state.json) / opencode 供应商：本机失败时不再通过组员网络请求上游`
+  - 设置：`use-group set to off (stored in state.json) / 不再允许走组员网络请求上游`
 - **示例**：
   ```bash
   mslxdff -use-group          # 查询当前
@@ -1138,7 +1138,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_PEER_RACE_LIMIT` | — | 组员并发竞速限制 |
 | `MSLXDFF_BAN_WINDOW_MS` | `172800000` (48h) | 加群失败封禁窗口 |
 | `MSLXDFF_BAN_THRESHOLD` | `5` | 封禁阈值（窗口内失败次数） |
-| `MSLXDFF_USE_GROUP` | `1` (on) | opencode 组员中继总开关（`0/off` 关闭后 opencode 仅本机，不走 peer/broadband/hedge；其他供应商不受影响；可被 `-use-group` state 覆盖，env 优先级更高） |
+| `MSLXDFF_USE_GROUP` | `1` (on) | 组员中继总开关（`0/off` 关闭后所有供应商仅本机，不走 via-route/hedge/peer/broadband；可被 `-use-group` state 覆盖，env 优先级更高） |
 | `MSLXDFF_HEDGE_DELAY_MS` | `1000` | 首块对冲等待（`0/off` 关闭，显式锁模型按 `via-routes.json` 单路径择路，不经 hedge） |
 | `MSLXDFF_VIA_ROUTES_FILE` | `~/.config/mslxdff/via-routes.json` | via-routes 落盘路径（随 `MSLXDFF_STATE_FILE` 派生） |
 | `MSLXDFF_VIA_ROUTE_TTL_MS` | `0` | via-routes 条目 TTL（`0`=不过期，手动 `bench --via --apply` 重跑即更新） |

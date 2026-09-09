@@ -4,6 +4,7 @@ import { planRoute } from "./planner.js";
 import { createEngine } from "./engine.js";
 import { runHook } from "../plugins.js";
 import { isFreeModel } from "../models.js";
+import { shouldUseGroupForModel } from "../state/schemas/use-group.js";
 import { clientIp, summarizePrompt } from "../routes/helpers.js";
 
 /**
@@ -85,7 +86,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
 
     const plan = planRoute(policy, {
       candidates: order,
-      viaRoute: Boolean(!useAuto && requested.includes("/") && canForwardPeers) ? { via: true } : null,
+      viaRoute: Boolean(!useAuto && requested.includes("/") && canForwardPeers && shouldUseGroupForModel(requested)) ? { via: true } : null,
     });
     await engine.run(plan, {
       reqId, startedAt, req, res, body: req?.body, policy,

@@ -43,7 +43,7 @@ Usage:
   mslxdff -autostart status        查看自启状态
   mslxdff -chat ["prompt"]       chat REPL（mimo-v2.5-free 优先/big-pickle 兜底，自然语言转命令，模糊匹配由模型完成，历史持久化，超长自动压缩，仅拦 -uninstall，daemon 重启不影响）
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
-  mslxdff -use-group [on|off]     opencode 供应商本机失败时是否走组员网络（默认 on；off 则仅本机，MSLXDFF_USE_GROUP 环境变量可覆盖）
+  mslxdff -use-group [on|off]     本机失败时是否走组员网络（默认 on；off 则所有供应商仅本机，MSLXDFF_USE_GROUP 环境变量可覆盖）
   mslxdff -help                    show this help
 
 Environment:
@@ -63,7 +63,7 @@ Environment:
   MSLXDFF_BAN_THRESHOLD   failed joins before an ip is banned (default 5)
   MSLXDFF_BAN_WINDOW_MS   ban duration after too many failures (default 48h)
   MSLXDFF_HEDGE_DELAY_MS  hedge peer race when local stream first chunk slow (default 1000, 0/off to disable)
-  MSLXDFF_USE_GROUP       opencode 组员中继开关（默认 on；0/off/false 关闭后 opencode 仅本机，不走 peer/broadband）
+  MSLXDFF_USE_GROUP       组员中继总开关（默认 on；0/off/false 关闭后所有供应商仅本机，不走 via-route/hedge/peer/broadband）
   MSLXDFF_AUTO_UPDATE   auto-update: hourly by default, 0/off/false to disable, 1/true or ms
   MSLXDFF_AUTO_UPDATE_MS  same as above, explicit ms (overrides AUTO_UPDATE)
 `);

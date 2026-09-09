@@ -33,7 +33,7 @@ export async function handleUseGroup(args) {
     console.log(`  stored: ${stored ? "on" : "off"} (state.json useGroup)`);
     if (envVal !== null) console.log(`  env MSLXDFF_USE_GROUP=${envVal ? "on" : "off"} (overrides stored)`);
     console.log(`  default: on`);
-    console.log(`  usage: mslxdff -use-group on|off  (opencode 供应商本机失败时是否走组员网络，默认 on)`);
+    console.log(`  usage: mslxdff -use-group on|off  (本机失败时是否走组员网络，默认 on)`);
     console.log(`  env:   MSLXDFF_USE_GROUP=0|1  (优先级高于 state)`);
     process.exit(0);
   }
@@ -50,7 +50,7 @@ export async function handleUseGroup(args) {
 
   saveUseGroup(parsed);
   console.log(`use-group set to ${parsed ? "on" : "off"} (stored in state.json)`);
-  console.log(`  opencode 供应商：本机失败时 ${parsed ? "允许" : "不再"} 通过组员网络请求上游`);
-  if (!parsed) console.log(`  提示：opencode 请求将仅在本机重试，不再走 peer/broadband 组员中继`);
+  console.log(`  ${parsed ? "允许" : "不再允许"}走组员网络（via-route/hedge/peer/broadband，全部供应商）`);
+  if (!parsed) console.log(`  提示：所有请求将仅在本机重试，不再走组员中继`);
   process.exit(0);
 }
