@@ -25,7 +25,9 @@ export function chatToResponsesBody(chatBody) {
     return base;
   });
   const input = inputParts.join("\n\n") || "hi";
-  const out = { model: chatBody.model, input, stream: false };
+  // 流式意图透传：客户端要 SSE 就向上游要 SSE（reshapeResponsesSse 负责转回 chat SSE）。
+  // 写死 stream:false 是历史折衷（当时聚合 JSON 直回），已由完整 SSE 转换取代。
+  const out = { model: chatBody.model, input, stream: chatBody?.stream === true };
   if (system) out.instructions = system;
   // responses 的 tools 形状为平铺 {type,name,description,parameters}，而 chat 为 {type,function:{name,...}}
   if (Array.isArray(chatBody.tools) && chatBody.tools.length) {
@@ -120,7 +122,6 @@ export function reshapeResponsesSse(res, fallbackModel) {
     const ct = res.headers?.get?.("content-type") || "";
     if (res.status !== 200 || !ct.includes("text/event-stream") || !res.body) return res;
   } catch { return res; }
-  const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buf = "";
@@ -143,22 +144,23 @@ export function reshapeResponsesSse(res, fallbackModel) {
     return `data: ${JSON.stringify(payload)}\n\n`;
   }
 
-  let closed = false;
-  const body = new ReadableStream({
-    async pull(controller) {
-      if (closed) { try { controller.close(); } catch {} return; }
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          closed = true;
-          if (buf.trim()) {
-            // 残余缓冲尝试处理
-          }
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
-          return;
-        }
-        buf += decoder.decode(value, { stream: true });
+  function sendRole(out) {
+    if (!hasSentRole) {
+      hasSentRole = true;
+      out += chatChunk({ role: "assistant" }, null);
+    }
+    return out;
+  }
+
+  // TransformStream 泵：for await 直接驱动上游流，writer.write 背压回压。
+  // （自建 ReadableStream 的 pull 调度在本机 daemon 下出现"pull resolve 后不再续拉"
+  //   导致 muse SSE 卡死；async-iterator 泵是 undici 流已验证畅通的姿势）
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  (async () => {
+    try {
+      for await (const chunk of res.body) {
+        buf += decoder.decode(chunk, { stream: true });
         let out = "";
         // 按 \n\n 分事件
         while (true) {
@@ -181,92 +183,75 @@ export function reshapeResponsesSse(res, fallbackModel) {
           if (data.response?.id) respId = data.response.id;
           if (data.response?.model) respModel = data.response.model;
           if (data.response?.created_at) created = Math.floor(data.response.created_at);
-          if (data.response?.id && !respId) respId = data.response.id;
-          // 关注 output_text.delta
-           if (curEvent === "response.output_text.delta" || data.type === "response.output_text.delta") {
-             const deltaText = data.delta || "";
-             if (deltaText) {
-               if (!hasSentRole) {
-                 hasSentRole = true;
-                 out += chatChunk({ role: "assistant" }, null);
-               }
-               out += chatChunk({ content: deltaText }, null);
-             }
-           } else if (curEvent === "response.completed" || data.type === "response.completed") {
-             const usage = data.response?.usage || null;
-             // 若有 tool_calls，finish 应为 tool_calls
-             const hasTools = toolMap.size > 0;
-             const finish = hasTools ? "tool_calls" : (data.response?.status === "completed" ? "stop" : null);
-             // 末帧带 usage
-             const id = respId || `resp_${Date.now()}`;
-             const payload = {
-               id,
-               object: "chat.completion.chunk",
-               created,
-               model: respModel,
-               choices: [{ index: 0, delta: {}, finish_reason: finish }],
-               usage: usage || undefined,
-             };
-             out += `data: ${JSON.stringify(payload)}\n\n`;
-           } else if (data.type === "response.output_item.added" && data.item?.type === "message") {
-             // message 开始，可发送 role
-             if (!hasSentRole) {
-               hasSentRole = true;
-               out += chatChunk({ role: "assistant" }, null);
-             }
-           } else if (data.type === "response.output_item.added" && data.item?.type === "function_call") {
-             const outIdx = Number(data.output_index ?? 1);
-             const toolIdx = Math.max(0, outIdx - 1);
-             const callId = data.item?.call_id || data.item?.id || "";
-             const name = data.item?.name || "";
-             toolMap.set(outIdx, { idx: toolIdx, id: callId, name });
-             if (!hasSentRole) {
-               hasSentRole = true;
-               out += chatChunk({ role: "assistant" }, null);
-             }
-             const tc = { index: toolIdx, id: callId, type: "function", function: { name, arguments: "" } };
-             // 清理空字符串，避免 undefined
-             if (!callId) delete tc.id;
-             if (!name) delete tc.function.name;
-             out += chatChunk({ tool_calls: [tc] }, null);
-           } else if (data.type === "response.function_call_arguments.delta") {
-             const outIdx = Number(data.output_index ?? 1);
-             const entry = toolMap.get(outIdx) || { idx: Math.max(0, outIdx - 1) };
-             const deltaArgs = data.delta || "";
-             if (deltaArgs) {
-               if (!hasSentRole) {
-                 hasSentRole = true;
-                 out += chatChunk({ role: "assistant" }, null);
-               }
-               out += chatChunk({ tool_calls: [{ index: entry.idx, function: { arguments: deltaArgs } }] }, null);
-             }
-           } else if (data.type === "response.function_call_arguments.done") {
-             const outIdx = Number(data.output_index ?? 1);
-             const entry = toolMap.get(outIdx) || { idx: Math.max(0, outIdx - 1) };
-             const args = data.arguments || "";
-             if (args && !toolMap.get(outIdx)?._done) {
-               // done 可能带全量，若未通过 delta 发送过，补发
-               // 已通过 delta 流式发送则忽略，避免重复
-             }
-           } else if (data.type === "response.output_item.done" && data.item?.type === "function_call") {
-             // 可忽略，已通过 added+delta 完整
-           }
-           // reasoning 加密块忽略
+          // created/in_progress 即发 role 帧：muse reasoning 阶段可达数十秒，
+          // 尽早产出首帧避免 relay 的首块超时（25s）误杀
+          if (data.type === "response.created" || data.type === "response.in_progress") {
+            out = sendRole(out);
+          }
+          if (curEvent === "response.output_text.delta" || data.type === "response.output_text.delta") {
+            const deltaText = data.delta || "";
+            if (deltaText) {
+              out = sendRole(out);
+              out += chatChunk({ content: deltaText }, null);
+            }
+          } else if (curEvent === "response.completed" || data.type === "response.completed") {
+            const usage = data.response?.usage || null;
+            // 若有 tool_calls，finish 应为 tool_calls
+            const hasTools = toolMap.size > 0;
+            const finish = hasTools ? "tool_calls" : (data.response?.status === "completed" ? "stop" : null);
+            // 末帧带 usage
+            const id = respId || `resp_${Date.now()}`;
+            const payload = {
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model: respModel,
+              choices: [{ index: 0, delta: {}, finish_reason: finish }],
+              usage: usage || undefined,
+            };
+            out += `data: ${JSON.stringify(payload)}\n\n`;
+          } else if (data.type === "response.output_item.added" && data.item?.type === "message") {
+            // message 开始，可发送 role
+            out = sendRole(out);
+          } else if (data.type === "response.output_item.added" && data.item?.type === "function_call") {
+            const outIdx = Number(data.output_index ?? 1);
+            const toolIdx = Math.max(0, outIdx - 1);
+            const callId = data.item?.call_id || data.item?.id || "";
+            const name = data.item?.name || "";
+            toolMap.set(outIdx, { idx: toolIdx, id: callId, name });
+            out = sendRole(out);
+            const tc = { index: toolIdx, id: callId, type: "function", function: { name, arguments: "" } };
+            // 清理空字符串，避免 undefined
+            if (!callId) delete tc.id;
+            if (!name) delete tc.function.name;
+            out += chatChunk({ tool_calls: [tc] }, null);
+          } else if (data.type === "response.function_call_arguments.delta") {
+            const outIdx = Number(data.output_index ?? 1);
+            const entry = toolMap.get(outIdx) || { idx: Math.max(0, outIdx - 1) };
+            const deltaArgs = data.delta || "";
+            if (deltaArgs) {
+              out = sendRole(out);
+              out += chatChunk({ tool_calls: [{ index: entry.idx, function: { arguments: deltaArgs } }] }, null);
+            }
+          } else if (data.type === "response.function_call_arguments.done") {
+            // done 可能带全量，若未通过 delta 发送过则补发；已通过 delta 发送则忽略，避免重复
+          } else if (data.type === "response.output_item.done" && data.item?.type === "function_call") {
+            // 可忽略，已通过 added+delta 完整
+          }
+          // reasoning 加密块忽略
         }
-        if (out) controller.enqueue(encoder.encode(out));
-      } catch {
-        closed = true;
-        try { controller.close(); } catch {}
+        if (out) await writer.write(encoder.encode(out));
       }
-    },
-    cancel() {
-      closed = true;
-      try { reader.cancel(); } catch {}
-    },
-  });
+      await writer.write(encoder.encode("data: [DONE]\n\n"));
+      await writer.close();
+    } catch (e) {
+      try { await writer.abort(e instanceof Error ? e : new Error(String(e))); } catch { try { writer.close(); } catch {} }
+    }
+  })();
   const headers = new Headers(res.headers);
   headers.set("content-type", "text/event-stream");
-  const out = new Response(body, { status: res.status, statusText: res.statusText, headers });
+  const out = new Response(readable, { status: res.status, statusText: res.statusText, headers });
   try { out._t = res._t; } catch {}
   return out;
 }
+
