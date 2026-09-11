@@ -88,6 +88,8 @@ export async function handleSetto(args) {
           if (r.action === "inserted") inserted++; else updated++;
           prunedTotal += r.pruned || 0;
           console.log(`  ${r.action} "${r.id}" -> ${r.internal} @ ${file}`);
+          if (r.capsSummaryText) console.log(`      ${r.capsSummaryText}`);
+          if (r.upgraded) console.log(`      能力补齐 ${r.upgraded} 个旧条目`);
         }
         console.log(`synced to opencode: ${inserted} inserted, ${updated} updated, total ${list.length} @ ${file}`);
         if (prunedTotal) console.log(`  pruned ${prunedTotal} 个失效模型（未在 picks，不再于 opencode 显示）`);
@@ -158,6 +160,9 @@ export async function handleSetto(args) {
       const file = opencodeConfigPath();
       const r = await syncToOpencode({ id, token, port, file, keep: pruneKeep(), ensureAll: pruneKeep() });
       console.log(`synced to opencode: ${r.action} "${r.id}" @ ${file}`);
+      if (r.capsSummaryText) console.log(`  能力: ${r.capsSummaryText}`);
+      else console.log(`  能力: 未收录该模型的能力目录，条目仅含名称（不影响使用）`);
+      if (r.upgraded) console.log(`  能力补齐 ${r.upgraded} 个旧条目（此前仅含名称，已注入推理档位/读图/上下文）`);
       if (r.backfilled) console.log(`  backfilled ${r.backfilled} 个 picks 模型（此前 pick 了但未同步过，现已补齐）`);
       if (r.pruned) console.log(`  pruned ${r.pruned} 个失效模型（未在 picks，不再于 opencode 显示）`);
       console.log(`  url: http://127.0.0.1:${port}/v1`);

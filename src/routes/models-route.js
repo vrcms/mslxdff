@@ -1,6 +1,7 @@
 import { json, errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { isModelAllowed } from "../state.js";
+import { globalCapabilities } from "../model-capabilities/index.js";
 
 // Codex 自定义 provider 拉目录要顶层 `models` 数组（codex-rs endpoint/models.rs 解 ModelsResponse{models}），
 // 给它 OpenAI 标准 {object,data} 会报 missing field `models`。学 OmniRoute：仅 codex 调用者追加空数组
@@ -82,4 +83,29 @@ export async function providerModelsHandler({ req, res, models }) {
   } catch (err) {
     json(res, 502, { error: errMsg(err) });
   }
+}
+
+// GET /v1/models/capabilities[?provider=opencode][&id=big-pickle]
+// 模型能力元数据（reasoning 档位/图片输入/tool_call/上下文/价格），源 = opencode 官方 models.dev 目录
+// jsonFn 注入仅为测试接缝（S3）；生产路径用 helpers.json
+export async function capabilitiesHandler({ req, res, capabilities, jsonFn = json }) {
+  // 仅未注入（生产）时用全局单例；显式 null 视作服务不可用（测试可复现 502 空状态）
+  const svc = capabilities === undefined ? globalCapabilities() : capabilities;
+  if (!svc) return jsonFn(res, 502, { error: "capabilities service unavailable" });
+  const q = String(req?.url || "").split("?")[1] || "";
+  const params = new URLSearchParams(q);
+  const provider = (params.get("provider") || "opencode").toLowerCase();
+  const id = params.get("id") || "";
+  try {
+    await svc.ready();
+  } catch (err) {
+    return jsonFn(res, 502, { error: `capabilities source unavailable: ${errMsg(err)}` });
+  }
+  if (id) {
+    const caps = svc.get(provider, id);
+    if (!caps) return jsonFn(res, 404, { error: `model '${id}' not found in capabilities catalog (provider=${provider})` });
+    return jsonFn(res, 200, { object: "model.capabilities", id, provider, capabilities: caps });
+  }
+  const data = svc.list(provider);
+  return jsonFn(res, 200, { object: "list", provider, data });
 }
