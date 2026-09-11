@@ -88,7 +88,7 @@
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
-| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型） | 是（`opencode.json`） | 热重载 |
+| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；未收录模型仅写名称不影响使用）） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
@@ -1146,6 +1146,9 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_SLOW_TOTAL_MS` | `20000` | 慢模型判定：总耗时阈值 |
 | `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块超时（未写字节才 failover） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
+| `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |
+| `MSLXDFF_MODELS_DEV_TTL_MS` | `86400000` (24h) | 能力目录缓存 TTL（过期重拉；`0`=每请求拉） |
+| `MSLXDFF_MODELS_DEV_CACHE` | `~/.config/mslxdff/models-dev.json` | 能力目录磁盘缓存路径（fetch 失败回退旧缓存） |
 | `MSLXDFF_MAX_STREAM_MS` | `120000` (2m) | 流式总时长上限 |
 | `MSLXDFF_FREE_ANON` | — | 空或非 `0/off/false` 则启用 free 模型 public 429 后的匿名重试 |
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |

@@ -88,7 +88,7 @@
 
 - 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3` 走指定供应商。
 - 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
-- 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（按 allowlist 过滤，`--json` 供脚本），或 `curl local/models` 后前缀过滤；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
+- 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（按 allowlist 过滤，`--json` 供脚本），或 `curl local/models` 后前缀过滤；查模型能力（推理档位/读图/上下文/价格）用 `curl local/models/capabilities?id=<模型id>`（或 `?provider=<id>` 整供应商，ADR-0016）；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
 
 ## 工具调用规范
 

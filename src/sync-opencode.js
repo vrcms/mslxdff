@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
+import { enrichOpencodeEntry, capsSummary as capsSummaryText } from "./model-capabilities/enrich.js";
 
 export function opencodeConfigPath() {
   const env = process.env.OPENCODE_CONFIG || process.env.OPENCODE_CONFIG_PATH;
@@ -79,21 +80,35 @@ export function pruneOpencodeModels(models, keep, currentKey) {
 }
 
 // 补齐：把 ensureAll（picks 口径）里缺失的键写入 models（slash → dash + alias 注册）。
-// 返回 { nextModels, backfilled }；ensureAll 非数组或为空时原样返回（backfilled=0）。
+// 已存在但为旧格式（缺 limit 能力字段）的条目也自动补注能力（upgraded 计数）。
+// 返回 { nextModels, backfilled, upgraded }；ensureAll 非数组或为空时原样返回。
 // 注意：需在剪枝之前调用——先补 picks 缺失，再剪 picks 外旧键，结果集恰为 picks ∪ currentKey。
-export async function ensureAllOpencodeModels(models, ensureAll) {
+// capsSvc 透传给能力注入（undefined=全局单例；补齐的条目同样带能力）。
+export async function ensureAllOpencodeModels(models, ensureAll, capsSvc) {
   if (!Array.isArray(ensureAll) || !ensureAll.length || !models || typeof models !== "object") {
-    return { nextModels: models, backfilled: 0 };
+    return { nextModels: models, backfilled: 0, upgraded: 0 };
   }
   const existing = new Set(Object.keys(models).map(normalizeOpencodeKey));
   let backfilled = 0;
+  let upgraded = 0;
   let aliasDirty = false;
   for (const raw of ensureAll) {
     const internal = toInternalId(String(raw || "").trim());
     if (!internal || internal === "auto") continue;
     const storageKey = internal.includes("/") ? internal.replace(/\//g, "-") : internal;
-    if (!storageKey || existing.has(storageKey)) continue;
-    models[storageKey] = { name: storageKey };
+    if (!storageKey) continue;
+    if (existing.has(storageKey)) {
+      // 已存在：旧格式条目（仅 name、无能力字段）自动升级注入；已带 limit 的新格式不动
+      const cur = models[storageKey];
+      if (cur && typeof cur === "object" && !Array.isArray(cur) && cur.limit === undefined) {
+        const en = await enrichOpencodeEntry(cur, internal, capsSvc);
+        models[storageKey] = en.entry;
+        if (en.caps) upgraded++;
+      }
+      continue;
+    }
+    const enriched = await enrichOpencodeEntry({ name: storageKey }, internal, capsSvc);
+    models[storageKey] = enriched.entry;
     existing.add(storageKey);
     backfilled++;
     if (internal.includes("/") && storageKey !== internal) {
@@ -111,10 +126,10 @@ export async function ensureAllOpencodeModels(models, ensureAll) {
       persistModelAliases();
     } catch {}
   }
-  return { nextModels: models, backfilled };
+  return { nextModels: models, backfilled, upgraded };
 }
 
-export async function syncToOpencode({ id, token, port, file, keep, ensureAll } = {}) {
+export async function syncToOpencode({ id, token, port, file, keep, ensureAll, capabilities } = {}) {
   const targetFile = file || opencodeConfigPath();
   const normalizedRaw = String(id || "").trim();
   if (!normalizedRaw) throw new Error("model id required");
@@ -156,6 +171,8 @@ export async function syncToOpencode({ id, token, port, file, keep, ensureAll } 
   let effectiveId = storageKey;
   let pruned = 0;
   let backfilled = 0;
+  let upgraded = 0;
+  let currentCaps = null;
   if (oldProvider) {
     const oldModels = oldProvider.models && typeof oldProvider.models === "object" && !Array.isArray(oldProvider.models)
       ? oldProvider.models
@@ -187,16 +204,21 @@ export async function syncToOpencode({ id, token, port, file, keep, ensureAll } 
         if (nextModels[legacyAlias]) delete nextModels[legacyAlias];
         if (legacyInternal !== legacyAlias && nextModels[legacyInternal]) delete nextModels[legacyInternal];
       }
-      nextModels[storageKey] = { ...merged, name: storageKey };
+      const enriched = await enrichOpencodeEntry({ ...merged, name: storageKey }, internal, capabilities);
+      nextModels[storageKey] = enriched.entry;
+      currentCaps = enriched.caps;
       effectiveId = storageKey;
       action = "updated";
     } else {
-      nextModels[storageKey] = { name: storageKey };
+      const enriched = await enrichOpencodeEntry({ name: storageKey }, internal, capabilities);
+      nextModels[storageKey] = enriched.entry;
+      currentCaps = enriched.caps;
       effectiveId = storageKey;
       action = "inserted";
     }
-    const ensured = await ensureAllOpencodeModels(nextModels, ensureAll);
+    const ensured = await ensureAllOpencodeModels(nextModels, ensureAll, capabilities);
     backfilled = ensured.backfilled;
+    upgraded = ensured.upgraded || 0;
     pruned = pruneOpencodeModels(nextModels, keep, storageKey);
     const nextProvider = {
       ...oldProvider,
@@ -216,8 +238,12 @@ export async function syncToOpencode({ id, token, port, file, keep, ensureAll } 
     if (!data.provider.mslxdff.models[storageKey]) {
       data.provider.mslxdff.models = { [storageKey]: { name: storageKey } };
     }
-    const ensured = await ensureAllOpencodeModels(data.provider.mslxdff.models, ensureAll);
+    const enrichedNew = await enrichOpencodeEntry(data.provider.mslxdff.models[storageKey], internal, capabilities);
+    data.provider.mslxdff.models[storageKey] = enrichedNew.entry;
+    currentCaps = enrichedNew.caps;
+    const ensured = await ensureAllOpencodeModels(data.provider.mslxdff.models, ensureAll, capabilities);
     backfilled = ensured.backfilled;
+    upgraded = ensured.upgraded || 0;
     action = "inserted";
   }
 
@@ -249,5 +275,5 @@ export async function syncToOpencode({ id, token, port, file, keep, ensureAll } 
     }
   } catch {}
 
-  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey, pruned, backfilled };
+  return { action, file: targetFile, id: effectiveId, alias: storageKey, internal, corrupted, storageKey, pruned, backfilled, upgraded, caps: currentCaps, capsSummaryText: capsSummaryText(currentCaps) };
 }

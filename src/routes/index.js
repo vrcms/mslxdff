@@ -4,7 +4,7 @@ import { json, notFound, authorized } from "./helpers.js";
 import { chatHandler } from "./chat.js";
 import { joinHandler, leaveHandler } from "./groups.js";
 import { heartbeatHandler, pollHandler, resultHandler, forwardHandler, streamHandler } from "./groups-relay.js";
-import { modelsHandler, modelsStatusHandler, providerModelsHandler } from "./models-route.js";
+import { modelsHandler, modelsStatusHandler, providerModelsHandler, capabilitiesHandler } from "./models-route.js";
 import { relayHandler } from "./relay.js";
 import { responsesHandler } from "./responses-route.js";
 
@@ -109,6 +109,12 @@ const ROUTES = [
     path: "/v1/models/status",
     requiresAuth: true,
     handler: modelsStatusHandler,
+  },
+  {
+    method: "GET",
+    path: "/v1/models/capabilities",
+    requiresAuth: true,
+    handler: capabilitiesHandler,
   },
 ];
 
