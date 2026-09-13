@@ -22,23 +22,11 @@ function isPreheatDisabled() {
   const s = String(raw).trim().toLowerCase();
   return s === "0" || s === "off" || s === "false" || s === "no" || s === "disable" || s === "disabled";
 }
-export function createUpstreamClient({
-  baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
-  authToken = process.env.UPSTREAM_AUTH_TOKEN || "public",
-  connectTimeoutMs = Number(process.env.UPSTREAM_CONNECT_TIMEOUT_MS) || 30_000,
-  retry = {
-    network: { attempts: 2, delayMs: 300 },
-    429: { attempts: 1, delayMs: 100 },
-    502: { attempts: 1, delayMs: 100 },
-    503: { attempts: 1, delayMs: 100 },
-    504: { attempts: 1, delayMs: 100 },
-  },
-  fetchImpl,
-  hooks,
-  keepAlive = true,
-} = {}) {
+// opencode 上游身份头单一来源（legacy 与 SDK 引擎共用，free 层门禁头必须一致）。
+// anonFirst 语义：authToken==="public" 时默认匿名（hermes referer）；env 可显式覆盖。
+export function createOpencodeHeaderBuilder({ authToken = "public", env = process.env } = {}) {
   function isAnonFirst() {
-    const raw = process.env.MSLXDFF_OPENCOD_ANON_FIRST ?? process.env.MSLXDFF_ANON_FIRST ?? process.env.MSLXDFF_OPENCOD_ANON;
+    const raw = env.MSLXDFF_OPENCOD_ANON_FIRST ?? env.MSLXDFF_ANON_FIRST ?? env.MSLXDFF_OPENCOD_ANON;
     if (raw === undefined || raw === null || raw === "") return authToken === "public";
     const s = String(raw).trim().toLowerCase();
     if (s === "0" || s === "false" || s === "off" || s === "no" || s === "disable" || s === "disabled") return false;
@@ -78,6 +66,25 @@ export function createUpstreamClient({
     }
     return base;
   }
+  return { buildHeaders, anonFirst };
+}
+
+export function createUpstreamClient({
+  baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
+  authToken = process.env.UPSTREAM_AUTH_TOKEN || "public",
+  connectTimeoutMs = Number(process.env.UPSTREAM_CONNECT_TIMEOUT_MS) || 30_000,
+  retry = {
+    network: { attempts: 2, delayMs: 300 },
+    429: { attempts: 1, delayMs: 100 },
+    502: { attempts: 1, delayMs: 100 },
+    503: { attempts: 1, delayMs: 100 },
+    504: { attempts: 1, delayMs: 100 },
+  },
+  fetchImpl,
+  hooks,
+  keepAlive = true,
+} = {}) {
+  const { buildHeaders, anonFirst } = createOpencodeHeaderBuilder({ authToken });
   function shouldTryAnonFree() {
     const raw = process.env.MSLXDFF_FREE_ANON;
     if (raw === "0" || raw === "off" || raw === "false" || raw === "no") return false;

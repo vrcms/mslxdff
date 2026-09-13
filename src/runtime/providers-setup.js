@@ -2,6 +2,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultStateFile, loadToken } from "../state.js";
 import { createUpstreamClient } from "../upstream.js";
+import { createUpstreamEngine } from "../upstream-engine/index.js";
 import { createModelsService } from "../models.js";
 import { createAutoSelector } from "../auto.js";
 import { createPeersService } from "../peers.js";
@@ -50,7 +51,7 @@ export async function setupProviders() {
     }
     if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks });
   } else {
-    const opencodeClient = createUpstreamClient({ hooks: upstreamHooks });
+    const opencodeClient = createUpstreamEngine({ hooks: upstreamHooks });
     const opencodeModels = createModelsService({
       baseUrl,
       headers: opencodeClient.headers,

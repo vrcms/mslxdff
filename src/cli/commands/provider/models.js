@@ -75,15 +75,28 @@ export async function handleProviderModels(id, sub, args, rest) {
         const part = String(b).split(":")[1];
         return part ? ` [${part}]` : ` [${b}]`;
       };
+      // 能力列：上下文 k + 📷识图 🧠推理 🔧工具调用（workbuddy 原生字段；其他供应商无这些字段则显示 —）
+      const fmtCaps = (m) => {
+        const ctx = Number(m.maxInputTokens) || null;
+        const hasAny = ctx || m.supportsImages != null || m.supportsReasoning != null || m.supportsToolCall != null;
+        if (!hasAny) return "—";
+        const parts = [];
+        if (ctx) parts.push(ctx >= 1_000_000 ? `${Math.round(ctx / 100000) / 10}M` : `${Math.round(ctx / 1000)}k`);
+        if (m.supportsImages && !m.disabledMultimodal) parts.push("📷");
+        if (m.supportsReasoning) parts.push("🧠");
+        if (m.supportsToolCall) parts.push("🔧");
+        return parts.join(" ");
+      };
       const idW = Math.max(22, ...all.map((m) => String(m.id).length)) + 2;
       const priceW = Math.max(6, ...all.map((m) => fmtPrice(m).length)) + 2;
+      const capsW = Math.max(4, ...all.map((m) => fmtCaps(m).length)) + 2;
       for (const m of all) {
         const ok = markAllowed(m.id);
         const price = fmtPrice(m);
         const badge = fmtBadge(m);
         const name = m.name ? ` ${m.name}` : "";
         const blocked = ok ? "" : "  [blocked — allowlist]";
-        const line = `  ${ok ? "✓" : "x"} ${String(m.id).padEnd(idW)}${String(price).padEnd(priceW)}${name}${badge}${blocked}`;
+        const line = `  ${ok ? "✓" : "x"} ${String(m.id).padEnd(idW)}${String(price).padEnd(priceW)}${fmtCaps(m).padEnd(capsW)}${name}${badge}${blocked}`;
         console.log(line);
       }
       if (!all.length) console.log(`  (no models — check baseUrl/keys or try: curl ${baseUrl}/models)`);

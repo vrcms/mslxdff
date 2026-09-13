@@ -63,7 +63,7 @@
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
 | `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
-| `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 28 个、`clinebot` 3 个等，无需 `curl`） | 否 | 否 |
+| `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 29 个、`clinebot` 3 个等，无需 `curl`；表格含能力列：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用，workbuddy 走上游原生字段，无此字段的供应商显示 `—`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
@@ -88,7 +88,7 @@
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
-| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；未收录模型仅写名称不影响使用）） | 是（`opencode.json`） | 热重载 |
+| `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；`workbuddy/` 模型不在目录 → 走上游原生字段兜底（上下文/读图/推理默认档），其余未收录模型仅写名称不影响使用；旧格式条目自动升级注入（缺 variants 的也补）） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
@@ -98,7 +98,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
-| `mslxdff -use-group [on\|off]` | `--use-group` | 本机失败时是否走组员网络（默认 on；`off` 则所有供应商仅本机，不走 via-route/hedge/peer/broadband 组员中继；`MSLXDFF_USE_GROUP` 环境变量可覆盖） | 是（`useGroup`） | 热重载（下次请求生效） |
+| `mslxdff -use-group [on\|off]` | `--use-group` | 本机失败时是否走组员网络（默认 on；`off` 则所有供应商仅本机，不走 via-route/hedge/peer/broadband 组员中继；`MSLXDFF_USE_GROUP` 环境变量可覆盖；`workbuddy` 恒禁组员仅本机直连，不受开关影响） | 是（`useGroup`） | 热重载（下次请求生效） |
 | `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：`mimo-v2.5-free → big-pickle → 本地网关 auto:8989` 三级兜底（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，失败自动切本地 `http://127.0.0.1:8989/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer），模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
@@ -281,11 +281,11 @@
 ### `-models`（交互式多选，TTY 专属）
 
 - **语法**：`mslxdff -models`（无子命令）
-- **作用**：交互式勾选常用模型集合 `modelPicks`。`modelPicks` 为空表示“不筛选，全量 auto”。候选池 = `opencode` 免费池 + 各供应商 `allowlist` 原名（`provider/raw`） + 已勾选的遗留 picks（便于取消），`allowAny ON` 的供应商无 allowlist 时不在候选池（提示用 `allowlist set` 限制或 `provider models` 看 live）。
+- **作用**：交互式勾选常用模型集合 `modelPicks`。`modelPicks` 为空表示“不筛选，全量 auto”。候选池 = `opencode` 免费池 + 已启用供应商 `allowlist` 原名（`provider/raw`） + 已勾选的遗留 picks（便于取消；provider 不存在或未启用如缺 baseUrl 的不再列出，启用后自动回来，`status --all` 仍可审计），`allowAny ON` 的供应商无 allowlist 时不在候选池（提示用 `allowlist set` 限制或 `provider models` 看 live）。
 - **交互**（仅 TTY）：
   - `↑/↓` 移动光标，`Space` 勾选/取消，`Enter` 保存，`q/Esc` 取消（`picks 不变`）。
   - 初始光标在当前首选模型 `getPreferredModel()` 所在行；已勾选项带 `picked` 标记（含 `clinebot/...` 等 allowlist 原名）。
-  - 保存：`saveModelPicks([...result])`，打印 `saved N picked model(s): ...` 或 `(none — auto uses full list)`。
+  - 保存：`saveModelPicks([...result])`，打印 `saved N picked model(s): ...` 或 `(none — auto uses full list)`。结果集恒为列表内勾选项（`items ∩ initialPicked` 起步），不在列表中的失效 picks 随保存自动从 state 移除；取消则原样保留。
   - 取消：`cancelled — picks unchanged`。
 - **非 TTY 行为**：等价于 ` -model list` 的纯列表分支（opencode 在上 + `────────────────────────────────────────` 分隔后 allowlist 原名/别名，带 `*` 标注已勾选），不进入交互。
 - **前置**：每次执行都会 4s 超时尝试刷新模型列表（`tryRefreshModels()`），成功则用新列表，失败回退 stale 缓存。
@@ -555,9 +555,11 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 
 - **语法**：`mslxdff -provider workbuddy models` / `mslxdff -provider clinebot models --json` / `mslxdff -provider myapi models`
 - **作用**：**“上游供应商支持哪些模型”的一级答案**，无需 `curl`。直连该供应商 `GET <baseUrl><modelsPath>` 拉取，按 `allowlist` 过滤后按 `workbuddy/` 前缀输出；`opencode` 时读本地 `models.json` 缓存的裸 id。`--json` 输出 `{"object":"list","data":[...]}` 供脚本 `jq`。
+- **能力列**：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用；`workbuddy` 读上游原生字段（`maxInputTokens/supportsImages/supportsReasoning/supportsToolCall`，first-party 最准，`disabledMultimodal` 会压过 `supportsImages`），其余供应商无此字段显示 `—`；查单个模型完整能力 JSON 用 `curl local/models/capabilities?provider=workbuddy&id=<裸id>`。
+- **ctrl+t 档位**：`-setto opencode` 会在条目里写 `variants`（opencode `ctrl+t` 直接切推理档位，即 `model.variants` 键；config 优先级高于 opencode 启发式，绕过其 glm/kimi/deepseek-v3/minimax/qwen/big-pickle 黑名单）：models.dev effort 型按目录档位写，workbuddy 推理模型按通用 `low/medium/high` 写（实测 `reasoning_effort` 生效，low 思考量约 high 一半；toggle 型不写）；改完配置后 TUI 需重启（其 provider 数据只在启动时拉一次）。
 - **示例**：
   ```bash
-  mslxdff -provider workbuddy models          # 28 个 workbuddy/hy3 ...
+  mslxdff -provider workbuddy models          # 29 个 workbuddy/hy3 ...（含能力列）
   mslxdff -provider clinebot models --json | jq .data[].id
   mslxdff -model list --provider workbuddy    # 同义（见 5. 模型管理）
   ```
@@ -756,7 +758,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -workbuddy remove <uid> [--keep-file]           # 按 uid 摘除（删 keys/auths 与 auths/workbuddy-<uid>.json）
   ```
 - **存储**：`state.json providerConfigs.workbuddy={ baseUrl:"https://copilot.tencent.com", keys:["k1",...], auths:[{uid,domain,enterpriseId,refreshToken}], allowedModels:["hy3",...] }`，`auths` 与 `keys` 一一对应（多号同索引），由 `node workbuddy-token-auto.js` 自动落盘（`auths/workbuddy-<uid>.json` + `state.json`，`0600`）或 `-provider add workbuddy` 解析 JWT `uid` 自动追加。`baseUrl` 默认 `https://copilot.tencent.com`（`MSLXDFF_WORKBUDDY_BASE_URL` 可覆盖）。
-- **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。
+- **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。**SDK 通道**：底层缺省改走 `@ai-sdk/openai-compatible`（官方 SDK 栈；局部 `MSLXDFF_WORKBUDDY_SDK` 或未设置时继承的全局 `MSLXDFF_UPSTREAM_ENGINE` 设 `legacy`/关闭词即回退原生 transport，不可用自动回退并告警一次，上层逻辑不变）。
 - **白名单**：同通用供应商（空=不限，非空仅名单内可用，`403 + x-mslxdff-allowlist:1` 直通，`/v1/models` 过滤）。
 - **共享**：`workbuddy` 默认 `share=off`（`opencode` 同理恒排除），需 `mslxdff -provider workbuddy share on` 或 `MSLXDFF_WORKBUDDY_SHARE_KEYS=1` 显式开启才随 `x-mslxdff-share-keys` 外借。
 - **签到**：`POST https://www.codebuddy.cn/v2/billing/meter/daily-checkin` + `https://copilot.tencent.com/v2/billing/meter/daily-checkin` 双域，`code 0` 新增 100 credits/30d 裂变包，`code 10001 已签到` 视为成功；并行 3，`--json` 聚合 `results[].balance`；`workbuddy-token-auto.js` 已在 `refresh` 后自动 `spawn workbuddy-checkin.js`；daemon 默认每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 改时间，`=0` 关，启动时过期补签），新追加账号次日自动纳入无需配置，不再需要 `schtasks`。
@@ -1027,7 +1029,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 ### `-use-group [on|off]` / `--use-group [on|off]`
 
 - **语法**：`mslxdff -use-group`（查询）或 `mslxdff -use-group on|off`（设置）/ `--use-group=off`
-- **作用**：控制本机上游失败时是否走组员网络（via-route/peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**所有供应商**在本机失败时都不再尝试组员，仅本机直连。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
+- **作用**：控制本机上游失败时是否走组员网络（via-route/peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**所有供应商**在本机失败时都不再尝试组员，仅本机直连。**例外**：`workbuddy` 恒禁组员（ADR-0015 local-only：本机账号绑定，组员无该账号转过去也用不了，且本地直连最快）——无论开关一律仅本机直连。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
 - **输出**：
   - 查询：`use-group: on (effective) / stored: on / env ...`
   - 设置：`use-group set to off (stored in state.json) / 不再允许走组员网络请求上游`
@@ -1098,6 +1100,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_DAEMON_DIR` | 随 state 派生（`dirname(stateFile)`） | daemon pid/log/models 目录 |
 | `MSLXDFF_STATE_FLUSH_MS` | `500` | 热数据批量刷盘间隔，`0` 则同步刷（测试用） |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | 默认供应商上游 |
+| `MSLXDFF_UPSTREAM_ENGINE` | `sdk` | 上游 wire 层引擎（ADR-0017）：缺省即 AI SDK（opencode 流式 chat 走 `@ai-sdk/openai-compatible`，`muse-spark*` 等 responses 类走 `@ai-sdk/openai` 的 responses 适配器；响应带 `x-mslxdff-upstream-engine: sdk` 标记，复用 legacy keep-alive 连接池；非流式自动委派 legacy；SDK 不可用自动回退并告警一次）；显式 `legacy` 或关闭词（`0/off/false/no/disable`）=原实现；通用 OpenAI 兼容族与 cline 的流式 chat 同源（供应商级 `MSLXDFF_<ID>_SDK` 显式设置即局部生效，未设置则继承本变量＝全局一键熔断） |
 | `UPSTREAM_AUTH_TOKEN` | `public` | 上游鉴权值（opencode 侧恒 `public`） |
 | `MSLXDFF_OPENROUTER_KEY` | — | OpenRouter 单 key（env 优先于 state；多 key 用 `-provider` 持久化） |
 | `MSLXDFF_OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter 上游地址（可覆盖为代理/测试地址） |
@@ -1113,6 +1116,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_WORKBUDDY_TIMEOUT_MS` | `30000` | WorkBuddy 单次 fetch 超时 |
 | `MSLXDFF_WORKBUDDY_COOLDOWN_MS` | `30000` | WorkBuddy 多 key 冷却（401/403/429/5xx） |
 | `MSLXDFF_WORKBUDDY_SHARE_KEYS` | `off` | WorkBuddy 共享开关（`1/on/true` 显式开，默认关） |
+| `MSLXDFF_WORKBUDDY_SDK` | 继承 `MSLXDFF_UPSTREAM_ENGINE`（缺省 sdk） | WorkBuddy SDK 通道：缺省底层走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18；不可用自动回退原生并告警一次）；设 `legacy`/关闭词回退原生 transport；未设置则继承全局 `MSLXDFF_UPSTREAM_ENGINE`（全局 `legacy` 即一键熔断）；上层轮换/刷新/reshape 全链复用 |
 | `MSLXDFF_WORKBUDDY_CHECKIN` | `1` | daemon 每日自动签到开关（`0` 关；开则每天本地时 `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 全号签到+过期 token 续期，code 10001 幂等，落盘 `workbuddyCheckin {date}` 防重复，启动时过期补签） |
 | `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` | `9` | 自动签到小时（0~23 本地时，非法回退 9） |
 | `WORKBUDDY_AUTH_DIR` | `./auths` | WorkBuddy 落盘目录（`workbuddy-*.json`，`0600`） |

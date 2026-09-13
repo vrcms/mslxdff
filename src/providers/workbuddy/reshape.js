@@ -107,24 +107,31 @@ export function reshapeWorkbuddySse(res) {
     async pull(controller) {
       if (closed) { try { controller.close(); } catch {} return; }
       try {
-        const { done, value } = await reader.read();
-        if (done) {
-          closed = true;
+        // 循环读源，直到"有输出 / 流结束 / 出错"才返回。
+        // WHATWG 流规范：pull 的 promise 解析后若未 enqueue，规范不会再自动调度 pull
+        // （仅当解析期间有新读请求触发 pullAgain 才重调）——消费者只挂一个待处理 read 时，
+        // 任何一次"只吞帧不出数据"的拉取都会让整流永久停摆。workbuddy 思考流按帧到达
+        // （role 帧后每个 reasoning 碎片都不足 150 字符阈值）时必现，即"首帧后卡死"根因。
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            closed = true;
+            const out = [];
+            if (buf) { processInto(buf + "\n", out); buf = ""; }
+            flushReasoningInto(out);
+            if (out.length) controller.enqueue(encoder.encode(out.join("")));
+            controller.close();
+            return;
+          }
+          buf += decoder.decode(value, { stream: true });
+          const idx = buf.lastIndexOf("\n");
+          if (idx < 0) continue;
+          const complete = buf.slice(0, idx + 1);
+          buf = buf.slice(idx + 1);
           const out = [];
-          if (buf) { processInto(buf + "\n", out); buf = ""; }
-          flushReasoningInto(out);
-          if (out.length) controller.enqueue(encoder.encode(out.join("")));
-          controller.close();
-          return;
+          processInto(complete, out);
+          if (out.length) { controller.enqueue(encoder.encode(out.join(""))); return; }
         }
-        buf += decoder.decode(value, { stream: true });
-        const idx = buf.lastIndexOf("\n");
-        if (idx < 0) return;
-        const complete = buf.slice(0, idx + 1);
-        buf = buf.slice(idx + 1);
-        const out = [];
-        processInto(complete, out);
-        if (out.length) controller.enqueue(encoder.encode(out.join("")));
       } catch {
         closed = true;
         try { controller.close(); } catch {}

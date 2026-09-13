@@ -9,7 +9,7 @@ import { handlePeerRelay } from "../routes/chat/peer-handler.js";
 import { handleBroadbandRelay } from "../routes/chat/broadband-handler.js";
 import { handleViaRoute } from "../routes/chat/via-route-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
-import { shouldUseGroupForModel } from "../state/schemas/use-group.js";
+import { shouldUseGroupForModel, isHardLocalOnly } from "../state/schemas/use-group.js";
 
 /**
  * 串行 trial — 从 engine.js 抽出的第二段：via-route 单路径 → 串行 trial →
@@ -131,7 +131,7 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     if (canForwardPeers) {
       if (!shouldUseGroupForModel(model)) {
-        evt("group-skip", { reqId, model, reason: "useGroup=off (peer)" });
+        evt("group-skip", { reqId, model, reason: isHardLocalOnly(model) ? "provider local-only（禁组员，仅本机直连）" : "useGroup=off (peer)" });
       } else {
         const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
         if (pr.handled) return { done: true };
@@ -139,7 +139,7 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     if (groups) {
       if (!shouldUseGroupForModel(model)) {
-        evt("group-skip", { reqId, model, reason: "useGroup=off (broadband)" });
+        evt("group-skip", { reqId, model, reason: isHardLocalOnly(model) ? "provider local-only（禁组员，仅本机直连）" : "useGroup=off (broadband)" });
       } else {
         const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, stages, res, startedAt, plugins });
         if (br.handled) return { done: true };

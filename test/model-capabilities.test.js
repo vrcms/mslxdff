@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeModelCaps, normalizeProviderModels } from "../src/model-capabilities/parse.js";
-import { createCapabilitiesService, globalCapabilities, _resetGlobalCapabilities } from "../src/model-capabilities/index.js";
+import { normalizeModelCaps, normalizeProviderModels, normalizeWorkbuddyCaps } from "../src/model-capabilities/parse.js";
+import { createCapabilitiesService, globalCapabilities, _resetGlobalCapabilities, workbuddyCapsFromModels } from "../src/model-capabilities/index.js";
 import { enrichOpencodeEntry, capsSummary } from "../src/model-capabilities/enrich.js";
 
 // fixtures：形态取自 .scratch/opencode-model-capabilities/evidence/models-dev-api.json 实测切片
@@ -118,7 +118,32 @@ describe("S1b enrich：-setto opencode 条目能力注入", () => {
 
   it("未收录模型：条目原样返回，caps=null", async () => {
     const entry0 = { name: "workbuddy-glm-5.3-flash" };
-    const { entry, caps } = await enrichOpencodeEntry(entry0, "workbuddy/glm-5.3-flash", svc);
+    const emptyWb = async () => ({ object: "list", data: [] });
+    const { entry, caps } = await enrichOpencodeEntry(entry0, "workbuddy/glm-5.3-flash", svc, emptyWb);
+    assert.deepEqual(entry, entry0);
+    assert.equal(caps, null);
+  });
+
+  it("workbuddy 模型：models.dev miss 后走上游原生字段兜底", async () => {
+    const emptySvc = { ready: async () => {}, get: () => null };
+    const wbSource = async () => ({
+      object: "list",
+      data: [{ id: "workbuddy/hy3", maxInputTokens: 192000, maxOutputTokens: 64000, supportsImages: true, supportsReasoning: true, reasoning: { effort: "high" }, supportsToolCall: true }],
+    });
+    const { entry, caps } = await enrichOpencodeEntry({ name: "workbuddy-hy3" }, "workbuddy/hy3", emptySvc, wbSource);
+    assert.equal(entry.reasoning, true);
+    assert.equal(entry.tool_call, true);
+    assert.deepEqual(entry.limit, { context: 192000, output: 64000 });
+    assert.deepEqual(entry.modalities, { input: ["text", "image"], output: ["text"] });
+    assert.equal(caps.defaultEffort, "high");
+    assert.equal(caps.costIn, null); // credits 倍率不硬映射价格
+  });
+
+  it("workbuddy 兜底失败（源抛错）：静默降级原样条目", async () => {
+    const emptySvc = { ready: async () => {}, get: () => null };
+    const badSource = async () => { throw new Error("wb down"); };
+    const entry0 = { name: "workbuddy-hy3" };
+    const { entry, caps } = await enrichOpencodeEntry(entry0, "workbuddy/hy3", emptySvc, badSource);
     assert.deepEqual(entry, entry0);
     assert.equal(caps, null);
   });
@@ -215,6 +240,89 @@ describe("S2 capabilities 服务：取数 + 磁盘缓存 + TTL + 降级", () => 
   });
 });
 
+// workbuddy 上游原生字段 fixture（实测 /console/enterprises/personal/models 2026-09-11）
+const WB_FULL = {
+  maxInputTokens: 168000,
+  maxOutputTokens: 32000,
+  supportsImages: true,
+  supportsReasoning: true,
+  reasoning: { effort: "high", summary: "auto" },
+  supportsToolCall: true,
+  disabledMultimodal: false,
+  temperature: 1,
+  credits: "x1.5",
+};
+const WB_TEXT_ONLY = {
+  id: "workbuddy/hunyuan-chat",
+  maxInputTokens: 64000,
+  maxOutputTokens: 8000,
+  supportsImages: true,
+  disabledMultimodal: true,
+  supportsReasoning: false,
+  supportsToolCall: true,
+};
+
+describe("S1c workbuddy 原生字段 → 统一 caps 形状", () => {
+  it("全字段模型：上下文/读图/推理档位/工具调用", () => {
+    const c = normalizeWorkbuddyCaps("auto", WB_FULL);
+    assert.equal(c.context, 168000);
+    assert.equal(c.maxOutput, 32000);
+    assert.equal(c.imageInput, true);
+    assert.deepEqual(c.inputModalities, ["text", "image"]);
+    assert.equal(c.reasoning, true);
+    assert.equal(c.effortType, "effort");
+    assert.deepEqual(c.effortValues, ["low", "medium", "high"]); // 网关层通用三档（上游只给默认档）
+    assert.equal(c.defaultEffort, "high");
+    assert.equal(c.toolCall, true);
+    assert.equal(c.temperature, true);
+    assert.equal(c.costIn, null); // credits 是倍率不是 $/M，不硬映射
+  });
+
+  it("disabledMultimodal 压过 supportsImages", () => {
+    const c = normalizeWorkbuddyCaps("x", { ...WB_FULL, disabledMultimodal: true });
+    assert.equal(c.imageInput, false);
+    assert.deepEqual(c.inputModalities, ["text"]);
+  });
+
+  it("纯文本模型：全缺省", () => {
+    const c = normalizeWorkbuddyCaps("y", { id: "y", supportsImages: false, supportsReasoning: false, supportsToolCall: false });
+    assert.equal(c.imageInput, false);
+    assert.equal(c.reasoning, false);
+    assert.equal(c.effortType, null);
+    assert.equal(c.effortValues, null);
+    assert.equal(c.defaultEffort, null);
+    assert.equal(c.context, null);
+    assert.equal(c.toolCall, false);
+  });
+
+  it("极端缺字段对象不抛错", () => {
+    const c = normalizeWorkbuddyCaps("z", {});
+    assert.equal(c.imageInput, false);
+    assert.equal(c.context, null);
+  });
+});
+
+describe("S1d workbuddy 动态源：聚合模型条目 → caps map", () => {
+  it("拉 workbuddy/ 前缀条目、剥前缀作 map 键、忽略其他供应商", async () => {
+    const agg = {
+      object: "list",
+      data: [
+        { id: "workbuddy/glm-5.3-flash", ...WB_FULL },
+        { id: "workbuddy/hunyuan-chat", ...WB_TEXT_ONLY },
+        { id: "big-pickle", reasoning: false },
+        { id: "workbuddy/", }, // 空裸 id 应跳过
+      ],
+    };
+    const map = await workbuddyCapsFromModels(async () => agg)();
+    assert.ok(map["glm-5.3-flash"]);
+    assert.equal(map["glm-5.3-flash"].context, 168000);
+    assert.equal(map["hunyuan-chat"].imageInput, false); // disabledMultimodal 压过 supportsImages
+    assert.equal(map["hunyuan-chat"].toolCall, true);
+    assert.equal(map["big-pickle"], undefined);
+    assert.equal(Object.keys(map).length, 2);
+  });
+});
+
 describe("S3 HTTP handler", () => {
   function fakeRes() {
     const h = {};
@@ -253,7 +361,7 @@ describe("S3 HTTP handler", () => {
     assert.equal(res1._body.object, "model.capabilities");
 
     const res2 = fakeRes();
-    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=workbuddy&id=glm-5.3-flash", headers: {} }, res: res2, capabilities: svcData, jsonFn: jsonRes });
+    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=otherprov&id=glm-5.3-flash", headers: {} }, res: res2, capabilities: svcData, jsonFn: jsonRes });
     assert.equal(res2.statusCode, 404);
     assert.match(res2._body.error, /not found/i);
   });
@@ -264,6 +372,45 @@ describe("S3 HTTP handler", () => {
     await capabilitiesHandler({ req: { url: "/v1/models/capabilities", headers: {} }, res, capabilities: null, jsonFn: jsonRes });
     assert.equal(res.statusCode, 502);
     assert.ok(res._body.error);
+  });
+
+  it("provider=workbuddy：动态源列表 + 单查 + 未收录 404", async () => {
+    const { capabilitiesHandler } = await import("../src/routes/models-route.js");
+    const wbSource = async () => ({
+      object: "list",
+      data: [
+        { id: "workbuddy/glm-5.3-flash", maxInputTokens: 168000, maxOutputTokens: 32000, supportsImages: true, supportsReasoning: true, reasoning: { effort: "high" }, supportsToolCall: true },
+        { id: "workbuddy/hunyuan-chat", maxInputTokens: 64000, supportsToolCall: true },
+      ],
+    });
+    const resList = fakeRes();
+    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=workbuddy", headers: {} }, res: resList, jsonFn: jsonRes, wbSource });
+    assert.equal(resList.statusCode, 200);
+    assert.equal(resList._body.provider, "workbuddy");
+    assert.equal(resList._body.data.length, 2);
+    assert.equal(resList._body.data[0].id, "glm-5.3-flash");
+    assert.equal(resList._body.data[0].capabilities.context, 168000);
+
+    const resOne = fakeRes();
+    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=workbuddy&id=glm-5.3-flash", headers: {} }, res: resOne, jsonFn: jsonRes, wbSource });
+    assert.equal(resOne.statusCode, 200);
+    assert.equal(resOne._body.object, "model.capabilities");
+    assert.equal(resOne._body.id, "glm-5.3-flash");
+    assert.equal(resOne._body.capabilities.defaultEffort, "high");
+
+    const resMiss = fakeRes();
+    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=workbuddy&id=nope", headers: {} }, res: resMiss, jsonFn: jsonRes, wbSource });
+    assert.equal(resMiss.statusCode, 404);
+    assert.match(resMiss._body.error, /not found/i);
+  });
+
+  it("provider=workbuddy 源抛错 → 502", async () => {
+    const { capabilitiesHandler } = await import("../src/routes/models-route.js");
+    const res = fakeRes();
+    const badSource = async () => { throw new Error("upstream down"); };
+    await capabilitiesHandler({ req: { url: "/v1/models/capabilities?provider=workbuddy", headers: {} }, res, jsonFn: jsonRes, wbSource: badSource });
+    assert.equal(res.statusCode, 502);
+    assert.match(res._body.error, /unavailable/i);
   });
 
   it("globalCapabilities 单例与重置", async () => {

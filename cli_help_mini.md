@@ -26,7 +26,7 @@
 | token 读 | `-showtoken` / `--showtoken` | 打印 Bearer token |
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
 | 更新 | `-update` / `--update` | 更新到 npm latest |
-| 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 Space勾选 Enter保存，候选池=opencode免费池+各供应商allowlist原名/别名+已勾选，`别名: dash` 同步展示） |
+| 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 Space勾选 Enter保存，候选池=opencode免费池+已启用供应商allowlist原名/别名+已勾选（不存在/未启用provider不列出，启用后回来），`别名: dash` 同步展示） |
 | 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型：默认先列 opencode 免费池，`────────────────────────────────────────` 分隔后列其他供应商 allowlist（原名 + 别名 `别名: dash`）；`--provider clinebot` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` |
 | 模型设默认 | `-model set <id>` | 设首选模型，自动入 picks |
 | 模型健康 | `-model status` | 每模型 normal/limit/error |
@@ -61,10 +61,12 @@
 | WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额；daemon 每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN=0` 关，`_HOUR` 改时间） |
 | WorkBuddy 余额 | `-workbuddy balance [--json]` / `-wb balance` | 查多号余额（`total/dailyPacks/nextExpire`，TTL 5min） |
 | WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
+| WorkBuddy SDK 通道（缺省启用） | `MSLXDFF_WORKBUDDY_SDK`（未设置则继承 `MSLXDFF_UPSTREAM_ENGINE`） | 底层缺省走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18，不可用自动回退原生）；设 `legacy`/关闭词回退原生 transport，上层轮换/刷新/reshape 不变 |
+| 上游引擎（默认，ADR-0017） | `MSLXDFF_UPSTREAM_ENGINE`（缺省 `sdk`） | opencode 流式 chat 走 `@ai-sdk/openai-compatible`、`muse-spark*` 走 `@ai-sdk/openai` 的 responses 适配器（响应标记头 `x-mslxdff-upstream-engine: sdk`，复用 legacy 连接池）；通用 OpenAI 兼容族与 cline 同源（供应商级 `MSLXDFF_<ID>_SDK` 未设置即继承本变量）；非流式自动委派 legacy，SDK 不可用回退并告警；显式 `legacy`/关闭词回退原实现 |
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
 | 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy（原子写 `~/.workbuddy/models.json`，`127.0.0.1/v1`，多模型累积；picks 非空时摘除失效本地条目） |
-| 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks；picks 非空时摘除失效模型） |
+| 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks；picks 非空时摘除失效模型；自动附模型能力：models.dev 目录 + workbuddy 走上游原生字段，opencode 原生识别；写 variants 档位供 ctrl+t 切换（effort 型按档位写，toggle 型不写，TUI 改配置后需重启）） |
 | 同步 chatgpt | `-setto chatgpt [modelId]` | 写 Codex 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `127.0.0.1/v1/responses`，鉴权走 `mslxdff -showtoken` 不落盘），换模型重跑 setto 或 `codex exec -m <id>` 单次覆盖，`codex exec "hi"` 验证；排障 `MSLXDFF_RESPONSES_DEBUG=1` 看 daemon.log `[responses]` |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
 | 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
@@ -75,7 +77,7 @@
 | 全部离开 | `-leavegroup` / `--leavegroup` | 离开所有成员组 |
 | 解散组 | `-delgroup <name>` / `--delgroup` | 仅 leader 解散 |
 | 解封禁 | `-resetban [ip]` / `--resetban [ip]` | 清加组封禁 |
-| 组员开关 | `-use-group [on\|off]` / `--use-group [on\|off]` | 本机失败时是否走组员（默认 on，off 则所有供应商仅本机；`MSLXDFF_USE_GROUP` 可覆盖） |
+| 组员开关 | `-use-group [on\|off]` / `--use-group [on\|off]` | 本机失败时是否走组员（默认 on，off 则所有供应商仅本机；`workbuddy` 恒禁组员仅本机；`MSLXDFF_USE_GROUP` 可覆盖） |
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
 | 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
@@ -88,7 +90,7 @@
 
 - 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3` 走指定供应商。
 - 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
-- 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（按 allowlist 过滤，`--json` 供脚本），或 `curl local/models` 后前缀过滤；查模型能力（推理档位/读图/上下文/价格）用 `curl local/models/capabilities?id=<模型id>`（或 `?provider=<id>` 整供应商，ADR-0016）；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
+- 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（表格含能力列：上下文/📷读图/🧠推理/🔧工具调用，`--json` 供脚本），或 `curl local/models` 后前缀过滤；查模型能力（推理档位/读图/上下文/价格）用 `curl local/models/capabilities?id=<模型id>`（opencode 默认源 models.dev；workbuddy 用 `?provider=workbuddy&id=<裸id>` 走上游原生字段、全量含 blocked，ADR-0016）；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
 
 ## 工具调用规范
 

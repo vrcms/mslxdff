@@ -1,4 +1,5 @@
 import { defaultStateFile, readState, writeStateImmediate } from "../store.js";
+import { classifyProvider } from "../../providers/classify.js";
 
 function parseBool(v) {
   if (typeof v === "boolean") return v;
@@ -36,7 +37,22 @@ export function getEffectiveUseGroup({ file = defaultStateFile() } = {}) {
 }
 
 // 全局开关：off 则所有供应商都不走组员网络（via-route/hedge/peer/broadband 全禁），仅本机直连
+// workbuddy 硬禁组员（ADR-0015 local-only）：本机账号绑定（auths/workbuddy-*.json + uid），
+// 组员没有该账号转过去也用不了，且本地直连最快——无论全局开关一律仅本机直连。
+// model 兼容 canonical（workbuddy/xxx）与 dash（workbuddy-xxx）两种形态。
+export function isHardLocalOnly(model) {
+  const s = String(model || "").trim().toLowerCase();
+  const slash = s.indexOf("/");
+  const head = slash > 0 ? s.slice(0, slash) : s.split("-")[0];
+  try {
+    return classifyProvider(head) === "local-only";
+  } catch {
+    return head === "workbuddy";
+  }
+}
+
 export function shouldUseGroupForModel(model, { file = defaultStateFile() } = {}) {
+  if (isHardLocalOnly(model)) return false;
   return getEffectiveUseGroup({ file });
 }
 

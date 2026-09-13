@@ -85,17 +85,45 @@ export async function providerModelsHandler({ req, res, models }) {
   }
 }
 
-// GET /v1/models/capabilities[?provider=opencode][&id=big-pickle]
-// 模型能力元数据（reasoning 档位/图片输入/tool_call/上下文/价格），源 = opencode 官方 models.dev 目录
+// workbuddy 能力目录源：共享 provider 单例（src/model-capabilities/index.js，
+// 与 -setto opencode 能力注入共用），拉上游原生字段全量 + 10min 缓存
+// 不走聚合 models.get()——聚合会按 allowlist 过滤，blocked 模型查能力 404 会误导（能力目录≠可调用目录，与 CLI 全量展示保持一致）
+async function workbuddyAllModels() {
+  const { workbuddyAllModels: wb } = await import("../model-capabilities/index.js");
+  return wb();
+}
+
+// GET /v1/models/capabilities[?provider=opencode|workbuddy][&id=big-pickle]
+// 模型能力元数据（reasoning 档位/图片输入/tool_call/上下文/价格）
+// - provider=opencode（默认）：源 = opencode 官方 models.dev 目录
+// - provider=workbuddy：源 = workbuddy 上游原生字段（maxInputTokens/supportsImages/... first-party 最准），
+//   id 用裸 id（如 glm-5.3-flash）；wbSource 注入仅测试接缝，生产用独立 provider 单例（全量+10min 缓存）
 // jsonFn 注入仅为测试接缝（S3）；生产路径用 helpers.json
-export async function capabilitiesHandler({ req, res, capabilities, jsonFn = json }) {
+export async function capabilitiesHandler({ req, res, capabilities, wbSource, jsonFn = json }) {
   // 仅未注入（生产）时用全局单例；显式 null 视作服务不可用（测试可复现 502 空状态）
   const svc = capabilities === undefined ? globalCapabilities() : capabilities;
-  if (!svc) return jsonFn(res, 502, { error: "capabilities service unavailable" });
+  if (!svc && !wbSource) return jsonFn(res, 502, { error: "capabilities service unavailable" });
   const q = String(req?.url || "").split("?")[1] || "";
   const params = new URLSearchParams(q);
   const provider = (params.get("provider") || "opencode").toLowerCase();
   const id = params.get("id") || "";
+  // workbuddy 动态源分支：上游原生字段映射，不查 models.dev
+  if (provider === "workbuddy") {
+    try {
+      const { workbuddyCapsFromModels } = await import("../model-capabilities/index.js");
+      const map = await workbuddyCapsFromModels(wbSource || workbuddyAllModels)();
+      const rawId = id.replace(/^workbuddy\//i, "");
+      if (id) {
+        const caps = map[rawId];
+        if (!caps) return jsonFn(res, 404, { error: `model '${id}' not found in capabilities catalog (provider=workbuddy)` });
+        return jsonFn(res, 200, { object: "model.capabilities", id: rawId, provider, capabilities: caps });
+      }
+      const data = Object.entries(map).map(([mid, capabilities]) => ({ id: mid, capabilities }));
+      return jsonFn(res, 200, { object: "list", provider, data });
+    } catch (err) {
+      return jsonFn(res, 502, { error: `capabilities source unavailable: ${errMsg(err)}` });
+    }
+  }
   try {
     await svc.ready();
   } catch (err) {

@@ -4,7 +4,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { normalizeProviderModels } from "./parse.js";
+import { normalizeProviderModels, normalizeWorkbuddyCaps } from "./parse.js";
 import { compatFetch } from "../compat.js";
 
 export const DEFAULT_SOURCE_URL = "https://models.opencode.ai/api.json";
@@ -127,4 +127,37 @@ function defaultCacheFile() {
   const override = process.env.MSLXDFF_MODELS_DEV_CACHE;
   if (override && String(override).trim()) return String(override).trim();
   return join(homedir(), ".config", "mslxdff", "models-dev.json");
+}
+
+// workbuddy 动态源：从聚合模型服务（models.get()，带 10min 上游缓存）拉 workbuddy/ 前缀条目
+// → 统一 caps 形状 map（{ rawId -> caps }）。上游原生字段 first-party 最准，不走 models.dev。
+export function workbuddyCapsFromModels(getModels, normalizeFn) {
+  const normalize = normalizeFn || ((m) => normalizeWorkbuddyCaps(m.id, m));
+  return async () => {
+    const agg = await getModels();
+    const all = Array.isArray(agg?.data) ? agg.data : [];
+    const map = {};
+    for (const entry of all) {
+      const id = String(entry?.id || "");
+      if (!id.toLowerCase().startsWith("workbuddy/")) continue;
+      const raw = id.slice("workbuddy/".length);
+      if (!raw) continue;
+      map[raw] = normalize(entry);
+    }
+    return map;
+  };
+}
+
+// workbuddy provider 单例（直连上游 listModels 自带 10min 缓存）：HTTP handler 与
+// -setto opencode 能力注入共享同一个实例，避免双份连接池/缓存。
+let _wbProv = null;
+export function _resetWorkbuddyProv() { _wbProv = null; }
+export async function workbuddyAllModels() {
+  if (!_wbProv) {
+    const { createWorkbuddyProvider } = await import("../providers/workbuddy.js");
+    const { defaultStateFile } = await import("../state.js");
+    _wbProv = createWorkbuddyProvider({ file: defaultStateFile() });
+  }
+  const list = await _wbProv.listModels();
+  return { object: "list", data: Array.isArray(list) ? list : [] };
 }

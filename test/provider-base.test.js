@@ -47,6 +47,7 @@ test("base createChatRunner retry network then success", async () => {
     retry: { network: { attempts: 2, delayMs: 1 } },
     fetchImpl: fakeFetch,
     dispatcher: null,
+    sdkDispatch: null,
     buildHeaders: () => ({}),
     getUrl: () => "https://api.example.com/chat",
     connectTimeoutMs: 5000,
@@ -71,6 +72,7 @@ test("base createChatRunner 429 retry once", async () => {
     retry: { 429: { attempts: 1, delayMs: 1 } },
     fetchImpl: fakeFetch,
     dispatcher: null,
+    sdkDispatch: null,
     buildHeaders: () => ({}),
     getUrl: () => "https://api.example.com/chat",
   });
@@ -103,4 +105,43 @@ test("base createListModelsRunner caches 10min", async () => {
   assert.equal(a[0].id, "myprov/m1");
   assert.equal(fetchCalls, 1, "second call should be cached");
   assert.deepEqual(a, b);
+});
+
+test("base createChatRunner：SDK 分派缺省命中，非流式委派原生", async () => {
+  const sdkBodies = [];
+  const nativeUrls = [];
+  const fakeSdk = {
+    enabled: true,
+    trySdk: async ({ body }) => {
+      sdkBodies.push(body);
+      return new Response("data: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    },
+  };
+  const fakeFetch = async (url) => { nativeUrls.push(url); return { status: 200, headers: new Map() }; };
+  const ring = createKeyRing(["sk-1"], { cooldownMs: 0 });
+  const { runChat } = createChatRunner({
+    id: "testbase", ring, cooldownMs: 0, retry: {}, fetchImpl: fakeFetch, dispatcher: null,
+    sdkDispatch: fakeSdk, buildHeaders: () => ({}), getUrl: () => "https://api.example.com/chat",
+  });
+  const r1 = await runChat({ model: "m", messages: [], stream: true }, ring, "K");
+  assert.equal(r1.status, 200);
+  assert.equal(sdkBodies.length, 1, "流式走 SDK");
+  const r2 = await runChat({ model: "m", messages: [], stream: false }, ring, "K");
+  assert.equal(r2.status, 200);
+  assert.equal(sdkBodies.length, 1, "非流式不进 SDK");
+  assert.equal(nativeUrls.length, 1, "非流式走原生");
+});
+
+test("base createChatRunner：sdkDispatch.enabled=false 时全走原生", async () => {
+  let native = 0;
+  const fakeFetch = async () => { native++; return { status: 200, headers: new Map() }; };
+  const ring = createKeyRing(["sk-1"], { cooldownMs: 0 });
+  const { runChat } = createChatRunner({
+    id: "testbase", ring, cooldownMs: 0, retry: {}, fetchImpl: fakeFetch, dispatcher: null,
+    sdkDispatch: { enabled: false, trySdk: async () => { throw new Error("must not call"); } },
+    buildHeaders: () => ({}), getUrl: () => "https://api.example.com/chat",
+  });
+  const r = await runChat({ model: "m", messages: [] }, ring, "K");
+  assert.equal(r.status, 200);
+  assert.equal(native, 1);
 });
