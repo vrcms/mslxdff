@@ -61,21 +61,29 @@ export function errorResponseFromSdkError(e, { marker = null } = {}) {
 export function streamResponseFromParts(parts, { marker = null, clock = Date.now, t0 = clock() } = {}) {
   const ser = createSseSerializer();
   const enc = new TextEncoder();
+  let cancelled = false;
   const stream = new ReadableStream({
     async start(controller) {
       try {
         for await (const part of parts) {
+          if (cancelled) break;
           const text = ser.push(part);
           if (text) controller.enqueue(enc.encode(text));
         }
       } catch (e) {
-        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: String(e?.message || e) } })}\n\n`));
+        try { controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: String(e?.message || e) } })}\n\n`)); } catch {}
       }
-      controller.enqueue(enc.encode(ser.end()));
-      controller.close();
+      try { controller.enqueue(enc.encode(ser.end())); controller.close(); } catch {}
     },
     cancel() {
-      try { parts.cancel?.(); } catch {}
+      // 客户端断开时 parts 仍被 start 的 for-await 锁定：直接 cancel 会抛 ERR_INVALID_STATE，
+      // 且异常经内部 promise 回调逃出同步 try/catch → unhandled rejection 崩进程（v0.1.111 实测 9 次）。
+      // 修复：置标志让迭代自然收尾，并同时吞掉同步异常与 promise rejection 两条路径。
+      cancelled = true;
+      try {
+        const p = parts?.cancel?.();
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch {}
     },
   });
   const out = new Response(stream, {
