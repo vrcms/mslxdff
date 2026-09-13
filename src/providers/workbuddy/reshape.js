@@ -139,7 +139,10 @@ export function reshapeWorkbuddySse(res) {
     },
     cancel() {
       closed = true;
-      try { reader.cancel(); } catch {}
+      try {
+        const p = reader.cancel();
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch {}
     },
   });
 
