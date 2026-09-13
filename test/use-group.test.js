@@ -151,11 +151,40 @@ describe("use-group 开关", () => {
     assert.equal(peerAttempted, false, "peer should not be attempted when useGroup off for opencode");
   });
 
-  it("workbuddy 500 且 useGroup=off 时也不走 peer（全局）", async () => {
-    saveUseGroup(false, { file: tmp.file });
-    // useGroup=off 为全局开关：所有供应商都不走组员
-    // 这里只断言决策函数；端到端 peer 不被尝试由 serial-trial 的 group-skip 保证
-    const { shouldUseGroupForModel } = await import("../src/state/schemas/use-group.js");
+  it("workbuddy 硬禁组员（ADR-0015 local-only）：全局 on 也只走本机", async () => {
+    saveUseGroup(true, { file: tmp.file });
+    const { shouldUseGroupForModel, isHardLocalOnly } = await import("../src/state/schemas/use-group.js");
+    // canonical 与 dash 两种形态都禁
     assert.equal(shouldUseGroupForModel("workbuddy/hy3", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("workbuddy-glm-5.3-flash", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("WORKBUDDY/HY3", { file: tmp.file }), false);
+    assert.equal(isHardLocalOnly("workbuddy/hy3"), true);
+    assert.equal(isHardLocalOnly("workbuddy-glm-5.3-flash"), true);
+    // 其他供应商不受影响
+    assert.equal(shouldUseGroupForModel("muse-spark-1.3-contributor-free", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("opencode/big-pickle", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), true);
+    assert.equal(isHardLocalOnly("bai/glm-5.3-flash"), false);
+    assert.equal(isHardLocalOnly("big-pickle"), false);
+  });
+
+  it("workbuddy 上游 500 且全局 on 时也不走 peer（仅本机直连）", async () => {
+    saveUseGroup(true, { file: tmp.file });
+    const upstream = {
+      chat: async () => new Response(JSON.stringify({ error: "upstream down" }), { status: 500, headers: { "content-type": "application/json" } }),
+    };
+    let peerAttempted = false;
+    const peers = {
+      ordered: () => {
+        peerAttempted = true;
+        return [{ url: "http://peer1" }];
+      },
+      orderedByLastError: () => [],
+      recordResult: async () => {},
+    };
+    const groups = { get: () => null };
+    const r = await withGateway({ upstream, peers, groups, model: "workbuddy/hy3" });
+    assert.ok(r.status === 500 || r.status === 502, `expected 500/502 got ${r.status} ${r.text}`);
+    assert.equal(peerAttempted, false, "workbuddy 不应尝试 peer（硬禁组员）");
   });
 });

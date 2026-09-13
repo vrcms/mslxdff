@@ -274,7 +274,7 @@ describe("sync-opencode ensureAll（picks 全量补齐，修 pick 了却不见 +
     assert.deepEqual(keys, ["big-pickle", "muse-spark-1.3-contributor-free"]);
   });
 
-  test("能力补齐：旧格式条目（仅 name）自动注入，已带 limit 的不动", async () => {
+  test("能力补齐：旧格式条目（仅 name）自动注入，缺 variants 的已带 limit 条目重注入档位", async () => {
     const file = tmpFile();
     const capsSvc = {
       ready: async () => {},
@@ -286,7 +286,7 @@ describe("sync-opencode ensureAll（picks 全量补齐，修 pick 了却不见 +
       }),
     };
     const { syncToOpencode } = await import("../src/sync-opencode.js");
-    // 预置：deepseek 旧格式（仅 name）、big-pickle 已带能力
+    // 预置：deepseek 旧格式（仅 name）、big-pickle 已带 limit 但缺 variants（老版本注入产物）
     await syncToOpencode({ id: "deepseek-v4-flash-free", token: "tok", port: 8989, file, keep: null, ensureAll: null });
     const { writeFileSync: wf, readFileSync: rf } = await import("node:fs");
     const cfg = JSON.parse(rf(file, "utf8"));
@@ -299,9 +299,9 @@ describe("sync-opencode ensureAll（picks 全量补齐，修 pick 了却不见 +
     const ds = data.provider.mslxdff.models["deepseek-v4-flash-free"];
     assert.equal(ds.limit.context, 99000, "旧条目应被注入能力");
     assert.equal(ds.reasoning, true);
-    assert.deepEqual(ds.effort_values ?? null, null);
-    assert.equal(data.provider.mslxdff.models["big-pickle"].limit.context, 1, "已带能力的条目不动");
+    assert.deepEqual(ds.variants, { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } }, "effort 档位应注入 variants（ctrl+t 可切换）");
+    assert.equal(data.provider.mslxdff.models["big-pickle"].variants.low.reasoningEffort, "low", "缺 variants 的条目应补档位");
     assert.ok(r.capsSummaryText.includes("low/high"), "当前模型返回摘要");
-    void r.upgraded; // upgraded 统计的是"非当前模型"的旧条目；deepseek 走 updated 分支不计数
+    void r.upgraded;
   });
 });

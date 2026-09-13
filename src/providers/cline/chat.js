@@ -1,6 +1,7 @@
 import { joinUrl, sleep } from "../base.js";
 import { clineHeaders } from "./headers.js";
 import { createTransport } from "../../transport/index.js";
+import { createSdkDispatch } from "../../upstream-engine/sdk/dispatch.js";
 
 function genSessionId() { return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 
@@ -70,12 +71,18 @@ export function createChatService({
   const resolvedBase = String(baseUrl).trim().replace(/\/+$/, "");
   const resolvedChat = chatPath || (String(resolvedBase).includes("/api/v1") ? "/chat/completions" : "/api/v1/chat/completions");
   const transport = createTransport({ fetchImpl, dispatcher, keepAlive: !!dispatcher, timeoutMs: connectTimeoutMs, retry: {} });
+  const sdk = createSdkDispatch({ id, providerName: id || "cline" });
 
-  async function clineFetch(body, sessionId) {
+  async function clineFetch(body, sessionId, allowSdk = false) {
     const token = await authPool.getAccessToken();
     const headers = clineHeaders(sessionId, token);
     const finalUrl = joinUrl(resolvedBase, resolvedChat);
     const isStream = body?.stream === true;
+    // SDK 通道（缺省）：仅客户端显式流式；forceStream 聚合与非流式保持原生（避免丢 nonStreamWithContentCheck）。
+    if (allowSdk && sdk.enabled) {
+      const r = await sdk.trySdk({ url: finalUrl, body, headers, fetchImpl });
+      if (r) return r;
+    }
     return transport.request({ url: finalUrl, headers, body, stream: isStream, timeoutMs: connectTimeoutMs });
   }
 
@@ -85,14 +92,22 @@ export function createChatService({
     return false;
   }
 
-  async function clineFetchWithRetry(body, sessionId) {
+  async function clineFetchWithRetry(body, sessionId, allowSdk = false) {
     const maxRetries = 4;
     let lastResp = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const resp = await authPool.enqueue(() => clineFetch(body, sessionId));
-      lastResp = resp;
+      const resp0 = await authPool.enqueue(() => clineFetch(body, sessionId, allowSdk));
+      let resp = resp0;
       let bodyText = "";
-      if (resp.status !== 200) { try { bodyText = await resp.text(); } catch {} }
+      if (resp.status !== 200) {
+        try { bodyText = await resp.text(); } catch {}
+        // 错误响应体已在此读走：原生 transport 的 text() 有缓存，而 SDK Response 的 body 一次性，
+        // 重建以便上层/客户端仍能读到错误详情（如 429 的 INFERENCE_CAP_ERROR）。
+        try {
+          resp = new Response(bodyText, { status: resp0.status, statusText: resp0.statusText, headers: new Headers(resp0.headers) });
+        } catch {}
+      }
+      lastResp = resp;
       const hit = isLimitHit(resp.status, bodyText);
       if (hit) {
         const { parseCooldown } = await import("./auth.js");
@@ -174,7 +189,7 @@ export function createChatService({
     }
     for (let netAttempt = 0; netAttempt < 3; netAttempt++) {
       try {
-        const resp = await clineFetchWithRetry(upstreamBody, sessionId);
+        const resp = await clineFetchWithRetry(upstreamBody, sessionId, isStream);
         if (!resp) throw new Error("empty response");
         if (!resp.ok) return resp;
         if (isStream) return resp;

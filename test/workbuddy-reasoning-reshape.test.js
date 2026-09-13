@@ -150,3 +150,38 @@ test("US4b: 错误状态（4xx/5xx）原样返回不整形", async () => {
   const out = reshapeWorkbuddySse(fake);
   assert.equal(out, fake);
 });
+
+// 回归：真实上游逐帧到达（帧间夹空白/短 reasoning 的无输出 chunk）。
+// 旧实现 pull 解析后未 enqueue 且消费者已挂起 read 时，WHATWG 流不再自动调度 pull → 整流永久停摆（首帧后卡死）。
+test("US5: 逐帧到达含无输出 chunk 时不卡死，reasoning/content/finish 全量到达", { timeout: 15000 }, async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const srv = await stub(async (req, res) => {
+    if (!req.url.includes("/v2/chat/completions")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 0, data: { accessToken: "k1" } }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(sseChunk({ role: "assistant", content: "", reasoning_content: "让" }));
+    await sleep(40);
+    res.write("\n"); // 只产生空行、无任何输出的 chunk（旧实现停摆触发点）
+    await sleep(40);
+    res.write(sseChunk({ content: "", reasoning_content: "我" }));
+    await sleep(40);
+    res.write(sseChunk({ content: "想" }));
+    await sleep(40);
+    res.write(sseChunk({}, { finish_reason: "stop" }));
+    res.end("data: [DONE]\n\n");
+  });
+  try {
+    const p = await makeProvider(urlOf(srv));
+    const res = await p.chat({ model: "glm-5.3-flash", messages: [] });
+    const frames = await collectStream(res);
+    const reasoning = frames.filter((f) => f.choices?.[0]?.delta?.reasoning_content).map((f) => f.choices[0].delta.reasoning_content).join("");
+    assert.equal(reasoning, "让我", "reasoning 全量到达");
+    const content = frames.filter((f) => f.choices?.[0]?.delta?.content).map((f) => f.choices[0].delta.content).join("");
+    assert.equal(content, "想", "content 帧到达");
+    assert.ok(frames.some((f) => f.choices?.[0]?.finish_reason === "stop"), "finish_reason 到达");
+    await p.close();
+  } finally { await closeSrv(srv); }
+});

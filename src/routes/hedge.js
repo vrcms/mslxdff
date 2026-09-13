@@ -18,8 +18,8 @@ function shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, mod
   if (!canForwardPeers) return false;
   if (!hasPeers) return false;
   if (!d || d <= 0) return false;
-  // 不做供应商级禁对冲特判：对冲仅按 useGroup/流式/peer 可用性决定
-  // muse-spark 走 /responses 流式（event: 包装 + 加密 reasoning），组员旧版无此整形且聚合 JSON 带错 header，必抢赢本地慢首块，需本地直出
+  // 供应商级禁对冲在 shouldUseGroupForModel 层收敛（workbuddy local-only 硬禁，见 ADR-0015）；
+  // 这里只留 muse-spark 特判：走 /responses 流式（event: 包装 + 加密 reasoning），组员旧版无此整形且聚合 JSON 带错 header，必抢赢本地慢首块，需本地直出
   if (String(model || "").toLowerCase().startsWith("muse-spark")) return false;
   return true;
 }

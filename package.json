@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.110",
+  "version": "0.1.111",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -29,5 +29,10 @@
   "license": "MIT",
   "dependencies": {
     "undici": "^5.28.4"
+  },
+  "optionalDependencies": {
+    "@ai-sdk/openai-compatible": "2.0.41",
+    "@ai-sdk/openai": "3.0.84",
+    "zod": "^3.25.76"
   }
 }

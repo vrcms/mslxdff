@@ -37,3 +37,32 @@ export function normalizeProviderModels(modelsObj) {
   }
   return out;
 }
+
+// workbuddy 上游原生字段（/console/enterprises/personal/models，first-party 最准）→ 统一 caps 形状
+// 实测字段（2026-09-11，29 模型全覆盖）：maxInputTokens/maxOutputTokens/supportsImages/
+// supportsReasoning/reasoning{effort,summary}/supportsToolCall/disabledMultimodal/credits/tags/name/vendor
+// reasoning 是"当前档位"非档位列表 → effortType=effort 但 effortValues=null、defaultEffort 记默认档
+export function normalizeWorkbuddyCaps(_id, m) {
+  const imageOk = Boolean(m?.supportsImages) && !m?.disabledMultimodal;
+  const reasoning = Boolean(m?.supportsReasoning);
+  const effort = reasoning && m?.reasoning && typeof m.reasoning === "object" ? String(m.reasoning.effort || "").trim() : "";
+  return {
+    reasoning,
+    effortType: reasoning ? "effort" : null,
+    // 上游只给当前档位不给档位列表；实测 hy3 reasoning_effort low/high 均生效（思考块 99 vs 210），
+    // 网关层按 OpenAI 兼容标准给通用三档（上游不识别时忽略，无害）
+    effortValues: reasoning ? ["low", "medium", "high"] : null,
+    defaultEffort: effort || null,
+    imageInput: imageOk,
+    toolCall: Boolean(m?.supportsToolCall),
+    context: Number(m?.maxInputTokens) || null,
+    maxOutput: Number(m?.maxOutputTokens) || null,
+    costIn: null,
+    costOut: null,
+    attachment: false,
+    temperature: m?.temperature != null,
+    releaseDate: null,
+    inputModalities: imageOk ? ["text", "image"] : ["text"],
+    outputModalities: ["text"],
+  };
+}

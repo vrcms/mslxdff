@@ -17,10 +17,10 @@ function mockFetch({ refreshOk = true, chatSse = true } = {}) {
     }
     if (u.includes("/chat/completions")) {
       calls.chat++;
-      const h = opts.headers || {};
-      assert.ok(String(h["User-Agent"]).includes("Cline/"), "must carry Cline UA");
-      assert.ok(String(h.Authorization).startsWith("Bearer workos:"), "must carry workos token");
-      assert.equal(h["X-CLIENT-TYPE"], "cline-sdk");
+      const h = new Headers(opts.headers || {});
+      assert.ok(String(h.get("user-agent")).includes("Cline/"), "must carry Cline UA");
+      assert.ok(String(h.get("authorization")).startsWith("Bearer workos:"), "must carry workos token");
+      assert.equal(h.get("x-client-type"), "cline-sdk");
       const body = JSON.parse(opts.body || "{}");
       if (chatSse) {
         const sse = `data: ${JSON.stringify({ id: "r1", choices: [{ delta: { content: "你好" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
@@ -147,6 +147,21 @@ test("cline: invalid_grant marks account dead, transient failure does not", asyn
   });
   await assert.rejects(() => livePool.refreshOne(livePool.getAccounts()[0]), /refresh_failed/);
   assert.equal(livePool.getAccounts()[0].dead, undefined, "transient 500 must not mark dead");
+});
+
+test("cline: 429 错误体在上层仍可读（SDK 通道 body 一次性需重建）", async () => {
+  const body429 = JSON.stringify({ error: { code: "INFERENCE_CAP_ERROR", message: "Daily free limit reached" } });
+  async function fetchImpl(url, opts) {
+    const u = String(url);
+    if (u.includes("/auth/refresh")) return new Response(JSON.stringify({ data: { accessToken: "at", refreshToken: DUMMY_RT, expiresAt: Date.now() + 600000 } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (u.includes("/chat/completions")) return new Response(body429, { status: 429, headers: { "Content-Type": "application/json" } });
+    return new Response("", { status: 404 });
+  }
+  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const res = await p.chat({ model: "z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: true });
+  assert.equal(res.status, 429);
+  assert.match(await res.text(), /Daily free limit reached/, "上层必须能读到错误体");
+  await p.close();
 });
 
 test("cline: refresh failure cools account and retry hits next", async () => {

@@ -132,3 +132,32 @@ export function normalizeFullId(id, knownProviders = []) {
   }
   return `${DEFAULT_PROVIDER}/${s}`;
 }
+
+const BUILTIN_PROVIDERS = new Set([DEFAULT_PROVIDER, "openrouter"]);
+
+/**
+ * 过滤 provider 已不存在的 picks 孤儿（纯函数，零 IO，可单测）。
+ * - 含 `/` 前缀：head（归一+小写）∉ 已知集合 → stale（如 amddev/*）。
+ * - Bare id：∉ 上游 liveIds ∪ allowlist 展开 → stale（如 laguna-s-2.1-free）。
+ * - provider 存在但未启用（如 deepseek 缺 baseUrl）→ 保留，不可用由 [error] 表达。
+ * - 未知一律保留（默认放行不误删显示）；dash 别名经 resolveAlias 还原后判定；
+ *   上游 liveIds 为空时 bare 一律保留（无法判定则放行）。
+ * 数据不动，只决定进不进 `-models` 交互列表 — 见 .scratch/models-stale-picks/SPEC.md。
+ */
+export function filterStalePicks(pickedIds, { knownProviders = [], liveIds = [], allowedIds = [], resolveAlias = getModelAlias } = {}) {
+  const known = new Set([...BUILTIN_PROVIDERS, ...(knownProviders || []).map((p) => normalizeProviderId(p).toLowerCase())]);
+  const live = new Set((liveIds || []).map((id) => String(id).toLowerCase()));
+  const allowed = new Set((allowedIds || []).map((id) => String(id).toLowerCase()));
+  return (pickedIds || []).filter((pick) => {
+    const raw = String(pick || "").trim();
+    if (!raw) return false;
+    let id = raw;
+    try { id = resolveAlias(raw) || raw; } catch { id = raw; }
+    const slash = String(id).indexOf("/");
+    if (slash > 0) return known.has(normalizeProviderId(id.slice(0, slash)).toLowerCase());
+    // 上游列表为空（刷新与缓存双失败的极端情况）时无法判定 bare 生死 → 保留（默认放行）
+    if (live.size === 0) return true;
+    const low = String(id).toLowerCase();
+    return live.has(low) || allowed.has(low);
+  });
+}

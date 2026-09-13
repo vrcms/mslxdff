@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createOpenRouterProvider } from "../src/providers/openrouter.js";
 
+let sdkInstalled = true;
+try { await import("@ai-sdk/openai-compatible"); } catch { sdkInstalled = false; }
+const skipSdk = sdkInstalled ? false : "SDK 未安装";
+
 function stub(handler) {
   const srv = createServer(handler);
   return new Promise((r) => srv.listen(0, "127.0.0.1", () => r(srv)));
@@ -76,7 +80,7 @@ test("openrouter chat requires key (no key => clear error)", async () => {
   });
   try {
     const p = createOpenRouterProvider({ apiKey: "", baseUrl: urlOf(srv), connectTimeoutMs: 1000 });
-    await assert.rejects(() => p.chat({ model: "google/gemma:free", messages: [] }), /MSLXDFF_OPENROUTER_KEY/);
+    await assert.rejects(() => p.chat({ model: "google/gemma:free", messages: [], stream: false }), /MSLXDFF_OPENROUTER_KEY/);
     await p.close();
   } finally {
     await closeSrv(srv);
@@ -120,7 +124,7 @@ test("openrouter chat retries a 5xx once then succeeds", async () => {
   let p;
   try {
     p = createOpenRouterProvider({ apiKey: "sk", baseUrl: urlOf(srv), retry: { 502: { attempts: 1, delayMs: 5 } }, connectTimeoutMs: 2000 });
-    const res = await p.chat({ model: "x:free", messages: [] });
+    const res = await p.chat({ model: "x:free", messages: [], stream: false });
     assert.equal(res.status, 200);
     assert.equal(calls, 2);
   } finally {
@@ -166,10 +170,10 @@ test("openrouter chat: all keys cooldown => throws provider unavailable", async 
       retry: { 502: { attempts: 0 } },
       connectTimeoutMs: 1000,
     });
-    await assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 502); // sk-a 失败（返回 res，不抛）
-    await assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 502); // sk-b 失败
+    await assert.equal((await p.chat({ model: "x:free", messages: [], stream: false })).status, 502); // sk-a 失败（返回 res，不抛）
+    await assert.equal((await p.chat({ model: "x:free", messages: [], stream: false })).status, 502); // sk-b 失败
     // 两个 key 均已在冷却 → 第三请求直接报 provider unavailable，零上游调用
-    await assert.rejects(() => p.chat({ model: "x:free", messages: [] }), /cooldown|unavailable/);
+    await assert.rejects(() => p.chat({ model: "x:free", messages: [], stream: false }), /cooldown|unavailable/);
     assert.equal(calls, 2, "third request must not hit upstream");
     assert.deepEqual(used.map((h) => h), ["Bearer sk-a", "Bearer sk-b"]);
   } finally {
@@ -195,9 +199,9 @@ test("openrouter chat: a failing key is cooled while healthy key still serves", 
     p = createOpenRouterProvider({ apiKeys: ["sk-bad", "sk-good"], baseUrl: urlOf(srv), cooldownMs: 60_000, connectTimeoutMs: 2000 });
     // 轮转：第 1 次 sk-bad(429 失败，默认重试 1 次 → 两次请求，冷却)；第 2 次 sk-good(成功)；
     // 第 3 次 sk-bad 已冷却 → 直接 sk-good
-    assert.equal((await p.chat({ model: "x:free", messages: [] })).status, 429);
-    await p.chat({ model: "x:free", messages: [] });
-    const r3 = await p.chat({ model: "x:free", messages: [] });
+    assert.equal((await p.chat({ model: "x:free", messages: [], stream: false })).status, 429);
+    await p.chat({ model: "x:free", messages: [], stream: false });
+    const r3 = await p.chat({ model: "x:free", messages: [], stream: false });
     assert.equal(r3.status, 200);
     assert.deepEqual(used, ["Bearer sk-bad", "Bearer sk-bad", "Bearer sk-good", "Bearer sk-good"]);
   } finally {

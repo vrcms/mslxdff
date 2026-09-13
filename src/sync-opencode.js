@@ -98,9 +98,10 @@ export async function ensureAllOpencodeModels(models, ensureAll, capsSvc) {
     const storageKey = internal.includes("/") ? internal.replace(/\//g, "-") : internal;
     if (!storageKey) continue;
     if (existing.has(storageKey)) {
-      // 已存在：旧格式条目（仅 name、无能力字段）自动升级注入；已带 limit 的新格式不动
+      // 已存在：旧格式条目（仅 name、无能力字段）或缺档位（variants，ctrl+t 推理档切换）自动重注入；
+      // enrich 幂等（字段覆盖一致），重复注入无害
       const cur = models[storageKey];
-      if (cur && typeof cur === "object" && !Array.isArray(cur) && cur.limit === undefined) {
+      if (cur && typeof cur === "object" && !Array.isArray(cur) && (cur.limit === undefined || cur.variants === undefined)) {
         const en = await enrichOpencodeEntry(cur, internal, capsSvc);
         models[storageKey] = en.entry;
         if (en.caps) upgraded++;

@@ -1,6 +1,7 @@
 import { createKeyRing } from "./keyring.js";
 import { joinModelId } from "./model-id.js";
 import { getUndici as compatGetUndici, compatFetch } from "../compat.js";
+import { createSdkDispatch } from "../upstream-engine/sdk/dispatch.js";
 
 const { fetch: UndiciFetch, Agent: UndiciAgent } = compatGetUndici();
 
@@ -44,8 +45,17 @@ export function collectApiKeysGeneric(id, apiKeys, apiKey, loadKeys) {
   return [...new Set(list.map((k) => k.trim()))];
 }
 
-export function createChatRunner({ id, ring, cooldownMs, retry, fetchImpl, dispatcher, buildHeaders, getUrl, connectTimeoutMs = 30_000 }) {
+export function createChatRunner({ id, ring, cooldownMs, retry, fetchImpl, dispatcher, buildHeaders, getUrl, connectTimeoutMs = 30_000, sdkDispatch } = {}) {
+  // SDK 通道（缺省）：仅流式；非流式委派原生，避免把 JSON 客户端 SSE 化。
+  const sdk = sdkDispatch === undefined ? createSdkDispatch({ id, providerName: id }) : sdkDispatch;
+
   async function attemptOnce(url, body, key, activeRing) {
+    if (sdk?.enabled && body?.stream !== false) {
+      let r;
+      try { r = await sdk.trySdk({ url, body, headers: buildHeaders(body, key), fetchImpl }); }
+      catch (err) { return err; } // 交 runChat 的 network 重试/冷却
+      if (r) return r.status === 401 && !activeRing.size ? { __needKey: true } : r;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`${id} timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
     try {

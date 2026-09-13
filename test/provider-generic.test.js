@@ -5,6 +5,10 @@ import { createOpenRouterProvider } from "../src/providers/openrouter.js";
 import { createProviderDispatcher } from "../src/providers/dispatcher.js";
 import { createKeyRing } from "../src/providers/keyring.js";
 
+let sdkInstalled = true;
+try { await import("@ai-sdk/openai-compatible"); } catch { sdkInstalled = false; }
+const skipSdk = sdkInstalled ? false : "SDK 未安装";
+
 describe("generic 深模块 extraHeaders + mapModel", () => {
   test("US2 generic 注入 X-Custom 同时保留 Authorization", async () => {
     let capturedHeaders = null;
@@ -78,8 +82,8 @@ describe("openrouter 薄适配", () => {
     const list = await p.listModels();
     assert.equal(list.length, 1);
     assert.equal(list[0].id, "openrouter/a");
-    // chat header 含 Referer
-    await p.chat({ model: "openrouter/a", messages: [] });
+    // chat header 含 Referer（非流式走原生，聚焦头注入）
+    await p.chat({ model: "openrouter/a", messages: [], stream: false });
     assert.equal(capturedHeaders["HTTP-Referer"], "https://github.com/mslxdff");
     assert.equal(capturedHeaders["X-Title"], "mslxdff");
     await p.close();
@@ -148,6 +152,42 @@ describe("dispatcher 纯化", () => {
     } finally {
       if (prev === undefined) delete process.env.MSLXDFF_ALIASES_FILE;
       else process.env.MSLXDFF_ALIASES_FILE = prev;
+    }
+  });
+});
+
+describe("generic SDK 通道（缺省）", () => {
+  test("缺省：流式 chat 走 AI SDK（统一标记头 + Authorization 透传 + 内容）", { skip: skipSdk }, async () => {
+    let seenHeaders = null;
+    const fakeFetch = async (url, opts) => {
+      seenHeaders = opts.headers;
+      return new Response(
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { content: "hi" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+    const p = createGenericProvider({ id: "sdktest", baseUrl: "https://example.com/v1", apiKeys: ["k1"], fetchImpl: fakeFetch, noAgent: true });
+    const res = await p.chat({ model: "m", messages: [{ role: "user", content: "hi" }], stream: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-mslxdff-upstream-engine"), "sdk");
+    assert.equal(new Headers(seenHeaders || {}).get("authorization"), "Bearer k1", "SDK 通道透传 Authorization");
+    assert.ok((await res.text()).includes('"content":"hi"'));
+    await p.close();
+  });
+
+  test("MSLXDFF_<ID>_SDK=0：局部回退原生通道（无标记头）", async () => {
+    const prev = process.env.MSLXDFF_SDKFALL_SDK;
+    process.env.MSLXDFF_SDKFALL_SDK = "0";
+    try {
+      const fakeFetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: "hi" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      const p = createGenericProvider({ id: "sdkfall", baseUrl: "https://example.com/v1", apiKeys: ["k1"], fetchImpl: fakeFetch, noAgent: true });
+      const res = await p.chat({ model: "m", messages: [{ role: "user", content: "hi" }], stream: true });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("x-mslxdff-upstream-engine"), null, "原生通道不得带引擎标记头");
+      await p.close();
+    } finally {
+      if (prev === undefined) delete process.env.MSLXDFF_SDKFALL_SDK;
+      else process.env.MSLXDFF_SDKFALL_SDK = prev;
     }
   });
 });

@@ -3,6 +3,8 @@ import { isAuthError, isInsufficientStatus } from "./auth.js";
 import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
 import { reshapeWorkbuddySse } from "./reshape.js";
+import { attemptOnceSdk } from "./sdk-chat.js";
+import { resolveEngineMode } from "../../upstream-engine/mode.js";
 
 function buildAuthHeaders(key, auth) {
   const h = {
@@ -79,7 +81,24 @@ export function createChatService({
     return { uid: "", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" };
   }
 
+  // SDK 通道（缺省启用）：缺省底层走 @ai-sdk/openai-compatible，`legacy`/关闭词
+  // （局部 MSLXDFF_WORKBUDDY_SDK，未设则继承全局 MSLXDFF_UPSTREAM_ENGINE）回退原生 transport；
+  // 不可用（Node16/未安装）自动回退并告警一次。上层轮换/刷新/reshape 全链复用。
+  // Note: 为什么默认 SDK、翻译层代价与回退语义 — 见 .agents/notes/implemented/feature/2026-09-12-workbuddy-sdk-channel.md
+  const engineMode = resolveEngineMode(process.env, "MSLXDFF_WORKBUDDY_SDK");
+  let sdkFallbackLogged = false;
   async function fetchOnce(url, body, key, auth) {
+    if (engineMode === "sdk") {
+      try {
+        return await attemptOnceSdk({ url, body, key, auth, buildHeaders: buildAuthHeaders });
+      } catch (e) {
+        if (!e || !e._sdkLoadFailed) throw e;
+        if (!sdkFallbackLogged) {
+          sdkFallbackLogged = true;
+          try { console.error(`[workbuddy] ${e.message} — 回退原生通道`); } catch {}
+        }
+      }
+    }
     return transport.request({ url, headers: buildAuthHeaders(key, auth), body: { ...body, stream: true }, stream: true });
   }
 
