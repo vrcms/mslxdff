@@ -107,9 +107,18 @@ export async function runSerialTrial(ctx, deps = {}) {
         return json(res, 403, errBody);
       }
       if (auto) await auto.recordError(model, { status: upRes.status });
-      lastErr = { model, upstream: upRes, status: upRes.status, message: null };
-      logError(model, upRes.status, `upstream ${upRes.status}`);
-      evt("upstream-error", { reqId, model, status: upRes.status, message: null, timing: upRes._t ?? null });
+      // 读失败响应体（clone 不影响后续 relay 转发原响应；1s 上限防流式错误体拖慢）
+      let upBody = "";
+      try {
+        upBody = String(await Promise.race([
+          upRes.clone().text(),
+          new Promise((r) => { const t = setTimeout(() => r(""), 1000); t.unref?.(); }),
+        ])).replace(/\s+/g, " ").slice(0, 400);
+      } catch {}
+      const upMsg = upBody || `upstream ${upRes.status}`;
+      lastErr = { model, upstream: upRes, status: upRes.status, message: upMsg };
+      logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}`);
+      evt("upstream-error", { reqId, model, status: upRes.status, message: upMsg.slice(0, 300), timing: upRes._t ?? null });
       upRes = null;
     }
     if (upRes) {
@@ -138,6 +147,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       } else {
         const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
         if (pr.handled) return { done: true };
+        if (pr.lastErr) lastErr = pr.lastErr;
       }
     }
     if (groups) {

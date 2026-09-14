@@ -136,7 +136,8 @@ export async function hedgedFirstChunkRace({
   try {
     peerWin =
       (await racePeerCandidates(candidates, handlerCtx)) ||
-      (await racePeerCandidates(handlerCtx.peers.orderedByLastError(), handlerCtx));
+      (await racePeerCandidates(handlerCtx.peers.orderedByLastError(), handlerCtx)) ||
+      (await racePeerCandidates(handlerCtx.peers.coolingByLastError(), handlerCtx));
   } catch (_) {
     peerWin = null;
   }

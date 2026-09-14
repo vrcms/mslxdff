@@ -227,12 +227,13 @@
 - **语法**：`mslxdff -debug`
 - **作用**：进入前台调试模式，实时跟随事件流。
 - **流程**：
-  1. `stopDaemon()` 停旧 daemon（若有则打印 `[debug] stopped background daemon (pid XXX)`）
-  2. 清空旧日志：`eventsFile()`、`callsFile()`、`errorsFile()`、`logFile()` 写空（计数并打印 `已清理旧日志 X 个文件 (dir)，本次会话干净输出`）
-  3. 打印 `--- live (Ctrl+C: stop debugging and restore background daemon) ---`
-  4. 置 `MSLXDFF_DEBUG=1`、`MSLXDFF_DAEMON=1`，**不退出**，落入 daemon 主体（`bus.subscribe(e => console.log(fmtEvent(e)))`）
-  5. 监听 `SIGINT/SIGTERM`：`restore()` → `startDaemon([])` 恢复后台 → `setTimeout(exit,300)`
-- **注意**：`-debug` 会清日志，适合排障时“干净输出”。退出调试务必 `Ctrl+C`，不要直接 `kill -9`。
+  1. **Linux 且 systemd 自启服务 active** 时先 `systemctl --user stop mslxdff`（unit 配了 `Restart=always`，仅 SIGTERM 停掉的 daemon 会被 systemd 3 秒后拉起、抢端口并反杀 debug 前台）
+  2. `stopDaemon()` 停旧 daemon（若有则打印 `[debug] stopped background daemon (pid XXX)`）
+  3. 清空旧日志：`eventsFile()`、`callsFile()`、`errorsFile()`、`logFile()` 写空（计数并打印 `已清理旧日志 X 个文件 (dir)，本次会话干净输出`）
+  4. 打印 `--- live (Ctrl+C: stop debugging and restore background daemon) ---`
+  5. 置 `MSLXDFF_DEBUG=1`、`MSLXDFF_DAEMON=1`，**不退出**，落入 daemon 主体（`bus.subscribe(e => console.log(fmtEvent(e)))`）
+  6. 监听 `SIGINT/SIGTERM`：先释放端口 → Linux 优先 `systemctl --user start mslxdff`，否则 `startDaemon([])` → `setTimeout(exit,300)`
+- **注意**：`-debug` 会清日志，适合排障时“干净输出”。退出调试务必 `Ctrl+C`，不要直接 `kill -9`。调试会话内 **auto-update 自动跳过**（否则启动 30 秒后的版本检查发现新版会把自己升级重启掉）。
 - **示例**：`mslxdff -debug`
 
 ### `-plugins` / `--plugins`
@@ -1133,7 +1134,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_PREFERRED_MODEL` | `big-pickle` | 覆盖出厂首选模型（`src/auto.js`） |
 | `MSLXDFF_MODEL_COOLDOWN_MS` | `60000` | 模型错误冷却 |
 | `MSLXDFF_SLOW_COOLDOWN_MS` | `300000` (5m) | 慢模型冷却 |
-| `MSLXDFF_PEER_COOLDOWN_MS` | `30000` | 组员 failover 冷却 |
+| `MSLXDFF_PEER_COOLDOWN_MS` | `30000` | 组员 failover 冷却（普通失败） |
+| `MSLXDFF_PEER_LIMIT_COOLDOWN_MS` | `300000` (5m) | 组员**连续 429** 后的长冷却（第 2 次起算，期间不再试它） |
 | `MSLXDFF_PEER_HEAT_MS` | `300000` (5m) | 组员成功后 hot 时长 |
 | `MSLXDFF_MAX_HOPS` | `3` | 组员转发最大跳数 |
 | `MSLXDFF_GROUP_SYNC_MS` | `60000` (1m) | 群组成员同步间隔 |

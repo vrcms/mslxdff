@@ -24,12 +24,20 @@ export async function handlePeerRelay({
   res,
 }) {
   evt("peer-race-start", { reqId: handlerCtx.reqId, model, peers: peers.ordered().length });
+  const peerErrors = [];
+  const pctx = { ...handlerCtx, peerErrors };
   const win =
-    (await racePeerCandidates(peers.ordered(), handlerCtx)) ||
-    (await racePeerCandidates(peers.orderedByLastError(), handlerCtx));
+    (await racePeerCandidates(peers.ordered(), pctx)) ||
+    (await racePeerCandidates(peers.orderedByLastError(), pctx)) ||
+    (await racePeerCandidates(peers.coolingByLastError(), pctx));
   if (!win) {
     evt("peer-race-lose", { reqId: handlerCtx.reqId, model });
-    return { handled: false };
+    // 组员全失败：把每个组员的真实返回汇总给调用者（否则只剩一个无信息的 429/502）
+    const detail = peerErrors.length
+      ? peerErrors.map((e) => `${e.peer} -> ${e.status}${e.message ? ` (${String(e.message).slice(0, 160)})` : ""}`).join("; ")
+      : "no peers available";
+    const allLimit = peerErrors.length > 0 && peerErrors.every((e) => e.status === 429);
+    return { handled: false, lastErr: { model, upstream: null, status: allLimit ? 429 : 502, message: `peers failed: ${detail}` } };
   }
   evt("peer-race-win", { reqId: handlerCtx.reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs });
   await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });

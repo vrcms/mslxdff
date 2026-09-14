@@ -142,7 +142,9 @@ export async function racePeerCandidates(candidates, ctx) {
           }
           if (failed) {
             const status = res instanceof Error ? 502 : res.status;
-            ctx.logError(ctx.model, status, res instanceof Error ? errMsg(res) : `peer ${status}`);
+            const failRec = { peer: peer.url, status, message: res instanceof Error ? errMsg(res) : null };
+            if (Array.isArray(ctx.peerErrors)) ctx.peerErrors.push(failRec);
+            ctx.logError(ctx.model, status, res instanceof Error ? `peer ${peer.url} ${errMsg(res)}` : `peer ${peer.url} ${status}`);
             ctx.evt("peer-error", { peer: peer.url, model: target, status, message: res instanceof Error ? errMsg(res) : null });
             order.push({ ok: false, peer, target, res, status });
           } else {
@@ -157,7 +159,7 @@ export async function racePeerCandidates(candidates, ctx) {
       for (const o of completed) {
         if (o === winner) continue;
         if (!o.ok) {
-          await ctx.peers.recordError(o.peer.url);
+          await ctx.peers.recordError(o.peer.url, { status: o.status });
           await ctx.peers.recordResult(o.peer.url, { ok: false });
         } else {
           await ctx.peers.recordResult(o.peer.url, { ok: true, latencyMs: o.latencyMs, model: o.target });
@@ -165,8 +167,25 @@ export async function racePeerCandidates(candidates, ctx) {
       }
       return { peer: winner.peer, target: winner.target, res: winner.res, latencyMs: winner.latencyMs };
     }
+    // 全失败：补读失败响应体（诊断 + 调用者详情）。仅在"本轮无 winner"时执行，
+    // 不拖慢成功路径；并行读、每 peer 上限 600ms，body 里才有 400/429 的真实原因。
+    await Promise.all(completed.map(async (o) => {
+      if (o.ok || !o.res || typeof o.res !== "object" || o.res instanceof Error) return;
+      try {
+        const snip = String(await Promise.race([
+          o.res.clone().text(),
+          new Promise((r) => { const t = setTimeout(() => r(""), 600); t.unref?.(); }),
+        ])).replace(/\s+/g, " ").slice(0, 300);
+        if (!snip) return;
+        if (Array.isArray(ctx.peerErrors)) {
+          const rec = ctx.peerErrors.find((x) => x.peer === o.peer.url && x.status === o.status && !x.message);
+          if (rec) rec.message = snip;
+        }
+        ctx.logError(ctx.model, o.status, `peer ${o.peer.url} ${o.status} body=${snip}`);
+      } catch {}
+    }));
     for (const o of completed) {
-      await ctx.peers.recordError(o.peer.url);
+      await ctx.peers.recordError(o.peer.url, { status: o.status });
       await ctx.peers.recordResult(o.peer.url, { ok: false });
     }
   }

@@ -378,6 +378,108 @@ test("peer in cooldown is skipped; local fallback to next model", async () => {
   }
 });
 
+test("all peers cooling -> last-resort attempt still uses the cooling peer", async () => {
+  const peerSrv = await stubChatServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ from: "peer", ok: true }));
+  });
+  const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
+  const peers = createPeersService({
+    peers: [{ name: "p", url: peerUrl, token: "t" }],
+    errors: { [peerUrl]: 1_000_000 - 5 }, // cooling（30s/60s 窗口内）
+    stats: {},
+    now: () => 1_000_000,
+    cooldownMs: 60_000,
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.from, "peer", "cooling peer must still get a last-resort attempt");
+    assert.ok(!peers.errors()[peerUrl], "success clears the cooling record");
+  } finally {
+    await app.close();
+    await new Promise((r) => peerSrv.close(r));
+  }
+});
+
+test("consecutive 429 escalates to the limit cooldown; single 429 stays short", async () => {
+  let t = 1_000_000;
+  const svc = createPeersService({
+    peers: [{ name: "a", url: "http://a", token: "t" }],
+    errors: {},
+    stats: {},
+    now: () => t,
+    cooldownMs: 30_000,
+    limitCooldownMs: 300_000,
+  });
+  await svc.recordError("http://a", { status: 429 });
+  t += 31_000;
+  assert.equal(svc.available().length, 1, "first 429 only cools the short window");
+  await svc.recordError("http://a", { status: 429 });
+  t += 31_000;
+  assert.equal(svc.available().length, 0, "second consecutive 429 keeps it cooling (5min window)");
+  t += 300_000;
+  assert.equal(svc.available().length, 1, "after the limit window it returns");
+});
+
+test("success clears the 429 streak", async () => {
+  const svc = createPeersService({ peers: [{ name: "a", url: "http://a", token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
+  await svc.recordError("http://a", { status: 429 });
+  await svc.recordError("http://a", { status: 429 });
+  assert.equal(svc.stat("http://a").streak429, 2);
+  await svc.recordResult("http://a", { ok: true, latencyMs: 5, model: "m" });
+  assert.equal(svc.stat("http://a").streak429, 0);
+  assert.equal(svc.errors()["http://a"], undefined);
+});
+
+test("coolingByLastError yields short-cooling peers only (429-locked excluded)", async () => {
+  const svc = createPeersService({
+    peers: [{ name: "a", url: "http://a", token: "t" }, { name: "b", url: "http://b", token: "t" }],
+    errors: { "http://a": 1_000_000 - 1_000 },
+    stats: {},
+    now: () => 1_000_000,
+    cooldownMs: 30_000,
+    limitCooldownMs: 300_000,
+  });
+  await svc.recordError("http://b", { status: 429 });
+  await svc.recordError("http://b", { status: 429 });
+  assert.deepEqual(svc.coolingByLastError().map((p) => p.url), ["http://a"], "429-locked peer excluded from last-resort");
+});
+
+test("peer failures surface detailed reasons to the caller", async () => {
+  const peerSrv = await stubChatServer((req, res) => {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "max_output_tokens must be >= 16" } }));
+  });
+  const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
+  const peers = createPeersService({ peers: [{ name: "p", url: peerUrl, token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 502);
+    const json = await res.json();
+    assert.match(String(json.error), /400/, "peer status code must reach the caller");
+    assert.match(String(json.error), /max_output_tokens/, "peer error body must reach the caller");
+  } finally {
+    await app.close();
+    await new Promise((r) => peerSrv.close(r));
+  }
+});
+
 test("incoming request with x-mslxdff-hops >= maxHops does not forward to peers", async () => {
   let peerHit = false;
   const peerSrv = await stubChatServer((req, res) => {
