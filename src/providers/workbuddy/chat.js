@@ -35,6 +35,19 @@ function withUidHeader(res, uid) {
   }
 }
 
+// 400 判型需读 body 文本；读过的 Response body 不可再读（下游转发报 "Body is unusable"），
+// 用文本重建一个等价响应（去掉 content-length 防长度不符）。
+function rewrapBody(res, txt) {
+  try { console.error(`[workbuddy] upstream ${res.status} body: ${String(txt).slice(0, 300)}`); } catch {}
+  try {
+    const h = new Headers(res.headers);
+    h.delete("content-length");
+    const r = new Response(txt, { status: res.status, statusText: res.statusText, headers: h });
+    try { r._t = res._t; } catch {}
+    return r;
+  } catch { return res; }
+}
+
 function nowMs(clock) { return typeof performance !== "undefined" && performance.now ? performance.now() : clock(); }
 
 function errRes(status, msg, reason, uid, t0, clock) {
@@ -109,7 +122,7 @@ export function createChatService({
     if (res.status < 400) return reshapeWorkbuddySse(res);
     let txt = "";
     try { txt = await res.text(); } catch {}
-    if (!isAuthError(res.status, txt)) return res;
+    if (!isAuthError(res.status, txt)) return rewrapBody(res, txt);
     const newKey = await authService?.refreshTokenFor?.(key, auth);
     if (!newKey) throw failErr(`workbuddy refresh failed for ${auth?.uid || ""}: ${txt.slice(0, 120)}`, _t0(), clock);
     const auth2 = authForKey(newKey);
@@ -118,6 +131,7 @@ export function createChatService({
     catch (e2) { throw e2; }
     let stillTxt = "";
     if (res2.status >= 400) { try { stillTxt = await res2.text(); } catch {} }
+    if (stillTxt) res2 = rewrapBody(res2, stillTxt);
     const stillAuth = isAuthError(res2.status, stillTxt);
     const uid2 = auth2.uid || auth.uid;
     res2 = withUidHeader(res2, uid2);
@@ -203,6 +217,7 @@ export function createChatService({
           lastErr = failErr(`workbuddy insufficient for ${uid}: ${txt.slice(0, 120)}`, t0, clock);
           continue;
         }
+        res = rewrapBody(res, txt);
       }
       if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500) try { activeRing.onError(key); } catch {}
       res = withUidHeader(res, uid);
