@@ -8,7 +8,7 @@ export { sdkBaseFromUrl };
 
 let channelLogged = false;
 
-export async function attemptOnceSdk({ url, body, key, auth, buildHeaders, clock = Date.now } = {}) {
+export async function attemptOnceSdk({ url, body, key, auth, buildHeaders, clock = Date.now, fetchImpl } = {}) {
   const out = await attemptGeneric({
     url,
     body,
@@ -16,6 +16,7 @@ export async function attemptOnceSdk({ url, body, key, auth, buildHeaders, clock
     providerName: "workbuddy",
     marker: { name: "x-mslxdff-workbuddy-channel", value: "sdk" },
     clock,
+    ...(fetchImpl ? { fetchImpl } : {}),
   });
   if (!channelLogged) {
     channelLogged = true;

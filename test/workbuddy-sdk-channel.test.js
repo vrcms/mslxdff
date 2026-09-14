@@ -84,4 +84,44 @@ describe("attemptOnceSdk", { skip }, () => {
       /chatPath/,
     );
   });
+
+  it("上游 400 → 返回状态码 Response 且打印 tool 序列诊断（fetchImpl 注入时）", async () => {
+    const srv = await wbStub((req, res) => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 11148, msg: "tool calls and tool results do not match" }));
+    });
+    const logs = [];
+    const orig = console.error;
+    console.error = (...a) => { logs.push(a.join(" ")); };
+    try {
+      const broken = {
+        model: "deepseek-v4.1-flash",
+        stream: true,
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "t", arguments: "{}" } }] },
+          { role: "user", content: "继续" },
+          { role: "tool", tool_call_id: "c1", content: "r" },
+        ],
+      };
+      const res = await attemptOnceSdk({
+        url: `${urlOf(srv)}/v2/chat/completions`,
+        body: broken,
+        key: "k",
+        auth: { uid: "u", domain: "www.codebuddy.cn" },
+        buildHeaders: () => ({ Accept: "text/event-stream" }),
+        fetchImpl: (u, i) => fetch(u, i),
+      });
+      assert.equal(res.status, 400);
+    } finally {
+      console.error = orig;
+      await closeSrv(srv);
+    }
+    const diag = logs.find((l) => l.includes("[sdk-upstream] 400"));
+    assert.ok(diag, `应打印诊断: ${logs.join(" ; ")}`);
+    assert.match(diag, /calls=1 results=1/);
+    assert.match(diag, /打断/);
+    const tail = logs.find((l) => l.includes("[sdk-upstream] tail:"));
+    assert.ok(tail && tail.includes("A{c1}") && tail.includes("T{c1}"), "尾部序列含调用与结果");
+  });
 });

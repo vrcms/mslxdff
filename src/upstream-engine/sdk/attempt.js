@@ -6,6 +6,7 @@
 // 见 .scratch/ai-sdk-upstream/{SPEC.md,SPEC-p3-responses.md} 与 docs/adr/0017。
 import { toModelPrompt, toModelTools, toModelToolChoice, toModelParams } from "./convert.js";
 import { createSseSerializer } from "./sse.js";
+import { diagnoseToolSequence, compactSequence } from "./diagnose.js";
 import { getUndici } from "../../compat.js";
 
 let sdkPromise = null;
@@ -42,6 +43,20 @@ export function sanitizeHeaders(headers) {
 
 export function markerHeaders(marker) {
   return marker && marker.name ? { [marker.name]: marker.value } : {};
+}
+
+// 错误路径诊断：AI SDK 的 APICallError 对 HTTP 4xx 的 requestBodyValues 是空对象（provider-utils 实测），
+// 故用包装 fetch 捕获真实发出的 body，在上游非 2xx 时打印 tool 序列断裂点与尾部序列。
+function logRequestDiagnosis(bodyText, status) {
+  if (!bodyText || typeof bodyText !== "string") return;
+  let parsed = null;
+  try { parsed = JSON.parse(bodyText); } catch { return; }
+  const msgs = parsed?.messages;
+  if (!Array.isArray(msgs)) return;
+  const { issues, summary } = diagnoseToolSequence(msgs);
+  console.error(`[sdk-upstream] ${status} ${summary} issues=${issues.length ? issues.join(" | ") : "none"}`);
+  console.error(`[sdk-upstream] head: ${compactSequence(msgs, 0, 6)}`);
+  console.error(`[sdk-upstream] tail: ${compactSequence(msgs, Math.max(0, msgs.length - 40))}`);
 }
 
 // SDK 抛出的 APICallError → 带状态码的 Response；非 HTTP 错误返回 null 由调用方 rethrow。
@@ -125,11 +140,19 @@ export async function attemptOnceSdk({
     err._sdkLoadFailed = true;
     throw err;
   }
+  // 包装注入的 fetch 以捕获真实请求体（诊断用）：不改变调用语义，仅在非 2xx 时被读取。
+  let lastBodyText = null;
+  const capturedFetch = fetchImpl
+    ? async (u, init) => {
+        try { if (init && typeof init.body === "string") lastBodyText = init.body; } catch {}
+        return fetchImpl(u, init);
+      }
+    : undefined;
   const provider = createOpenAICompatible({
     name: providerName,
     baseURL,
     headers: sanitizeHeaders(headers),
-    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    ...(capturedFetch ? { fetch: capturedFetch } : {}),
   });
   const model = provider.chatModel(String(body?.model || ""));
   let res;
@@ -142,7 +165,10 @@ export async function attemptOnceSdk({
     });
   } catch (e) {
     const mapped = errorResponseFromSdkError(e, { marker });
-    if (mapped) return mapped;
+    if (mapped) {
+      try { logRequestDiagnosis(lastBodyText, mapped.status); } catch {}
+      return mapped;
+    }
     throw e;
   }
   return streamResponseFromParts(res.stream, { marker, clock, t0 });

@@ -2,6 +2,7 @@ import { joinUrl } from "../base.js";
 import { isAuthError, isInsufficientStatus } from "./auth.js";
 import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
+import { dispatcherFetch } from "../../upstream-engine/sdk/attempt.js";
 import { reshapeWorkbuddySse } from "./reshape.js";
 import { attemptOnceSdk } from "./sdk-chat.js";
 import { sanitizeToolSequence } from "./sanitize-tools.js";
@@ -88,6 +89,9 @@ export function createChatService({
     try { defaultAppend(opts); } catch {}
   };
   const transport = createTransport({ fetchImpl, dispatcher, keepAlive: !!dispatcher, timeoutMs: connectTimeoutMs, retry: {} });
+  // SDK 通道与 legacy 同享 keep-alive 连接池（dispatcher → fetch 注入）；同时该 fetch 被 attempt 层
+  // 包装用于错误路径捕获请求体（上游 4xx 时打印 tool 序列断裂诊断，见 sdk/attempt.js）。
+  const sdkFetch = dispatcher ? dispatcherFetch(dispatcher) : fetchImpl;
 
   function authForKey(key) {
     const idx = keys.indexOf(key);
@@ -109,7 +113,7 @@ export function createChatService({
     const payload = rewriteWorkbuddyPayload(body);
     if (engineMode === "sdk") {
       try {
-        return await attemptOnceSdk({ url, body: payload, key, auth, buildHeaders: buildAuthHeaders });
+        return await attemptOnceSdk({ url, body: payload, key, auth, buildHeaders: buildAuthHeaders, ...(sdkFetch ? { fetchImpl: sdkFetch } : {}) });
       } catch (e) {
         if (!e || !e._sdkLoadFailed) throw e;
         if (!sdkFallbackLogged) {
@@ -157,8 +161,8 @@ export function createChatService({
     const url = joinUrl(baseUrl, chatPath);
     const t0 = nowMs(clock);
     const clean = sanitizeToolSequence(body?.messages);
-    if (clean.droppedCalls || clean.droppedResults) {
-      try { console.error(`[workbuddy] tool-sequence sanitized: dropped ${clean.droppedCalls} call(s), ${clean.droppedResults} result(s), model=${body?.model || ""}`); } catch {}
+    if (clean.droppedCalls || clean.droppedResults || clean.movedResults || clean.injectedHead) {
+      try { console.error(`[workbuddy] tool-sequence sanitized: dropped ${clean.droppedCalls} call(s), ${clean.droppedResults} result(s), moved ${clean.movedResults} result(s), head+${clean.injectedHead}, model=${body?.model || ""}`); } catch {}
       body = { ...body, messages: clean.messages };
     }
     _t0Val = t0;
