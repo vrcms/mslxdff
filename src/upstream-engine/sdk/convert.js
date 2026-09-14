@@ -52,8 +52,9 @@ export function toModelPrompt(messages) {
       const parts = [];
       const text = textOf(m.content);
       if (text) parts.push({ type: "text", text });
-      // 带加密态的 reasoning items（responses 通道思考跨轮）：AI SDK 会转成上游要的 encrypted reasoning item。
       // 无加密态时才退回纯文本 reasoning（chat 通道的 reasoning_content）。
+      // 空串是 payload 回填的有意标记（requiresReasoningContentOnAssistantMessages）：所有 assistant
+      // 必须带该字段——AI SDK 以 length>0 判定是否输出，故用 " " 占位而非 ""。
       const items = Array.isArray(m.reasoning_items) ? m.reasoning_items : [];
       let pushedEncrypted = false;
       for (const r of items) {
@@ -66,7 +67,9 @@ export function toModelPrompt(messages) {
         });
         pushedEncrypted = true;
       }
-      if (!pushedEncrypted && m.reasoning_content) parts.push({ type: "reasoning", text: String(m.reasoning_content) });
+      const rc = typeof m.reasoning_content === "string" ? m.reasoning_content
+        : (typeof m.reasoning === "string" ? m.reasoning : null);
+      if (!pushedEncrypted && rc !== null) parts.push({ type: "reasoning", text: rc || " " });
       for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
         if (!tc || typeof tc !== "object") continue;
         parts.push({
