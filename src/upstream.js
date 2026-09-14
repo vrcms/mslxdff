@@ -12,6 +12,24 @@ import { uuid } from "./compat.js";
 function genId(prefix) {
   return `${prefix}${uuid().replace(/-/g, "")}`;
 }
+// 上游按 session 做粘性路由（实测：固定 session 两次请求均 ~1.2s；每次随机时可能撞冷机器 26s+）。
+// 客户端（opencode AI SDK 路径）不带会话标识 → 用对话首两条消息（system + 首条 user）哈希做稳定会话：
+// 同一会话多轮里这两条不变 ⇒ 路由亲和稳定；不同会话天然分散。
+function sessionFromMessages(messages) {
+  try {
+    const msgs = Array.isArray(messages) ? messages : [];
+    const pick = (role) => {
+      const m = msgs.find((x) => x?.role === role);
+      if (!m) return "";
+      return typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+    };
+    const seed = `${pick("system")}|${pick("user")}`.slice(0, 4000);
+    if (seed === "|") return null;
+    return `ses_${crypto.createHash("sha1").update(seed).digest("hex").slice(0, 32)}`;
+  } catch {
+    return null;
+  }
+}
 function envInt(name, fallback) {
   const v = Number(process.env[name]);
   return Number.isInteger(v) && v > 0 ? v : fallback;
@@ -47,13 +65,16 @@ export function createOpencodeHeaderBuilder({ authToken = "public", env = proces
         Authorization: `Bearer ${authToken}`,
         "x-opencode-client": "desktop",
       };
-  function buildHeaders(body, { anonymous = anonFirst } = {}) {
+  // 无 messages 可哈希时的进程级兜底：至少 daemon 生命周期内稳定，不再每请求随机
+  const FALLBACK_SESSION = genId("ses_");
+  function buildHeaders(body, { anonymous = anonFirst, sessionId = null } = {}) {
     const isStream = body?.stream !== false;
+    const session = sessionId || sessionFromMessages(body?.messages) || FALLBACK_SESSION;
     const base = {
       ...baseHeaders,
       Accept: isStream ? "text/event-stream" : "*/*",
       "User-Agent": "opencode",
-      "x-opencode-session": genId("ses_"),
+      "x-opencode-session": session,
       "x-opencode-request": genId("msg_"),
       "x-opencode-project": "global",
     };
@@ -111,8 +132,10 @@ export function createUpstreamClient({
     hooks,
   });
 
-  async function chat(body) {
+  async function chat(body, opts = {}) {
     const isResp = isResponsesModel(body?.model);
+    // responses 路径的 reqBody 无 messages，会话哈希必须基于原始 chat body 计算
+    const sessionId = opts?.sessionId || sessionFromMessages(body?.messages) || null;
     const url = isResp ? `${baseUrl}/zen/v1/responses` : `${baseUrl}/zen/v1/chat/completions`;
     const reqBody = isResp ? chatToResponsesBody(body) : body;
     const t0 = performance.now();
@@ -123,7 +146,7 @@ export function createUpstreamClient({
       res = await transport.request({
         url,
         method: "POST",
-        headers: buildHeaders(reqBody),
+        headers: buildHeaders(reqBody, { sessionId }),
         body: reqBody,
         stream: body?.stream !== false,
         timeoutMs: connectTimeoutMs,
@@ -145,7 +168,7 @@ export function createUpstreamClient({
           anonRes = await transport.request({
             url,
             method: "POST",
-            headers: buildHeaders(reqBody, { anonymous: true }),
+            headers: buildHeaders(reqBody, { anonymous: true, sessionId }),
             body: reqBody,
             stream: body?.stream !== false,
             timeoutMs: connectTimeoutMs,

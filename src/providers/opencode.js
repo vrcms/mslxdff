@@ -8,7 +8,7 @@ export function createOpenCodeProvider({ upstream, modelsService, baseUrl, authT
   return {
     id: "opencode",
     upstream: client,
-    chat: (body) => client.chat(body),
+    chat: (body, opts) => client.chat(body, opts),
     preheat: (args) => client.preheat(args),
     close: () => client.close(),
     async listModels() {

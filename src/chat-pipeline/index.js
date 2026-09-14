@@ -82,7 +82,11 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
       for (const e of sel.errors) evt("plugin-hook-error", { reqId, hook: "model:select", plugin: e.plugin, error: e.error });
     }
 
-    const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid };
+    // 客户端会话标识（opencode 插件 chat.headers 注入）→ 透传上游做粘性路由/缓存亲和；
+    // 无头时由 upstream.js 按对话首两条消息哈希兜底（不再每请求随机）
+    const clientSession = String(req?.headers?.["x-session-affinity"] || req?.headers?.["x-session-id"] || "").trim() || null;
+    const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession };
+    if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
     const plan = planRoute(policy, {
       candidates: order,

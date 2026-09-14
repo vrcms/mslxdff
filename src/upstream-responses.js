@@ -2,8 +2,26 @@
  * responses 转换层 — 从 upstream.js 抽出的 muse-spark 专用形状转换。
  * chat ⇄ responses 互转纯函数，无网络、无副作用。
  */
+// responses 判定索引（models.dev 模型级 provider.npm，启动时注入）：
+// "@ai-sdk/openai" → responses 端点；未注入/未命中 → 前缀兜底（新模型早于 models.dev 刷新时仍可用）。
+let responsesNpmIndex = null;
+
+export function setResponsesNpmIndex(idx) {
+  responsesNpmIndex = idx instanceof Map ? idx : null;
+}
+
+export function _resetResponsesNpmIndex() {
+  responsesNpmIndex = null;
+}
+
 export function isResponsesModel(model) {
-  return String(model || "").toLowerCase().startsWith("muse-spark");
+  const m = String(model || "").toLowerCase().trim();
+  if (!m) return false;
+  if (responsesNpmIndex) {
+    const bare = m.replace(/^opencode\//, "");
+    if (responsesNpmIndex.has(bare)) return responsesNpmIndex.get(bare) === "@ai-sdk/openai";
+  }
+  return m.startsWith("muse-spark");
 }
 
 export function chatToResponsesBody(chatBody) {

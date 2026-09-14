@@ -70,6 +70,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       const chatOpts = {};
       if (Object.keys(shareKeys).length) chatOpts.shareKeys = shareKeys;
       if (workbuddyUid) chatOpts.workbuddyUid = workbuddyUid;
+      if (handlerCtx?.sessionId) chatOpts.sessionId = handlerCtx.sessionId;
       upRes = await upstream.chat(forwarded, Object.keys(chatOpts).length ? chatOpts : undefined);
       evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });
     } catch (err) {

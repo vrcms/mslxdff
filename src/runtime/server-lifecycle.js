@@ -115,6 +115,24 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
     }).catch(() => {});
   }, 100).unref?.();
 
+  // responses 模型判定改元数据驱动（models.dev provider.npm）：就绪后注入，每小时重查使新模型自动识别
+  void (async () => {
+    try {
+      const { globalCapabilities } = await import("../model-capabilities/index.js");
+      const { setResponsesNpmIndex } = await import("../upstream-responses.js");
+      const svc = globalCapabilities();
+      const apply = () => setResponsesNpmIndex(svc.npmIndex());
+      await svc.ready();
+      apply();
+      const entry = { ts: Date.now(), type: "responses-npm-index", models: svc.npmIndex().size };
+      try { bus.emit(entry); } catch {}
+      try { logs.appendEvent(entry); } catch {}
+      setInterval(() => { svc.ready().then(apply).catch(() => {}); }, 60 * 60 * 1000).unref?.();
+    } catch (e) {
+      try { logs.appendEvent({ ts: Date.now(), type: "responses-npm-index-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
+    }
+  })();
+
   models.startAutoRefresh();
   if (process.env.MSLXDFF_DAEMON) {
     writePid(process.pid, VERSION);
