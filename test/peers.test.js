@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPeersService, normalizePeerUrl } from "../src/peers.js";
+import { stripCallerBoundReasoning } from "../src/routes/peers.js";
 import { createAutoSelector } from "../src/auto.js";
 import { startServer } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
@@ -48,7 +49,7 @@ test("peers add/list/remove persist to state file", () => {
 
 test("peer cooling makes it unavailable until window passes", async () => {
   let t = 0;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }],
     errors: {},
     now: () => t,
@@ -63,7 +64,7 @@ test("peer cooling makes it unavailable until window passes", async () => {
 
 test("next() round-robins across available peers", () => {
   let t = 0;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [
       { name: "a", url: "http://a", token: "t" },
       { name: "b", url: "http://b", token: "t" },
@@ -83,7 +84,7 @@ const DEFAULT_STATUS = [
 ];
 
 test("recordResult ok warms the hot cache (EMA latency, model, reset fails)", async () => {
-  const svc = createPeersService({ peers: [{ name: "a", url: "http://a", token: "t" }], errors: {} });
+  const svc = createPeersService({ file: tmpStateFile(), peers: [{ name: "a", url: "http://a", token: "t" }], errors: {} });
   await svc.recordResult("http://a", { ok: true, latencyMs: 100, model: "m1-free" });
   let s = svc.stat("http://a");
   assert.equal(s.latencyMs, 100);
@@ -106,7 +107,7 @@ test("recordResult ok warms the hot cache (EMA latency, model, reset fails)", as
 
 test("ordered() puts hot peers first, then by earliest failure, never-failed last", async () => {
   const t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [
       { name: "a", url: "http://a", token: "t" },
       { name: "b", url: "http://b", token: "t" },
@@ -130,7 +131,7 @@ test("ordered() puts hot peers first, then by earliest failure, never-failed las
 
 test("isHot false after heat window or during cooldown", async () => {
   const t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }],
     errors: { "http://a": t - 1 },
     stats: { "http://a": { okAt: t - 1_000, latencyMs: 10, fails: 0, model: "m" } },
@@ -143,7 +144,7 @@ test("isHot false after heat window or during cooldown", async () => {
 
 test("isHot expires after heatMs", async () => {
   let t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }],
     errors: {},
     stats: { "http://a": { okAt: t, latencyMs: 10, fails: 0, model: "m" } },
@@ -158,7 +159,7 @@ test("isHot expires after heatMs", async () => {
 
 test("orderedByLastError prefers the peer that failed earliest (more time to recover)", async () => {
   const t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [
       { name: "a", url: "http://a", token: "t" },
       { name: "b", url: "http://b", token: "t" },
@@ -175,7 +176,7 @@ test("orderedByLastError prefers the peer that failed earliest (more time to rec
 
 test("recordResult ok clears the long-lived error memory", async () => {
   const t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }],
     errors: { "http://a": t - 300_000 },
     stats: {},
@@ -216,6 +217,8 @@ async function boot({ upstreamHandler, peers }) {
   });
   const auto = createAutoSelector({
     loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"],
+    file: tmpStateFile(),
+    latencies: {},
     errors: {},
     cooldownMs: 60_000,
     now: () => 1_000_000,
@@ -249,7 +252,7 @@ test("local success does not touch peers", async () => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
   });
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
   });
@@ -277,7 +280,7 @@ test("local model fails -> falls back to peer with same model (model-lock header
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ from: "peer", model: JSON.parse(body).model }));
   });
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "ptoken" }],
     errors: {},
     now: () => 1_000_000,
@@ -304,36 +307,34 @@ test("local model fails -> falls back to peer with same model (model-lock header
     await new Promise((r) => peerSrv.close(r));
   }
 });
-
-test("peer error recorded; request falls to next candidate model", async () => {
+test("peer error recorded; explicit model ends with the peer failure detail", async () => {
+  let peerChatHits = 0;
   const peerSrv = await stubChatServer((req, res) => {
+    peerChatHits++;
     res.writeHead(503, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "peer down" }));
   });
   const peers = createPeersService({
+    file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
     now: () => 1_000_000,
   });
   const app = await boot({
-    upstreamHandler: (req, res, body) => {
-      const model = JSON.parse(body).model;
-      if (model === "deepseek-v4-flash-free") {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "local down" }));
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ model, ok: true }));
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
     },
     peers,
   });
   try {
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 502);
     const json = await res.json();
-    assert.equal(json.model, "mimo-v2.5-free", "falls through to next candidate after peer fails");
+    assert.match(String(json.error), /peers failed/, "peer failure detail reaches the caller");
+    await new Promise((r) => setTimeout(r, 300));
     assert.ok(peers.errors()[`http://127.0.0.1:${peerSrv.address().port}`], "peer error must be recorded");
+    assert.equal(peerChatHits, 1, "same peer must not be retried within one request");
   } finally {
     await app.close();
     await new Promise((r) => peerSrv.close(r));
@@ -347,7 +348,7 @@ test("peer in cooldown is skipped; local fallback to next model", async () => {
     res.end(JSON.stringify({ error: "peer down" }));
   });
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: { [peerUrl]: 1_000_000 - 5 }, // cooling
     now: () => t,
@@ -367,7 +368,7 @@ test("peer in cooldown is skipped; local fallback to next model", async () => {
     peers,
   });
   try {
-    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    const res = await postChat(app, { model: "auto", messages: [] });
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.model, "mimo-v2.5-free");
@@ -384,7 +385,7 @@ test("all peers cooling -> last-resort attempt still uses the cooling peer", asy
     res.end(JSON.stringify({ from: "peer", ok: true }));
   });
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: { [peerUrl]: 1_000_000 - 5 }, // cooling（30s/60s 窗口内）
     stats: {},
@@ -412,7 +413,7 @@ test("all peers cooling -> last-resort attempt still uses the cooling peer", asy
 
 test("consecutive 429 escalates to the limit cooldown; single 429 stays short", async () => {
   let t = 1_000_000;
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }],
     errors: {},
     stats: {},
@@ -431,7 +432,7 @@ test("consecutive 429 escalates to the limit cooldown; single 429 stays short", 
 });
 
 test("success clears the 429 streak", async () => {
-  const svc = createPeersService({ peers: [{ name: "a", url: "http://a", token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
+  const svc = createPeersService({ file: tmpStateFile(), peers: [{ name: "a", url: "http://a", token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
   await svc.recordError("http://a", { status: 429 });
   await svc.recordError("http://a", { status: 429 });
   assert.equal(svc.stat("http://a").streak429, 2);
@@ -441,7 +442,7 @@ test("success clears the 429 streak", async () => {
 });
 
 test("coolingByLastError yields short-cooling peers only (429-locked excluded)", async () => {
-  const svc = createPeersService({
+  const svc = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "a", url: "http://a", token: "t" }, { name: "b", url: "http://b", token: "t" }],
     errors: { "http://a": 1_000_000 - 1_000 },
     stats: {},
@@ -460,7 +461,7 @@ test("peer failures surface detailed reasons to the caller", async () => {
     res.end(JSON.stringify({ error: { message: "max_output_tokens must be >= 16" } }));
   });
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({ peers: [{ name: "p", url: peerUrl, token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
+  const peers = createPeersService({ file: tmpStateFile(), peers: [{ name: "p", url: peerUrl, token: "t" }], errors: {}, stats: {}, cooldownMs: 30_000, limitCooldownMs: 300_000 });
   const app = await boot({
     upstreamHandler: (req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -487,7 +488,7 @@ test("incoming request with x-mslxdff-hops >= maxHops does not forward to peers"
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
   });
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
   });
@@ -523,7 +524,7 @@ test("peer only exposes healthy models: forwards the healthy one with lock", asy
       { id: "m3-free", status: "error", at: 456, code: 503 },
     ]
   );
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
   });
@@ -562,7 +563,7 @@ test("peer with no healthy models is skipped; local fallback serves", async () =
       { id: "m2-free", status: "error", at: 456, code: 503 },
     ]
   );
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
   });
@@ -608,7 +609,7 @@ test("hot peer is reused without a status probe when the remembered model matche
     }
   );
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: {},
     stats: { [peerUrl]: { okAt: Date.now(), latencyMs: 100, fails: 0, model: "deepseek-v4-flash-free" } },
@@ -649,7 +650,7 @@ test("hot peer with a different remembered model probes and prefers the requeste
     () => [{ id: "deepseek-v4-flash-free", status: "normal" }, { id: "fresh-free", status: "normal" }]
   );
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: {},
     stats: { [peerUrl]: { okAt: Date.now(), latencyMs: 100, fails: 0, model: "stale-free" } },
@@ -686,7 +687,7 @@ test("peer without the requested model falls back to its first healthy model", a
     () => [{ id: "hy3-free", status: "normal" }, { id: "nemotron-3-ultra-free", status: "normal" }]
   );
   const peerUrl = `http://127.0.0.1:${peerSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: peerUrl, token: "t" }],
     errors: {},
   });
@@ -720,7 +721,7 @@ test("peer status endpoint unreachable -> peer skipped, local fallback serves", 
       res.end(JSON.stringify({ error: "not found" }));
     }
   );
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
     errors: {},
   });
@@ -738,7 +739,7 @@ test("peer status endpoint unreachable -> peer skipped, local fallback serves", 
     peers,
   });
   try {
-    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    const res = await postChat(app, { model: "auto", messages: [] });
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.model, "mimo-v2.5-free", "unreachable peer skipped, local fallback serves");
@@ -771,7 +772,7 @@ test("two peers race: the fast responder wins even when the slow peer also succe
   );
   const slowUrl = `http://127.0.0.1:${slowSrv.address().port}`;
   const fastUrl = `http://127.0.0.1:${fastSrv.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [
       { name: "slow", url: slowUrl, token: "t" },
       { name: "fast", url: fastUrl, token: "t" },
@@ -796,6 +797,8 @@ test("two peers race: the fast responder wins even when the slow peer also succe
     // winner remembered: fast cached with the winning model; the late-arriving
     // slow success is also warmed so it stays a candidate next round
     assert.equal(peers.stat(fastUrl).model, "deepseek-v4-flash-free");
+    // 赢家立即返回；迟到成功由后台记账队列登记（等一拍再断言）
+    await new Promise((r) => setTimeout(r, 400));
     assert.equal(peers.stat(slowUrl)?.model, "deepseek-v4-flash-free", "late slow success also warmed");
   } finally {
     await app.close();
@@ -831,7 +834,7 @@ test("all peers fail -> retry ordered by earliest error, success clears error me
   );
   const urlB = `http://127.0.0.1:${srvB.address().port}`;
   const urlA = `http://127.0.0.1:${srvA.address().port}`;
-  const peers = createPeersService({
+  const peers = createPeersService({ file: tmpStateFile(),
     peers: [
       { name: "a", url: urlA, token: "t" },
       { name: "b", url: urlB, token: "t" },
@@ -854,6 +857,7 @@ test("all peers fail -> retry ordered by earliest error, success clears error me
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.from, "a", "A wins the concurrent race");
+    await new Promise((r) => setTimeout(r, 300));
     assert.ok(peers.errors()[urlB], "B keeps its failure record (long-lived until success)");
     assert.equal(peers.errors()[urlA], undefined, "A's failure memory cleared by its success");
 
@@ -862,10 +866,102 @@ test("all peers fail -> retry ordered by earliest error, success clears error me
     bFail = false;
     t += 60_000; // let cooldowns pass so B is eligible again
     await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    await new Promise((r) => setTimeout(r, 400));
     assert.equal(peers.errors()[urlB], undefined, "success clears B's error memory");
   } finally {
     await app.close();
     await new Promise((r) => srvB.close(r));
     await new Promise((r) => srvA.close(r));
+  }
+});
+
+test("stripCallerBoundReasoning removes assistant reasoning_items only", () => {
+  const body = {
+    model: "m",
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "yo", reasoning_items: [{ id: "r1", encrypted_content: "xxx" }], reasoning_content: "plain" },
+    ],
+  };
+  const out = stripCallerBoundReasoning(body);
+  assert.equal(out.messages[1].reasoning_items, undefined);
+  assert.equal(out.messages[1].reasoning_content, "plain");
+  assert.equal(body.messages[1].reasoning_items.length, 1, "original body untouched");
+  assert.equal(stripCallerBoundReasoning({ messages: [] }).messages.length, 0);
+  assert.equal(stripCallerBoundReasoning(undefined), undefined);
+});
+
+test("relayed body drops caller-bound reasoning but keeps plain reasoning", async () => {
+  const seen = [];
+  const peerSrv = await stubChatServer((req, res, body) => {
+    seen.push(JSON.parse(body));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ from: "peer" }));
+  });
+  const peers = createPeersService({ file: tmpStateFile(),
+    peers: [{ name: "p", url: `http://127.0.0.1:${peerSrv.address().port}`, token: "t" }],
+    errors: {},
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const res = await postChat(app, {
+      model: "deepseek-v4-flash-free",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "yo", reasoning_items: [{ id: "r1", encrypted_content: "enc" }], reasoning_content: "plain" },
+      ],
+    });
+    assert.equal(res.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].messages[1].reasoning_items, undefined, "encrypted reasoning must not cross the relay");
+    assert.equal(seen[0].messages[1].reasoning_content, "plain");
+  } finally {
+    await app.close();
+    await new Promise((r) => peerSrv.close(r));
+  }
+});
+
+test("first success returns immediately; a stalled peer does not block the race", async () => {
+  const fastSrv = await stubChatServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ from: "fast" }));
+  });
+  const stalledSrv = await stubChatServer(
+    () => { /* never responds */ },
+    () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
+  );
+  const peers = createPeersService({ file: tmpStateFile(),
+    peers: [
+      { name: "stalled", url: `http://127.0.0.1:${stalledSrv.address().port}`, token: "t" },
+      { name: "fast", url: `http://127.0.0.1:${fastSrv.address().port}`, token: "t" },
+    ],
+    errors: {},
+  });
+  const app = await boot({
+    upstreamHandler: (req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "local down" }));
+    },
+    peers,
+  });
+  try {
+    const t0 = Date.now();
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.from, "fast");
+    assert.ok(elapsed < 2000, `race must return on first success (took ${elapsed}ms)`);
+  } finally {
+    await app.close();
+    stalledSrv.closeAllConnections?.();
+    await new Promise((r) => stalledSrv.close(r));
+    await new Promise((r) => fastSrv.close(r));
   }
 });

@@ -3,10 +3,53 @@ import { isAutoModel } from "../auto.js";
 import { errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
-import { compatFetch, timeoutSignal } from "../compat.js";
+import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
+const DEFAULT_PEER_CONNECT_TIMEOUT_MS = 3_000;
+
+function peerConnectTimeoutMs() {
+  const n = Number(process.env.MSLXDFF_PEER_CONNECT_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_PEER_CONNECT_TIMEOUT_MS;
+}
+
+// 连接级超时（DNS + TCP/TLS 握手）：黑洞节点（端口挂起）必须快速失败，
+// 不能占用 30s 的响应超时（曾把一次请求拖到 92s）。仅 undici 可用时生效。
+let peerDispatcher = null;
+function getPeerDispatcher() {
+  if (peerDispatcher) return peerDispatcher;
+  const { Agent } = getUndici();
+  if (!Agent) return null;
+  try {
+    peerDispatcher = new Agent({
+      connect: { timeout: peerConnectTimeoutMs() },
+      headersTimeout: PEER_TIMEOUT_MS,
+      bodyTimeout: PEER_TIMEOUT_MS,
+      keepAliveTimeout: 30_000,
+      keepAliveMaxTimeout: 60_000,
+    });
+  } catch { peerDispatcher = null; }
+  return peerDispatcher;
+}
+
+// 跨 caller 中继必须剥离 reasoning 加密态：encrypted_content 由上游按 caller（出口）签发，
+// 换个节点转发会被拒（400 "reasoning encrypted_content was not issued to this caller"）。
+// 明文 reasoning_content 保留（不绑定 caller，thinking 模式需要）。
+export function stripCallerBoundReasoning(body) {
+  const messages = body?.messages;
+  if (!Array.isArray(messages)) return body;
+  let changed = false;
+  const out = messages.map((m) => {
+    if (!m || m.role !== "assistant") return m;
+    if (!Array.isArray(m.reasoning_items) || !m.reasoning_items.length) return m;
+    changed = true;
+    const copy = { ...m };
+    delete copy.reasoning_items;
+    return copy;
+  });
+  return changed ? { ...body, messages: out } : body;
+}
 
 function peerHealthTtlMs() {
   const n = Number(process.env.MSLXDFF_PEER_HEALTH_TTL_MS);
@@ -75,11 +118,13 @@ async function forwardToPeer(peer, body, model, hops) {
     // ADR-0008：该模型命中的供应商若开启 share → 附带瞬时 key 给组员借用（opencode 恒排除）
     const shareHeader = buildShareKeysHeader(model);
     if (shareHeader) headers[SHARE_KEYS_HEADER] = shareHeader;
+    const dispatcher = getPeerDispatcher();
     return await compatFetch(`${peer.url}/v1/chat/completions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ ...body, model }),
+      body: JSON.stringify({ ...stripCallerBoundReasoning(body), model }),
       signal: controller.signal,
+      ...(dispatcher ? { dispatcher } : {}),
     });
   } catch (err) {
     return err;
@@ -117,15 +162,30 @@ export const PEER_RACE_LIMIT = Number(process.env.MSLXDFF_PEER_RACE_LIMIT) > 0
   ? Number(process.env.MSLXDFF_PEER_RACE_LIMIT)
   : 3;
 
+// 串行记账队列：失败/迟到成功的记录不阻塞赢家返回，同时避免并发写盘互相覆盖。
+let peerRecordChain = Promise.resolve();
+function recordLater(fn) {
+  peerRecordChain = peerRecordChain.then(fn).catch(() => {});
+}
+
 export async function racePeerCandidates(candidates, ctx) {
-  for (let i = 0; i < candidates.length; i += PEER_RACE_LIMIT) {
-    const batch = candidates.slice(i, i + PEER_RACE_LIMIT);
+  const tried = (ctx.triedUrls ??= new Set());
+  const fresh = candidates.filter((p) => !tried.has(p.url));
+  for (let i = 0; i < fresh.length; i += PEER_RACE_LIMIT) {
+    const batch = fresh.slice(i, i + PEER_RACE_LIMIT);
     const prepared = (await Promise.all(batch.map((peer) => resolvePeerTarget(ctx, peer)))).filter(Boolean);
     if (!prepared.length) continue;
     const completed = await new Promise((resolve) => {
       const order = [];
       const total = prepared.length;
+      let settled = false;
+      const finish = (winner) => {
+        if (settled) return;
+        settled = true;
+        resolve({ list: order, winner });
+      };
       for (const { peer, target } of prepared) {
+        tried.add(peer.url);
         ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1 });
         // 插件 hook：peer:beforeForward — 转发给组员前观察
         if (ctx.plugins?.length) {
@@ -147,29 +207,29 @@ export async function racePeerCandidates(candidates, ctx) {
             ctx.logError(ctx.model, status, res instanceof Error ? `peer ${peer.url} ${errMsg(res)}` : `peer ${peer.url} ${status}`);
             ctx.evt("peer-error", { peer: peer.url, model: target, status, message: res instanceof Error ? errMsg(res) : null });
             order.push({ ok: false, peer, target, res, status });
+            recordLater(() => ctx.peers.recordError(peer.url, { status }));
+            recordLater(() => ctx.peers.recordResult(peer.url, { ok: false }));
+            if (order.length === total) finish(null);
           } else {
-            order.push({ ok: true, peer, target, res, latencyMs });
+            const entry = { ok: true, peer, target, res, latencyMs };
+            order.push(entry);
+            if (!settled) {
+              // 第一个成功立即返回：不等慢/黑洞候选（迟到者的记账由各分支自理）
+              finish(entry);
+            } else {
+              recordLater(() => ctx.peers.recordResult(peer.url, { ok: true, latencyMs, model: target }));
+            }
           }
-          if (order.length === total) resolve(order);
         });
       }
     });
-    const winner = completed.find((o) => o.ok);
+    const winner = completed.winner;
     if (winner) {
-      for (const o of completed) {
-        if (o === winner) continue;
-        if (!o.ok) {
-          await ctx.peers.recordError(o.peer.url, { status: o.status });
-          await ctx.peers.recordResult(o.peer.url, { ok: false });
-        } else {
-          await ctx.peers.recordResult(o.peer.url, { ok: true, latencyMs: o.latencyMs, model: o.target });
-        }
-      }
       return { peer: winner.peer, target: winner.target, res: winner.res, latencyMs: winner.latencyMs };
     }
     // 全失败：补读失败响应体（诊断 + 调用者详情）。仅在"本轮无 winner"时执行，
     // 不拖慢成功路径；并行读、每 peer 上限 600ms，body 里才有 400/429 的真实原因。
-    await Promise.all(completed.map(async (o) => {
+    await Promise.all(completed.list.map(async (o) => {
       if (o.ok || !o.res || typeof o.res !== "object" || o.res instanceof Error) return;
       try {
         const snip = String(await Promise.race([
@@ -184,10 +244,6 @@ export async function racePeerCandidates(candidates, ctx) {
         ctx.logError(ctx.model, o.status, `peer ${o.peer.url} ${o.status} body=${snip}`);
       } catch {}
     }));
-    for (const o of completed) {
-      await ctx.peers.recordError(o.peer.url, { status: o.status });
-      await ctx.peers.recordResult(o.peer.url, { ok: false });
-    }
   }
   return null;
 }

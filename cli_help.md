@@ -1142,6 +1142,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_BROADBAND_STALE_MS` | `90000` (90s) | 宽带成员心跳过期阈值 |
 | `MSLXDFF_PEER_HEALTH_TTL_MS` | — | 组员健康缓存 TTL（`src/routes/peers.js`） |
 | `MSLXDFF_PEER_RACE_LIMIT` | — | 组员并发竞速限制 |
+| `MSLXDFF_PEER_CONNECT_TIMEOUT_MS` | `3000` | 组员转发连接级超时（DNS+TCP/TLS 握手）；黑洞节点快速失败，不再占用 30s 响应超时 |
 | `MSLXDFF_BAN_WINDOW_MS` | `172800000` (48h) | 加群失败封禁窗口 |
 | `MSLXDFF_BAN_THRESHOLD` | `5` | 封禁阈值（窗口内失败次数） |
 | `MSLXDFF_USE_GROUP` | `1` (on) | 组员中继总开关（`0/off` 关闭后所有供应商仅本机，不走 via-route/hedge/peer/broadband；可被 `-use-group` state 覆盖，env 优先级更高） |
