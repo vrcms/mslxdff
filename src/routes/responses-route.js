@@ -112,6 +112,15 @@ export async function responsesHandler(ctx) {
     inputKinds: Array.isArray(body?.input) ? [...new Set(body.input.map((i) => i?.type))] : null,
     tools: Array.isArray(body?.tools) ? body.tools.length : 0,
     instructionsLen: String(body?.instructions || "").length,
+    // 文本丢失定位：各 message item 的 content 形状（part 类型 + 文本长度 + 头部）
+    contentShapes: Array.isArray(body?.input)
+      ? body.input.filter((i) => i && (i.type === "message" || i.role)).map((m) => ({
+          type: m.type ?? "(无type)", role: m.role,
+          cType: Array.isArray(m.content) ? "array" : typeof m.content,
+          parts: Array.isArray(m.content) ? m.content.map((p) => `${p?.type ?? "?"}:${typeof p?.text === "string" ? p.text.length : "-"}`).slice(0, 6) : null,
+          textHead: typeof m.content === "string" ? m.content.slice(0, 50) : null,
+        })).slice(0, 10)
+      : null,
   }));
   let chatBody;
   try {

@@ -43,7 +43,8 @@ export function responsesToChatBody(req = {}) {
       }
       continue;
     }
-    if (it.type === "message") {
+    // responses 规范：message item 的 type 可省（AI SDK/opencode 就不发）→ 有 role 即按 message 处理
+    if (it.type === "message" || (!it.type && it.role)) {
       const msg = { role: it.role || "user", content: inputTextOf(it.content) };
       if (pendingReasoning.length && msg.role === "assistant") { msg.reasoning_items = pendingReasoning; pendingReasoning = []; }
       messages.push(msg);
