@@ -49,6 +49,8 @@ export async function runSerialTrial(ctx, deps = {}) {
   for (let idx = 0; idx < order.length; idx++) {
     const model = order[idx];
     handlerCtx.model = model;
+    handlerCtx.orderLen = order.length;
+    handlerCtx.idx = idx;
     evt("model-try", { reqId, model, idx, remaining: order.length - idx });
     if (plugins?.length) {
       const bt = await runHook(plugins, "model:beforeTry", { reqId, requested, model, idx, hops });

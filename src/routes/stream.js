@@ -11,6 +11,14 @@ function chunkText(chunk) {
   return "";
 }
 
+// body.cancel() 可能返回非 Promise（自定义/AI SDK 流）——同步异常与 rejection 双路径都要吞掉
+function cancelBody(body) {
+  try {
+    const p = typeof body?.cancel === "function" ? body.cancel() : null;
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch { /* ignore */ }
+}
+
 export const SLOW_TOTAL_MS = (() => {
   const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
   return Number.isInteger(n) && n > 0 ? n : 20_000;
@@ -18,7 +26,8 @@ export const SLOW_TOTAL_MS = (() => {
 
 export const STREAM_TIMEOUT_MS = (() => {
   const n = Number(process.env.MSLXDFF_STREAM_TIMEOUT_MS);
-  return Number.isInteger(n) && n > 0 ? n : 25_000;
+  // 0 = 显式关闭首块超时（慢思考模型专用）；未设/非法值 → 默认 25s
+  return Number.isInteger(n) && n >= 0 ? n : 25_000;
 })();
 
 export const STALL_TIMEOUT_MS = (() => {
@@ -75,6 +84,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     downstreamClosed: false,
     usage: null,
     chars: 0,
+    recoveries: 0,
   };
   let prevChunkAt = t0;
   const onClose = () => {
@@ -106,20 +116,22 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           ? setTimeout(() => {
               stalled = true;
               detail.exitReason = "stall";
-              if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+              cancelBody(upRes.body);
             }, STALL_TIMEOUT_MS)
           : null;
       };
-      let firstTimer = setTimeout(() => {
-        timedOut = true;
-        detail.exitReason = "first-timeout";
-        if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
-      }, streamTimeoutMs);
+      let firstTimer = streamTimeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            detail.exitReason = "first-timeout";
+            cancelBody(upRes.body);
+          }, streamTimeoutMs)
+        : null;
       const maxTimer = MAX_STREAM_MS
         ? setTimeout(() => {
             tooLong = true;
             detail.exitReason = "max";
-            if (typeof upRes.body.cancel === "function") upRes.body.cancel().catch(() => {});
+            cancelBody(upRes.body);
           }, MAX_STREAM_MS)
         : null;
       try {
@@ -177,6 +189,15 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
               } catch {}
             }
           } catch { /* ignore */ }
+          // 首块/空闲超时后上游仍吐出了数据 → 只是慢，不是死：撤销超时判定，照常转发
+          //（cancel 是协作式的，缓冲数据仍会到达；丢掉已到达的数据是纯损失）
+          if (timedOut || stalled) {
+            timedOut = false;
+            stalled = false;
+            detail.recoveries = (detail.recoveries || 0) + 1;
+            if (detail.exitReason === "first-timeout" || detail.exitReason === "stall") detail.exitReason = null;
+            if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
+          }
           if (timedOut || stalled || tooLong) break;
           if (first) {
             first = false;
@@ -216,7 +237,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       }
       if (timedOut && !wroteAny) {
         res.removeListener("close", onClose);
-        return { status: STREAM_TIMEOUT_MS, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
+        return { status: streamTimeoutMs, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
       }
       if ((stalled || tooLong) && wroteAny) {
         interrupted = true;
