@@ -101,6 +101,7 @@ export async function handleProviderAdd(id, sub, rest) {
   console.log(`  share: ${loadProviderShareKeys(nid) ? "ON" : "off"}   (mslxdff -provider ${nid} share on|off)`);
   console.log(`  allowAny: OFF (secure, empty allowlist = 403 block before upstream) — enable via: mslxdff -provider ${nid} allowAny on`);
   console.log(`  use as: ${nid}/<model-id>  — restart daemon to activate`);
+  if (allowedModels.length) console.log(`  opencode 中使用: mslxdff -setto opencode ${nid}/${allowedModels[0]}  (同步进 opencode.json，会一并设为默认模型)`);
   console.log(`  NOTE: empty allowlist = 403 before upstream, no cost — must set allowlist to use`);
   process.exit(0);
 }

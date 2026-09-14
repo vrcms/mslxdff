@@ -11,7 +11,12 @@ export function setupAutoUpdate({ VERSION, bus, logs }) {
     const line = `[auto-update] ${type} ${JSON.stringify(data)}`;
     console.log(line);
   }
-  if (autoUpdateMs) {
+  // debug 会话不自动升级：debug 前台会把自己的 pid 写入 daemon.pid，
+  // auto-update 的 stopDaemon() 会把它自己停掉（现象：-debug 跑一会儿就"自己退出"）
+  if (autoUpdateMs && process.env.MSLXDFF_DEBUG === "1") {
+    console.log(`auto-update: skipped (debug session)`);
+    emitAutoUpdate("auto-update-skipped", { intervalMs: autoUpdateMs, current: VERSION, reason: "debug" });
+  } else if (autoUpdateMs) {
     console.log(`auto-update enabled: checking every ${Math.round(autoUpdateMs / 60000)}m`);
     emitAutoUpdate("auto-update-enabled", { intervalMs: autoUpdateMs, current: VERSION });
     setTimeout(() => {

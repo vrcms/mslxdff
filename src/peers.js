@@ -1,6 +1,7 @@
 import { loadPeers, savePeers, loadPeerErrors, savePeerErrors, loadPeerStats, savePeerStats } from "./state.js";
 
 export const DEFAULT_PEER_COOLDOWN_MS = 30_000;
+export const DEFAULT_PEER_LIMIT_COOLDOWN_MS = 5 * 60_000;
 export const DEFAULT_PEER_HEAT_MS = 5 * 60_000;
 export const DEFAULT_MAX_HOPS = 3;
 export const DEFAULT_BROADBAND_STALE_MS = 90_000;
@@ -28,6 +29,7 @@ export function createPeersService({
   file,
   now = () => Date.now(),
   cooldownMs = DEFAULT_PEER_COOLDOWN_MS,
+  limitCooldownMs = DEFAULT_PEER_LIMIT_COOLDOWN_MS,
   heatMs = DEFAULT_PEER_HEAT_MS,
   peers: seedPeers,
   errors: seedErrors,
@@ -75,10 +77,18 @@ export function createPeersService({
     return before - list.length;
   }
 
+  // 分级冷却：连续 429（streak >= 2）→ limitCooldownMs（限流恢复慢，5min 内不再考虑）；
+  // 其他失败（网络抖动、5xx）→ cooldownMs（可能几秒恢复，给快速重试机会）。
+  function coolingWindowMs(url) {
+    const streak = stats[url]?.streak429 ?? 0;
+    return streak >= 2 ? limitCooldownMs : cooldownMs;
+  }
+
   function isCooling(url) {
-    if (!cooldownMs) return false;
+    const win = coolingWindowMs(url);
+    if (!win) return false;
     const err = lastErrorAt[url];
-    if (typeof err === "number" && now() - err < cooldownMs) return true;
+    if (typeof err === "number" && now() - err < win) return true;
     const peer = list.find((p) => p.url === url);
     if (peer && isBroadbandStale(peer, now(), broadbandStaleMs())) return true;
     return false;
@@ -148,6 +158,21 @@ export function createPeersService({
 
   let cursor = 0;
 
+  // 兜底重试集合：仅"因错误冷却中"的 peer（按最早失败优先）。
+  // 场景：唯一可用节点偶发失败被冷却锁死 → 主链零候选/全败时，兜底给它一次机会；
+  // 成功会被 recordResult 清除错误记录、回归热路径，避免"明明能用的节点被 30s 冷却全灭"。
+  function coolingByLastError() {
+    const t = now();
+    return list
+      .filter((p) => {
+        const err = lastErrorAt[p.url];
+        if (typeof err !== "number") return false;
+        if ((stats[p.url]?.streak429 ?? 0) >= 2) return false; // 429 长冷却：兜底也不考虑
+        return t - err < cooldownMs;
+      })
+      .sort((a, b) => (lastErrorAt[a.url] ?? 0) - (lastErrorAt[b.url] ?? 0));
+  }
+
   function next() {
     const avail = available();
     if (!avail.length) return null;
@@ -158,10 +183,16 @@ export function createPeersService({
   // Long-lived error memory: a peer keeps its last-error timestamp until a
   // subsequent success resets it (success clears the failure record) or the
   // error is no longer in the persist store on next load.
-  async function recordError(url) {
+  async function recordError(url, { status } = {}) {
     if (!url) return;
     lastErrorAt[url] = now();
     await persistErrors({ ...lastErrorAt });
+    // 连续 429 计数（仅成功清零）：第 2 次起进入长冷却——该 peer 大概率真被限流，不再频繁试它
+    if (Number(status) === 429) {
+      const prev = stats[url] || {};
+      stats[url] = { ...prev, streak429: (prev.streak429 || 0) + 1 };
+      await persistStats({ ...stats });
+    }
   }
 
   // Outcome of a forwarded request: ok updates the hot-cache (EMA latency,
@@ -182,6 +213,7 @@ export function createPeersService({
           : (typeof latencyMs === "number" ? latencyMs : prev.latencyMs ?? 0),
         fails: 0,
         model: model || prev.model || "",
+        streak429: 0,
       };
     } else {
       const prev = stats[url] || {};
@@ -194,7 +226,7 @@ export function createPeersService({
     all, add, remove, removeByGroup, isCooling, isBroadbandCooling, isBroadbandStale: (url) => {
       const peer = list.find((p) => p.url === url);
       return peer ? isBroadbandStale(peer, now(), broadbandStaleMs()) : false;
-    }, isHot, stat, ordered, orderedByLastError, available, next,
+    }, isHot, stat, ordered, orderedByLastError, coolingByLastError, available, next,
     recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
   };
 }

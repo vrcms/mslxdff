@@ -11,7 +11,7 @@ import { logDir, appendEvent } from "../logs.js";
 import { loadPlugins, runHook, resolvePluginDirs } from "../plugins.js";
 import { createOpenCodeProvider } from "../providers/opencode.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderConfigs } from "../state.js";
-import { refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerHeatMs, banWindowMs, banThreshold } from "../cli/policy.js";
+import { refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerLimitCooldownMs, peerHeatMs, banWindowMs, banThreshold } from "../cli/policy.js";
 import { errMsg } from "../cli/util.js";
 
 /**
@@ -140,7 +140,7 @@ export async function setupProviders() {
       }
     },
   });
-  const peers = createPeersService({ cooldownMs: peerCooldownMs(), heatMs: peerHeatMs() });
+  const peers = createPeersService({ cooldownMs: peerCooldownMs(), limitCooldownMs: peerLimitCooldownMs(), heatMs: peerHeatMs() });
   const groups = createGroupsService({});
   const bans = createBansService({ windowMs: banWindowMs(), threshold: banThreshold() });
 

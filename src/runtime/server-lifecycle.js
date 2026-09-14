@@ -37,8 +37,16 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
       } catch {}
     });
     const { startDaemon: sd } = await import("../daemon.js");
-    const restore2 = () => {
+    const restore2 = async () => {
       console.log("\n[debug] restoring background daemon...");
+      try { await srv.close(); } catch {} // 先释放端口，避免恢复的 daemon 抢端口互杀
+      if (process.platform === "linux") {
+        try {
+          const { execFile } = await import("node:child_process");
+          const ok = await new Promise((res) => execFile("systemctl", ["--user", "start", "mslxdff"], { windowsHide: true, timeout: 8000 }, (e) => res(!e)));
+          if (ok) { console.log("[debug] systemd user service restarted (mslxdff)"); setTimeout(() => process.exit(0), 300); return; }
+        } catch {}
+      }
       try {
         const restoredPid = sd([]);
         console.log(`[debug] daemon restored (pid ${restoredPid})`);

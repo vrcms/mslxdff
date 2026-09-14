@@ -95,8 +95,29 @@ export async function handleDaemonFlag(args, VERSION) {
 
 export async function handleDebug(args) {
   if (!(args.includes("-debug") || args.includes("--debug"))) return false;
+  // systemd 自启协同：若后台 daemon 由 user service（Restart=always, RestartSec=3）托管，
+  // 仅 stopDaemon() 会让 systemd 3 秒后拉起新实例 → 抢 8989 → EADDRINUSE 自愈反杀本 debug 前台。
+  // 必须先 systemctl stop（主动停止不会被 Restart 拉起）。
+  if (process.platform === "linux") {
+    try {
+      const { execFile } = await import("node:child_process");
+      const active = await new Promise((res) => execFile("systemctl", ["--user", "is-active", "mslxdff"], { windowsHide: true, timeout: 4000 }, (e, so) => res(String(so || "").trim())));
+      if (active === "active") {
+        await new Promise((res) => execFile("systemctl", ["--user", "stop", "mslxdff"], { windowsHide: true, timeout: 6000 }, () => res()));
+        console.log("[debug] stopped systemd user service (mslxdff) — it will be restarted on exit");
+      }
+    } catch {}
+  }
   const { stopped, pid } = stopDaemon();
   if (stopped) console.log(`[debug] stopped background daemon (pid ${pid})`);
+  // 等旧 daemon 真正退出再抢端口（Windows 端口释放有延迟，否则 EADDRINUSE 会让 debug 立即崩）
+  if (stopped && pid) {
+    const t0 = Date.now();
+    while (isPidAlive(pid) && Date.now() - t0 < 4000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
   try {
     const dir = logDir();
     const toClear = [eventsFile(), callsFile(), errorsFile(), logFile()];

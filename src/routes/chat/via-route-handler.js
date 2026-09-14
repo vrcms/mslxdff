@@ -104,7 +104,7 @@ export async function handleViaRoute({
     try { bodyText = await upRes.clone().text(); } catch {}
     const msg = bodyText.slice(0, 300) || errMsg(upRes) || `peer ${status}`;
     evt("via-route-peer-error", { reqId: handlerCtx.reqId, peer: peer.url, model, status, message: msg.slice(0, 200) });
-    try { await peers.recordError(peer.url); } catch {}
+    try { await peers.recordError(peer.url, { status }); } catch {}
     try { await peers.recordResult(peer.url, { ok: false }); } catch {}
     // 502/429 等可 fallback 到 direct
     return { handled: false, lastErr: { model, upstream: upRes, status, message: msg } };
