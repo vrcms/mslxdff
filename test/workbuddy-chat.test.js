@@ -166,3 +166,30 @@ test("chat: forced stream true even when body stream false", async () => {
     await p.close();
   } finally { await closeSrv(srv); }
 });
+
+test("chat: 400 upstream body stays readable after auth-class check", async () => {
+  const srv = await stub((req, res) => {
+    if (req.url.includes("/v2/chat/completions")) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "bad request detail from upstream" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: 0 }));
+  });
+  try {
+    const { createWorkbuddyProvider } = await import("../src/providers/workbuddy/index.js");
+    const p = createWorkbuddyProvider({
+      baseUrl: urlOf(srv),
+      apiKeys: ["k1"],
+      auths: [{ uid: "uid-400", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt" }],
+      logger: { append() {} },
+    });
+    const res = await p.chat({ model: "hy3", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(res.status, 400);
+    const txt = await res.text();
+    assert.match(txt, /bad request detail from upstream/);
+    await p.close();
+  } finally { await closeSrv(srv); }
+});
+
