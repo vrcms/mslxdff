@@ -89,3 +89,20 @@ test("translator：无 reasoning 时行为不变（message output_index 0）", (
   const msgItem = evs.find((e) => e.type === "response.output_item.added" && e.item.type === "message");
   assert.equal(msgItem.output_index, 0);
 });
+
+test("入站：无 type 的 message（responses 规范 type 可省，AI SDK/opencode 就不发）必须保留", () => {
+  const body = responsesToChatBody({
+    model: "m",
+    input: [
+      { role: "developer", content: "You are OpenCode..." },
+      { role: "user", content: [{ type: "input_text", text: "你好，我是20209933" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "Hi there!" }] },
+      { role: "user", content: [{ type: "input_text", text: "你可以重复我的话吗，比如，你说：你好，20209933" }] },
+    ],
+    stream: true,
+  });
+  assert.equal(body.messages.length, 4, "四条消息一条都不能丢");
+  assert.equal(body.messages[0].role, "developer");
+  assert.equal(body.messages[1].content, "你好，我是20209933");
+  assert.equal(body.messages[3].content, "你可以重复我的话吗，比如，你说：你好，20209933");
+});
