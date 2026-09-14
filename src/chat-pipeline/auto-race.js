@@ -65,6 +65,7 @@ export async function runAutoRace(ctx, deps = {}) {
       const o = {};
       if (Object.keys(shareKeys).length) o.shareKeys = shareKeys;
       if (workbuddyUid) o.workbuddyUid = workbuddyUid;
+      if (handlerCtx?.sessionId) o.sessionId = handlerCtx.sessionId;
       r = await upstream.chat(f, Object.keys(o).length ? o : undefined);
     } catch (e) {
       if (plugins?.length) runHook(plugins, "upstream:response", { reqId, requested, model: m, status: null, ok: false, error: errMsg(e), timing: e?._t ?? null }).catch(() => {});

@@ -57,9 +57,9 @@ export function errorResponseFromSdkError(e, { marker = null } = {}) {
   });
 }
 
-// SDK parts → OpenAI SSE Response（chat/responses 共用同一序列化器）。
-export function streamResponseFromParts(parts, { marker = null, clock = Date.now, t0 = clock() } = {}) {
-  const ser = createSseSerializer();
+// SDK parts → OpenAI SSE Response（chat/responses 共用同一序列化器；captured 为 responses 侧信道）。
+export function streamResponseFromParts(parts, { marker = null, clock = Date.now, t0 = clock(), captured = null } = {}) {
+  const ser = createSseSerializer(captured);
   const enc = new TextEncoder();
   let cancelled = false;
   const stream = new ReadableStream({
@@ -67,6 +67,11 @@ export function streamResponseFromParts(parts, { marker = null, clock = Date.now
       try {
         for await (const part of parts) {
           if (cancelled) break;
+          // 侧信道（captured）可能落后几毫秒：收尾前给 encrypted 一点就绪时间（最多 150ms）
+          if (captured && !captured.reasoning && part?.type === "finish") {
+            const tw = Date.now();
+            while (!captured.reasoning && Date.now() - tw < 150) await new Promise((r) => setTimeout(r, 10));
+          }
           const text = ser.push(part);
           if (text) controller.enqueue(enc.encode(text));
         }

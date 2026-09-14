@@ -52,7 +52,21 @@ export function toModelPrompt(messages) {
       const parts = [];
       const text = textOf(m.content);
       if (text) parts.push({ type: "text", text });
-      if (m.reasoning_content) parts.push({ type: "reasoning", text: String(m.reasoning_content) });
+      // 带加密态的 reasoning items（responses 通道思考跨轮）：AI SDK 会转成上游要的 encrypted reasoning item。
+      // 无加密态时才退回纯文本 reasoning（chat 通道的 reasoning_content）。
+      const items = Array.isArray(m.reasoning_items) ? m.reasoning_items : [];
+      let pushedEncrypted = false;
+      for (const r of items) {
+        if (!r || typeof r !== "object") continue;
+        const summaryText = Array.isArray(r.summary) ? r.summary.map((s) => s?.text || "").join("\n") : "";
+        parts.push({
+          type: "reasoning",
+          text: summaryText || " ",
+          providerOptions: { openai: { itemId: r.id, reasoningEncryptedContent: r.encrypted_content } },
+        });
+        pushedEncrypted = true;
+      }
+      if (!pushedEncrypted && m.reasoning_content) parts.push({ type: "reasoning", text: String(m.reasoning_content) });
       for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
         if (!tc || typeof tc !== "object") continue;
         parts.push({

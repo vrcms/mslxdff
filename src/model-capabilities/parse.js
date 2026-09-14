@@ -24,6 +24,8 @@ export function normalizeModelCaps(_id, m) {
     releaseDate: typeof m?.release_date === "string" && m.release_date ? m.release_date : null,
     inputModalities: input.length ? input : ["text"],
     outputModalities: Array.isArray(m?.modalities?.output) && m.modalities.output.length ? m.modalities.output : ["text"],
+    // 模型级 SDK 覆盖（models.dev provider.npm）：@ai-sdk/openai → responses 端点；null = 继承 provider 默认
+    npm: typeof m?.provider?.npm === "string" && m.provider.npm ? m.provider.npm : null,
   };
 }
 

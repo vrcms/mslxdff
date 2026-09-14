@@ -30,6 +30,12 @@ export const STREAM_TIMEOUT_MS = (() => {
   return Number.isInteger(n) && n >= 0 ? n : 25_000;
 })();
 
+// 等首块期间的心跳间隔（SSE 注释帧，标准客户端忽略）：上游偶发卡 90s+，避免客户端误判卡死/断连
+export const KEEPALIVE_MS = (() => {
+  const n = Number(process.env.MSLXDFF_KEEPALIVE_MS);
+  return Number.isInteger(n) && n >= 0 ? n : 10_000;
+})();
+
 export const STALL_TIMEOUT_MS = (() => {
   const n = Number(process.env.MSLXDFF_STALL_TIMEOUT_MS);
   return Number.isInteger(n) && n > 0 ? n : 0;
@@ -46,7 +52,7 @@ export const MAX_STREAM_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 0;
 })();
 
-export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, fallback } = {}) {
+export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, keepaliveMs = KEEPALIVE_MS, fallback } = {}) {
   const t0 = performance.now();
   const contentType = upRes.headers.get("content-type") || "";
   // 需同时满足：客户端要流 + 上游真的是 SSE；避免 muse-spark 聚合 JSON 被误判为流式，或 workbuddy SSE 被聚合
@@ -110,6 +116,12 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       let stalled = false;
       let tooLong = false;
       let stallTimer = null;
+      let pingTimer = keepaliveMs > 0
+        ? setInterval(() => {
+            if (wroteAny) return;
+            try { res.write(": keepalive\n\n"); } catch { /* ignore */ }
+          }, keepaliveMs)
+        : null;
       const armStall = () => {
         if (stallTimer) clearTimeout(stallTimer);
         stallTimer = STALL_TIMEOUT_MS
@@ -234,6 +246,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
         if (firstTimer) clearTimeout(firstTimer);
         if (maxTimer) clearTimeout(maxTimer);
         if (stallTimer) clearTimeout(stallTimer);
+        if (pingTimer) clearInterval(pingTimer);
       }
       if (timedOut && !wroteAny) {
         res.removeListener("close", onClose);

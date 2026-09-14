@@ -32,14 +32,18 @@ export function usageToOpenAI(u) {
   return out;
 }
 
-export function createSseSerializer() {
+export function createSseSerializer(captured = null) {
   const meta = { id: "chatcmpl-wb-sdk", model: "", created: Math.floor(Date.now() / 1000) };
   let roleSent = false;
   let nextIndex = 0;
   const toolIndex = new Map();
   const toolDeltaIds = new Set();
+  // 加密思考往返：reasoning-start 的 providerMetadata 带 itemId + 加密态，随首帧透出
+  let reasoningMeta = null;
+  let reasoningFrameSent = false;
+  let reasoningEncSent = false;
 
-  function frame(delta, { finishReason = null, usage } = {}) {
+  function frame(delta, { finishReason = null, usage, extra } = {}) {
     const obj = {
       id: meta.id,
       object: "chat.completion.chunk",
@@ -48,6 +52,7 @@ export function createSseSerializer() {
       choices: [{ index: 0, delta, finish_reason: finishReason }],
     };
     if (usage !== undefined) obj.usage = usage;
+    if (extra) Object.assign(obj, extra);
     return `data: ${JSON.stringify(obj)}\n\n`;
   }
 
@@ -69,8 +74,30 @@ export function createSseSerializer() {
         }
         return null;
       }
-      case "reasoning-delta":
-        return ensureRole() + frame({ reasoning_content: String(part.delta ?? "") });
+      case "reasoning-start": {
+        const pm = part.providerMetadata?.openai || part.providerMetadata || {};
+        reasoningMeta = {
+          id: String(pm.itemId ?? part.id ?? "reasoning"),
+          encrypted: typeof pm.reasoningEncryptedContent === "string" ? pm.reasoningEncryptedContent : null,
+        };
+        // 即时透出 item 元数据（含加密态）：上游可能只给 encrypted 不给 summary 文本，不能等 delta
+        reasoningFrameSent = true;
+        if (reasoningMeta.encrypted) reasoningEncSent = true;
+        return ensureRole() + frame({ reasoning_content: "" }, { extra: { x_reasoning_item: { id: reasoningMeta.id, encrypted_content: reasoningMeta.encrypted } } });
+      }
+      case "reasoning-delta": {
+        const delta = String(part.delta ?? "");
+        let extra;
+        if (reasoningMeta && !reasoningFrameSent) {
+          reasoningFrameSent = true;
+          if (reasoningMeta.encrypted) reasoningEncSent = true;
+          // x_reasoning_item：responses translator 据此建 reasoning item（chat 客户端忽略未知顶层字段）
+          extra = { x_reasoning_item: { id: reasoningMeta.id, encrypted_content: reasoningMeta.encrypted } };
+        } else if (reasoningMeta) {
+          extra = { x_reasoning_id: reasoningMeta.id };
+        }
+        return ensureRole() + frame({ reasoning_content: delta }, { extra });
+      }
       case "text-delta":
         return ensureRole() + frame({ content: String(part.delta ?? "") });
       case "tool-input-start": {
@@ -98,7 +125,14 @@ export function createSseSerializer() {
         const fr = part.finishReason;
         const raw = typeof fr === "string" ? fr : (fr?.raw ?? fr?.unified);
         const reason = raw === "tool-calls" ? "tool_calls" : raw === "content-filter" ? "content_filter" : (raw ?? "stop");
-        return frame({}, { finishReason: reason, usage: usageToOpenAI(part.usage) });
+        // 加密思考补发：上游 encrypted_content 只在流末尾可得（fetch 侧信道捕获），
+        // 无 summary 文本时 AI SDK parts 不会带出 → 收尾帧前补一帧
+        let pre = "";
+        if (captured?.reasoning && !reasoningEncSent) {
+          reasoningEncSent = true;
+          pre = ensureRole() + frame({ reasoning_content: "" }, { extra: { x_reasoning_item: { id: captured.reasoning.id, encrypted_content: captured.reasoning.encrypted } } });
+        }
+        return pre + frame({}, { finishReason: reason, usage: usageToOpenAI(part.usage) });
       }
       case "error": {
         const message = part.error?.message

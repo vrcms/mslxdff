@@ -69,3 +69,35 @@ test("x-opencode-request is unique per call, session format stable", async () =>
     for(const r of reqs) assert.match(r, /^msg_[0-9a-f]{32}$/);
   } finally{ await closeSrv(srv); }
 });
+
+test("同会话 session 稳定（system+首条 user 哈希）、多轮不漂移、跨会话分散", async () => {
+  const seen=[];
+  const srv=await stubServer((req,res)=>{
+    seen.push(req.headers["x-opencode-session"]);
+    res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");
+  });
+  try{
+    const client=createUpstreamClient({baseUrl:urlOf(srv)});
+    const base=[{role:"system",content:"sys-prompt"},{role:"user",content:"第一问"}];
+    await client.chat({model:"m",stream:false,messages:base});
+    await client.chat({model:"m",stream:false,messages:[...base,{role:"assistant",content:"答复"},{role:"user",content:"追问"}]});
+    await client.chat({model:"m",stream:false,messages:[{role:"system",content:"sys-prompt"},{role:"user",content:"另一个会话"}]});
+    assert.equal(seen[0],seen[1],"同一会话多轮必须稳定（上游粘性路由/缓存亲和依赖它）");
+    assert.notEqual(seen[0],seen[2],"不同会话应分散");
+    for(const s of seen) assert.match(s, /^ses_[0-9a-f]{32}$/);
+  } finally{ await closeSrv(srv); }
+});
+
+test("无 messages 时回退进程级固定 session（不再每请求随机）", async () => {
+  const seen=[];
+  const srv=await stubServer((req,res)=>{
+    seen.push(req.headers["x-opencode-session"]);
+    res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");
+  });
+  try{
+    const client=createUpstreamClient({baseUrl:urlOf(srv)});
+    await client.chat({stream:false});
+    await client.chat({stream:false});
+    assert.equal(seen[0],seen[1]);
+  } finally{ await closeSrv(srv); }
+});

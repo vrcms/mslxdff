@@ -33,15 +33,27 @@ export function responsesToChatBody(req = {}) {
   if (req.instructions) messages.push({ role: "system", content: String(req.instructions) });
   const input = req.input;
   const items = typeof input === "string" ? [{ type: "message", role: "user", content: input }] : Array.isArray(input) ? input : [];
+  // 加密思考往返：input 里的 reasoning item 挂到下一条 assistant 消息（thinking 跨轮必需，不能丢）
+  let pendingReasoning = [];
   for (const it of items) {
     if (!it || typeof it !== "object") continue;
+    if (it.type === "reasoning") {
+      if (it.id || it.encrypted_content) {
+        pendingReasoning.push({ id: it.id, encrypted_content: it.encrypted_content, summary: it.summary });
+      }
+      continue;
+    }
     if (it.type === "message") {
-      messages.push({ role: it.role || "user", content: inputTextOf(it.content) });
+      const msg = { role: it.role || "user", content: inputTextOf(it.content) };
+      if (pendingReasoning.length && msg.role === "assistant") { msg.reasoning_items = pendingReasoning; pendingReasoning = []; }
+      messages.push(msg);
     } else if (it.type === "function_call") {
-      messages.push({
+      const msg = {
         role: "assistant", content: "",
         tool_calls: [{ id: it.call_id || it.id || "", type: "function", function: { name: it.name || "", arguments: it.arguments || "" } }],
-      });
+      };
+      if (pendingReasoning.length) { msg.reasoning_items = pendingReasoning; pendingReasoning = []; }
+      messages.push(msg);
     } else if (it.type === "function_call_output") {
       messages.push({ role: "tool", tool_call_id: it.call_id || "", content: typeof it.output === "string" ? it.output : JSON.stringify(it.output ?? "") });
     }
@@ -115,7 +127,16 @@ export function createChunkTranslator(model = "") {
   let textLen = 0;
   let lastFinish = "stop";
   let lastUsage = null;
-  const tools = new Map(); // index → {id, name, args, announced}
+  const tools = new Map(); // index → {id, name, args, announced, outputIndex}
+  // output_index 按 item 出现顺序动态分配（reasoning 可能先于 message/tool 出现）
+  let nextIdx = 0;
+  let textIdx = null;
+  // 加密思考（thinking 跨轮）：sse.js 首帧带 x_reasoning_item（含加密态），translator 据此建 reasoning item
+  let reasoningOpen = false;
+  let reasoningId = null;
+  let reasoningEncrypted = null;
+  let reasoningIdx = null;
+  let reasoningText = "";
   const ev = (type, extra = {}) => ({ type, ...extra });
 
   function begin() {
@@ -125,8 +146,9 @@ export function createChunkTranslator(model = "") {
   function ensureTextItem() {
     if (textItemOpen) return [];
     textItemOpen = true;
+    textIdx = nextIdx++;
     const item = { type: "message", id: `msg_${id}`, status: "in_progress", role: "assistant", content: [{ type: "output_text", text: "", annotations: [] }] };
-    return [ev("response.output_item.added", { output_index: 0, item }), ev("response.content_part.added", { item_id: item.id, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } })];
+    return [ev("response.output_item.added", { output_index: textIdx, item }), ev("response.content_part.added", { item_id: item.id, output_index: textIdx, content_index: 0, part: { type: "output_text", text: "", annotations: [] } })];
   }
 
   let fullText = "";
@@ -135,26 +157,51 @@ export function createChunkTranslator(model = "") {
     const out = ensureTextItem();
     textLen += delta.length;
     fullText += delta;
-    out.push(ev("response.output_text.delta", { item_id: `msg_${id}`, output_index: 0, content_index: 0, delta }));
+    out.push(ev("response.output_text.delta", { item_id: `msg_${id}`, output_index: textIdx, content_index: 0, delta }));
     return out;
+  }
+
+  function pushReasoning(delta, meta) {
+    const out = ensureReasoningItem(meta);
+    reasoningText += delta;
+    if (delta) out.push(ev("response.reasoning_summary_text.delta", { item_id: reasoningId, output_index: reasoningIdx, summary_index: 0, delta }));
+    return out;
+  }
+
+  function ensureReasoningItem(meta) {
+    if (reasoningOpen) {
+      // 补丁：加密态可能晚到（sse.js 在收尾帧补发无文本的 x_reasoning_item）
+      if (!reasoningEncrypted && typeof meta?.encrypted_content === "string") reasoningEncrypted = meta.encrypted_content;
+      return [];
+    }
+    reasoningOpen = true;
+    reasoningId = meta?.id || `rs_${id}`;
+    reasoningEncrypted = typeof meta?.encrypted_content === "string" ? meta.encrypted_content : null;
+    reasoningIdx = nextIdx++;
+    const item = { type: "reasoning", id: reasoningId, summary: [], ...(reasoningEncrypted ? { encrypted_content: reasoningEncrypted } : {}) };
+    return [
+      ev("response.output_item.added", { output_index: reasoningIdx, item }),
+      ev("response.reasoning_summary_part.added", { item_id: reasoningId, output_index: reasoningIdx, summary_index: 0, part: { type: "summary_text", text: "" } }),
+    ];
   }
 
   function pushTool(tc) {
     const idx = Number(tc.index ?? 0);
     let t = tools.get(idx);
-    if (!t) { t = { id: "", name: "", args: "", announced: false }; tools.set(idx, t); }
+    if (!t) { t = { id: "", name: "", args: "", announced: false, outputIndex: null }; tools.set(idx, t); }
     if (tc.id) t.id = tc.id;
     if (tc.function?.name) t.name += tc.function.name;
     const frag = tc.function?.arguments || "";
     const out = [];
     if (!t.announced && t.id && t.name) {
       t.announced = true;
-      out.push(ev("response.output_item.added", { output_index: idx + 1, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: "" } }));
+      t.outputIndex = nextIdx++;
+      out.push(ev("response.output_item.added", { output_index: t.outputIndex, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: "" } }));
     }
     if (frag) {
       if (!t.announced) { t.args += frag; return out; } // id/name 未到先攒着
       t.args += frag;
-      out.push(ev("response.function_call_arguments.delta", { item_id: `fc_${id}_${idx}`, output_index: idx + 1, delta: frag }));
+      out.push(ev("response.function_call_arguments.delta", { item_id: `fc_${id}_${idx}`, output_index: t.outputIndex, delta: frag }));
     }
     return out;
   }
@@ -181,29 +228,34 @@ export function createChunkTranslator(model = "") {
       if (typeof delta.content === "string" && delta.content) { dbg.textChars += delta.content.length; out.push(...pushText(delta.content)); }
       for (const tc of delta.tool_calls || []) { dbg.toolDeltas++; out.push(...pushTool(tc)); }
       const rc = typeof delta.reasoning_content === "string" ? delta.reasoning_content : "";
-      if (rc) { dbg.reasoningChars += rc.length; out.push(...pushText(rc)); }
+      if (rc || chunk.x_reasoning_item) { if (rc) dbg.reasoningChars += rc.length; out.push(...pushReasoning(rc, chunk.x_reasoning_item)); }
     }
     return out;
   }
 
   function end({ finish = "stop", usage = null } = {}) {
     const out = [];
+    if (reasoningOpen) {
+      out.push(ev("response.reasoning_summary_text.done", { item_id: reasoningId, output_index: reasoningIdx, summary_index: 0, text: reasoningText }));
+      out.push(ev("response.reasoning_summary_part.done", { item_id: reasoningId, output_index: reasoningIdx, summary_index: 0, part: { type: "summary_text", text: reasoningText } }));
+      out.push(ev("response.output_item.done", { output_index: reasoningIdx, item: { type: "reasoning", id: reasoningId, summary: [{ type: "summary_text", text: reasoningText }], ...(reasoningEncrypted ? { encrypted_content: reasoningEncrypted } : {}) } }));
+    }
     if (textItemOpen) {
-      out.push(ev("response.output_text.done", { item_id: `msg_${id}`, output_index: 0, content_index: 0, text: fullText }));
-      out.push(ev("response.content_part.done", { item_id: `msg_${id}`, output_index: 0, content_index: 0, part: { type: "output_text", text: fullText, annotations: [] } }));
-      out.push(ev("response.output_item.done", { output_index: 0, item: { type: "message", id: `msg_${id}`, status: "completed", role: "assistant", content: [{ type: "output_text", text: fullText, annotations: [] }] } }));
+      out.push(ev("response.output_text.done", { item_id: `msg_${id}`, output_index: textIdx, content_index: 0, text: fullText }));
+      out.push(ev("response.content_part.done", { item_id: `msg_${id}`, output_index: textIdx, content_index: 0, part: { type: "output_text", text: fullText, annotations: [] } }));
+      out.push(ev("response.output_item.done", { output_index: textIdx, item: { type: "message", id: `msg_${id}`, status: "completed", role: "assistant", content: [{ type: "output_text", text: fullText, annotations: [] }] } }));
     }
-    let i = 0;
     for (const [idx, t] of tools) {
-      if (!t.id && !t.name && !t.args) { i++; continue; }
+      if (!t.id && !t.name && !t.args) continue;
       if (!t.announced) {
-        out.push(ev("response.output_item.added", { output_index: idx + 1, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: "" } }));
+        t.announced = true;
+        t.outputIndex = nextIdx++;
+        out.push(ev("response.output_item.added", { output_index: t.outputIndex, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: "" } }));
       }
-      if (t.args) out.push(ev("response.function_call_arguments.done", { item_id: `fc_${id}_${idx}`, output_index: idx + 1, arguments: t.args }));
-      out.push(ev("response.output_item.done", { output_index: idx + 1, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: t.args, status: "completed" } }));
-      i++;
+      if (t.args) out.push(ev("response.function_call_arguments.done", { item_id: `fc_${id}_${idx}`, output_index: t.outputIndex, arguments: t.args }));
+      out.push(ev("response.output_item.done", { output_index: t.outputIndex, item: { type: "function_call", id: `fc_${id}_${idx}`, call_id: t.id, name: t.name, arguments: t.args, status: "completed" } }));
     }
-    void i; void textLen;
+    void textLen;
     out.push(ev("response.completed", { response: { id, object: "response", created_at: createdAt, status: finish === "length" ? "incomplete" : "completed", model, output: [], usage: toResponsesUsage(usage) } }));
     return out;
   }

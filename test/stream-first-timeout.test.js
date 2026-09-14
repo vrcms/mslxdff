@@ -84,3 +84,20 @@ test("streamTimeoutMs=0：显式关闭首块超时，慢上游不再判死", asy
   assert.ok(r.detail.wroteChunks >= 1);
   assert.equal(r.detail.exitReason, "normal");
 });
+
+test("等首块期间发 SSE 心跳帧（客户端不误判卡死）", async () => {
+  const res = fakeRes();
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      await sleep(120);
+      yield sseChunk({ choices: [{ delta: { content: "你好" } }] });
+      yield Buffer.from("data: [DONE]\n\n");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 30 });
+  const joined = res.wrote.join("");
+  assert.ok(joined.includes(": keepalive"), "等待期间应有心跳帧");
+  assert.ok(joined.includes("你好"), "正文照常转发");
+  assert.equal(r.status, 200);
+});

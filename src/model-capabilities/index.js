@@ -28,15 +28,22 @@ export function createCapabilitiesService({
 } = {}) {
   let raw = null;          // 原始目录（全 provider）
   let capsIndex = new Map(); // providerId -> { modelId -> caps }
+  let npmIndex = new Map();  // opencode 裸 modelId -> provider.npm（responses 判定用；null = 继承默认）
   let loadedAt = 0;
   let inflight = null;
 
   function buildIndex(data) {
     const idx = new Map();
+    const npm = new Map();
     for (const [pid, p] of Object.entries(data || {})) {
       if (!p || typeof p !== "object") continue;
-      idx.set(pid, normalizeProviderModels(p.models || {}));
+      const caps = normalizeProviderModels(p.models || {});
+      idx.set(pid, caps);
+      if (String(pid).toLowerCase() === "opencode") {
+        for (const [mid, c] of Object.entries(caps)) npm.set(mid, c.npm ?? null);
+      }
     }
+    npmIndex = npm;
     return idx;
   }
 
@@ -111,7 +118,7 @@ export function createCapabilitiesService({
     return [...capsIndex.keys()].sort();
   }
 
-  return { ready, get, list, providers };
+  return { ready, get, list, providers, npmIndex: () => new Map(npmIndex) };
 }
 
 // 模块级单例（与 globalDedup 同模式）：HTTP handler 懒加载，测试 _reset 后注入

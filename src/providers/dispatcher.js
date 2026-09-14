@@ -53,9 +53,9 @@ export function createProviderDispatcher(providers = [], opts = {}) {
       return provider.chatWithKeys(forwarded, sharedKeys);
     }
     if (provider.id === "workbuddy" && workbuddyUid) {
-      return provider.chat(forwarded, { workbuddyUid });
+      return provider.chat(forwarded, { ...opts, workbuddyUid });
     }
-    return provider.chat(forwarded);
+    return provider.chat(forwarded, opts);
   }
 
   // 聚合所有供应商的模型列表；默认供应商（opencode）裸 id，其它带前缀
