@@ -4,6 +4,7 @@ import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
 import { reshapeWorkbuddySse } from "./reshape.js";
 import { attemptOnceSdk } from "./sdk-chat.js";
+import { sanitizeToolSequence } from "./sanitize-tools.js";
 import { resolveEngineMode } from "../../upstream-engine/mode.js";
 
 function buildAuthHeaders(key, auth) {
@@ -150,6 +151,11 @@ export function createChatService({
   async function runChat(body, activeRing, opts = {}) {
     const url = joinUrl(baseUrl, chatPath);
     const t0 = nowMs(clock);
+    const clean = sanitizeToolSequence(body?.messages);
+    if (clean.droppedCalls || clean.droppedResults) {
+      try { console.error(`[workbuddy] tool-sequence sanitized: dropped ${clean.droppedCalls} call(s), ${clean.droppedResults} result(s), model=${body?.model || ""}`); } catch {}
+      body = { ...body, messages: clean.messages };
+    }
     _t0Val = t0;
     _modelVal = body?.model || "";
     const preferredUid = opts?.workbuddyUid ? String(opts.workbuddyUid).trim() : "";
