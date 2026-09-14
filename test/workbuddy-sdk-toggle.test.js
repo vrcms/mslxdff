@@ -68,10 +68,10 @@ async function readFrames(envPatch) {
   } finally { await closeSrv(srv); }
 }
 
-test("缺省（无 env）：请求走原生通道（无 SDK 标记头 + reshape 后帧完整）", { skip: skipSdk }, async () => {
+test("缺省（无 env）：请求走 SDK 通道（SDK 标记头 + reshape 后帧完整）", { skip: skipSdk }, async () => {
   const { status, channel, text } = await readFrames({ [SDK_ENV]: undefined, [ENGINE_ENV]: undefined });
   assert.equal(status, 200);
-  assert.equal(channel, null, "缺省即原生通道（上游非标字段 thinking/reasoning_content 需原生透传）");
+  assert.equal(channel, "sdk", "缺省即 SDK 通道（payload 前置改写 + providerOptions 透传兜住上游非标字段）");
   assert.ok(text.includes('"reasoning_content":"让我想想"'), "reasoning 经 reshape 聚合");
   assert.ok(text.includes('"content":"答案"'), "content 帧");
   assert.ok(text.includes('"finish_reason":"stop"'), "finish 帧");

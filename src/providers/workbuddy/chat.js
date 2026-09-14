@@ -100,11 +100,10 @@ export function createChatService({
   // （局部 MSLXDFF_WORKBUDDY_SDK，未设则继承全局 MSLXDFF_UPSTREAM_ENGINE）回退原生 transport；
   // 不可用（Node16/未安装）自动回退并告警一次。上层轮换/刷新/reshape 全链复用。
   // Note: 为什么默认 SDK、翻译层代价与回退语义 — 见 .agents/notes/implemented/feature/2026-09-12-workbuddy-sdk-channel.md
-  // workbuddy 缺省 native transport（legacy）：上游对 DeepSeek 有非标字段要求
-  // （thinking 注入 / reasoning_content 回填，见 payload.js），AI SDK 序列化层 providerOptions
-  // 白名单无法承载这些字段——v0.1.111~118 的 SDK 缺省即 tool 校验 400 的温床。
-  // 显式 MSLXDFF_WORKBUDDY_SDK=sdk（或全局 MSLXDFF_UPSTREAM_ENGINE=sdk）仍可切回 SDK 通道。
-  const engineMode = resolveEngineMode(process.env, "MSLXDFF_WORKBUDDY_SDK", "legacy");
+  // 上游非标字段（thinking / reasoning_effort / reasoning_content / tool_choice 字符串）不依赖 SDK 白名单：
+  // payload.js 前置语义改写 + AI SDK providerOptions 透传（非白名单 key 原样 spread 进 body，2.0.41 实测）。
+  // 序列化/流式/错误映射仍全部交 AI SDK；原生 transport 仅作 SDK 不可用时的回退。v0.1.120 实测见 .scratch/probe-sdk-body.mjs。
+  const engineMode = resolveEngineMode(process.env, "MSLXDFF_WORKBUDDY_SDK", "sdk");
   let sdkFallbackLogged = false;
   async function fetchOnce(url, body, key, auth) {
     const payload = rewriteWorkbuddyPayload(body);
