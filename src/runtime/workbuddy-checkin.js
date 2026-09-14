@@ -20,17 +20,17 @@ export function todayKey(d = new Date()) {
 }
 
 // 到下一次计划点的毫秒数（今天未到点→今天，已过→明天同时）。
-export function nextRunDelayMs(now = new Date(), hour = 9) {
+export function nextRunDelayMs(now = new Date(), hour = 9, minute = 0) {
   const next = new Date(now);
-  next.setHours(hour, 0, 0, 0);
+  next.setHours(hour, minute, 0, 0);
   if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
   return next.getTime() - now.getTime();
 }
 
 // 启动补签：已过今日计划点、且（从没签过 或 上次不是今天）。
-export function shouldCatchUp({ lastDate, now = new Date(), hour = 9 } = {}) {
+export function shouldCatchUp({ lastDate, now = new Date(), hour = 9, minute = 0 } = {}) {
   const point = new Date(now);
-  point.setHours(hour, 0, 0, 0);
+  point.setHours(hour, minute, 0, 0);
   if (now.getTime() < point.getTime()) return false;
   return !lastDate || lastDate !== todayKey(now);
 }

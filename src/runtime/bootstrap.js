@@ -24,4 +24,9 @@ export async function startDaemonMain(VERSION) {
   void setupWorkbuddyCheckin({ bus, logs }).catch((e) => {
     try { logs.appendEvent({ ts: Date.now(), type: "workbuddy-checkin-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
   });
+
+  const { setupWorkbuddyGrowth } = await import("./workbuddy-growth.js");
+  void setupWorkbuddyGrowth({ bus, logs }).catch((e) => {
+    try { logs.appendEvent({ ts: Date.now(), type: "workbuddy-growth-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
+  });
 }

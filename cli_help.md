@@ -77,6 +77,8 @@
 | `mslxdff -provider workbuddy login` | — | WorkBuddy 设备授权加号（浏览器登录→自动轮询 5 分钟→落盘 `auths/workbuddy-<uid>.json` + state，不走抓包，追加新号首选；旧号重复 login 只更新凭证） | 是 | 热加载（网关建议 `-restart`） |
 | `mslxdff -provider workbuddy import [--file=路径]` | `MSLXDFF_WORKBUDDY_DESKTOP_INFO=路径` 显式指定（`MSLXDFF_WORKBUDDY_UA` 覆盖设备 UA 指纹，`CODEBUDDY_BIN=路径` 指定抓包用 CLI） | 从本机桌面端登录态直接导入：自动发现 `workbuddy-desktop.info`（Win 走 `%LOCALAPPDATA%`/`%APPDATA%`，mac 走 `~/Library/Application Support`，Linux 走 `~/.config`，按文件名搜、多命中取最新；找不到时用 `--file`/env 显式指定），桌面已切新号时最快，无需浏览器/抓包 | 是 | 热加载 |
 | `mslxdff -workbuddy checkin` | `-wb checkin`, `--workbuddy checkin` | WorkBuddy 每日签到 100 credits（多号并行 3，双域 `POST /v2/billing/meter/daily-checkin` 幂等，`code 10001 已签到` 视为成功；`--json` 聚合 `total/dailyPacks/nextExpire`，`workbuddy-checkin.js` 代理，`node workbuddy-token-auto.js` 已自动触发；daemon 默认每日 09:00 自动全号签到，`MSLXDFF_WORKBUDDY_CHECKIN=0` 关） | 否 | 否 |
+| `mslxdff -workbuddy growth [--json] [--codes a,b] [--account <uid>]` | `-wb growth`, `--workbuddy growth` | WorkBuddy 成长任务全自动：拉列表→参与(accept)→触发(免费模型+`extra_vars.growthEvent`)→领奖(claim)，串行（任务间 1.2s、账号间 1s），已领取幂等跳过；可自动 = `chat_5`/`automation_1`/`skill_1`/`Model_chat_GLM5.2`，需客户端任务标 MANUAL 不发包（`growth-plans.js` 未登记默认 MANUAL）；daemon 默认每日 09:30 自动，`MSLXDFF_WORKBUDDY_GROWTH=0` 关，`_GROWTH_HOUR` 改时间，`_GROWTH_MODEL` 换触发模型（默认 `hy3`）；`--codes` 只做指定任务 | 否 | 否 |
+| `mslxdff -workbuddy travel [--json]` | `-wb travel` | WorkBuddy 猫猫旅行：无猫自动同意协议 + 领养（+300，门槛未达自动补一次对话解锁）；到站领奖 / 空闲派出（location 4）/ 旅行中跳过；`--json` 输出分步 steps 与 `credits` | 否 | 否 |
 | `mslxdff -workbuddy balance [--json]` | `-wb balance` | WorkBuddy 多号余额总览（`total/dailyPacks/nextExpire/fetchedAt`，`workbuddy-balance.js` TTL 5min） | 否 | 否 |
 | `mslxdff -workbuddy list` | `-wb list` | 列出已接入 WorkBuddy 账号（`uid/domain/enterpriseId`） | 否 | 否 |
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
@@ -754,6 +756,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   mslxdff -provider workbuddy list                        # 看 baseUrl/keys/share/allowlist
   mslxdff -provider workbuddy allowlist set hy3 hy4-preview glm-5.3-flash  # 仅低耗
   mslxdff -workbuddy checkin                              # 每日签到 100 credits（多号并行 3，幂等，--json 聚合）
+  mslxdff -workbuddy growth [--json]                      # 成长任务全自动（参与→触发→领奖，串行，已领跳过）
+  mslxdff -workbuddy travel [--json]                      # 猫猫旅行（无猫领养 +300 / 派出 / 到站领奖）
   mslxdff -workbuddy balance [--json]                     # 多号余额总览（total/dailyPacks/nextExpire，TTL 5min）
   mslxdff -workbuddy list                                 # 列出账号（uid/domain/enterpriseId）
   mslxdff -workbuddy remove <uid> [--keep-file]           # 按 uid 摘除（删 keys/auths 与 auths/workbuddy-<uid>.json）
