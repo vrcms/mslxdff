@@ -13,6 +13,59 @@ export async function handleWorkbuddy(args) {
     child.on("close", (code) => process.exit(code ?? 0));
     child.on("error", (err) => { console.error(`workbuddy checkin failed: ${err.message}`); process.exit(1); });
     await new Promise(() => {});
+  } else if (sub === "growth" || sub === "earn" || sub === "tasks") {
+    const asJson = args.includes("--json") || args.includes("-json");
+    const ci = args.indexOf("--codes");
+    const codes = ci >= 0 && args[ci + 1] ? String(args[ci + 1]).split(",").filter(Boolean) : undefined;
+    const ai = args.indexOf("--account");
+    const prefix = ai >= 0 && args[ai + 1] ? String(args[ai + 1]) : "";
+    let items = await loadWorkbuddyAccounts();
+    if (prefix) items = items.filter((it) => String(it.uid).startsWith(prefix));
+    if (!items.length) { console.log("no workbuddy accounts — run node workbuddy-token-auto.js"); process.exit(0); }
+    await refreshExpiringAccounts(items);
+    const { runGrowthAll } = await import("../../providers/workbuddy/growth.js");
+    if (!asJson) console.log(`workbuddy growth (${items.length} account(s), serial):`);
+    const res = await runGrowthAll({
+      accounts: items.map((it) => ({ uid: it.uid, at: it.key, domain: it.domain, enterpriseId: it.enterpriseId })),
+      codes,
+      onAccount: (row) => {
+        if (asJson) return;
+        const u = String(row.uid).slice(0, 8);
+        if (!row.ok && row.error) { console.log(`  [${u}] 失败: ${row.error}`); return; }
+        for (const t of row.tasks) {
+          if (t.skipped) console.log(`  [${u}] ${t.task_code} 跳过(${t.skipped})`);
+          else console.log(`  [${u}] ${t.task_code} 触发 ${t.fired}/${t.times} → ${t.status || "?"}${t.credit ? ` +${t.credit}` : ""}`);
+        }
+        console.log(`  [${u}] 合计 +${row.credit} 积分 / +${row.energy} 能量`);
+      },
+    });
+    if (asJson) console.log(JSON.stringify(res, null, 2));
+    else console.log(`总计 +${res.creditTotal} 积分`);
+    process.exit(0);
+  } else if (sub === "travel" || sub === "cat" || sub === "cat-travel") {
+    const asJson = args.includes("--json") || args.includes("-json");
+    const ai = args.indexOf("--account");
+    const prefix = ai >= 0 && args[ai + 1] ? String(args[ai + 1]) : "";
+    let items = await loadWorkbuddyAccounts();
+    if (prefix) items = items.filter((it) => String(it.uid).startsWith(prefix));
+    if (!items.length) { console.log("no workbuddy accounts — run node workbuddy-token-auto.js"); process.exit(0); }
+    await refreshExpiringAccounts(items);
+    const { runCatTravel } = await import("../../providers/workbuddy/cat-travel.js");
+    if (!asJson) console.log(`workbuddy cat-travel (${items.length} account(s)):`);
+    const rows = [];
+    for (const it of items) {
+      const u = String(it.uid).slice(0, 8);
+      const r = await runCatTravel({
+        uid: it.uid, at: it.key, domain: it.domain, enterpriseId: it.enterpriseId,
+        onStep: asJson ? null : (s) => console.log(`  [${u}] ${s.step} ${s.ok ? "✓" : "✗"} ${s.message}${s.reward ? ` (+${s.reward})` : ""}`),
+      });
+      if (!asJson) console.log(`  [${u}] ${r.summary}`);
+      rows.push({ uid: it.uid, outcome: r.outcome, credits: r.credits, ok: r.ok, steps: r.steps });
+    }
+    const total = rows.reduce((s, r) => s + (r.credits || 0), 0);
+    if (asJson) console.log(JSON.stringify({ results: rows, credits: total }, null, 2));
+    else console.log(`总计 +${total} 积分`);
+    process.exit(0);
   } else if (sub === "balance" || sub === "balances" || sub === "credit" || sub === "credits") {
     const asJson = args.includes("--json") || args.includes("-json");
     const { loadProviderConfigs } = await import("../../state.js");
@@ -85,7 +138,59 @@ export async function handleWorkbuddy(args) {
     console.log(`removed workbuddy ${uid} (now ${auths.length} account(s))`);
     process.exit(0);
   } else {
-    console.error("usage: mslxdff -workbuddy checkin | balance [--json] | list | remove <uid>");
+    console.error("usage: mslxdff -workbuddy checkin | growth [--codes a,b] [--account <uid>] | travel | balance [--json] | list | remove <uid>");
     process.exit(1);
   }
+}
+
+// 账号加载（state 优先，缺则扫 auths/workbuddy-*.json），供 growth/travel 使用。
+async function loadWorkbuddyAccounts() {
+  const { loadProviderConfigs } = await import("../../state.js");
+  const cfg = loadProviderConfigs().workbuddy || {};
+  const auths = Array.isArray(cfg.auths) ? cfg.auths : [];
+  const keys = Array.isArray(cfg.keys) ? cfg.keys : [];
+  const items = auths.map((a, i) => ({
+    uid: a.uid, domain: a.domain || "www.codebuddy.cn", enterpriseId: a.enterpriseId || "",
+    key: keys[i] || "", auth: a,
+  })).filter((it) => it.uid && it.key);
+  if (items.length) return items;
+  try {
+    const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { resolveAuthDir } = await import("../../providers/workbuddy/account-store.js");
+    const dir = resolveAuthDir();
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir).filter((x) => x.startsWith("workbuddy-") && x.endsWith(".json"))) {
+        try {
+          const j = JSON.parse(readFileSync(join(dir, f), "utf8"));
+          if (j?.account?.uid && j?.auth?.accessToken) {
+            const domain = j.auth.domain || "www.codebuddy.cn";
+            items.push({
+              uid: j.account.uid, domain, enterpriseId: j.account.enterpriseId || "",
+              key: j.auth.accessToken,
+              auth: { uid: j.account.uid, domain, enterpriseId: j.account.enterpriseId || "", refreshToken: j.auth.refreshToken || "" },
+            });
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return items;
+}
+
+// 临期 token 续期（<1h），refresh 结果经 store 回写 state 与 auths 文件。
+async function refreshExpiringAccounts(items) {
+  const { compatFetch } = await import("../../compat.js");
+  const { createAuthService, decodeJwtExp } = await import("../../providers/workbuddy/auth.js");
+  const keys = items.map((it) => it.key);
+  const authList = items.map((it) => it.auth);
+  const svc = createAuthService({ fetchImpl: compatFetch, store: { keys, authList } });
+  await Promise.all(authList.map(async (auth, i) => {
+    try {
+      const exp = decodeJwtExp(keys[i]);
+      if (exp && exp - Date.now() / 1000 < 3600) await svc.refreshTokenFor(keys[i], auth);
+    } catch {}
+  }));
+  items.forEach((it, i) => { it.key = keys[i]; });
+  return items;
 }
