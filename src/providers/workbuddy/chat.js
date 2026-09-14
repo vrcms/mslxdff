@@ -5,6 +5,7 @@ import { createTransport } from "../../transport/index.js";
 import { reshapeWorkbuddySse } from "./reshape.js";
 import { attemptOnceSdk } from "./sdk-chat.js";
 import { sanitizeToolSequence } from "./sanitize-tools.js";
+import { rewriteWorkbuddyPayload } from "./payload.js";
 import { resolveEngineMode } from "../../upstream-engine/mode.js";
 
 function buildAuthHeaders(key, auth) {
@@ -99,12 +100,17 @@ export function createChatService({
   // （局部 MSLXDFF_WORKBUDDY_SDK，未设则继承全局 MSLXDFF_UPSTREAM_ENGINE）回退原生 transport；
   // 不可用（Node16/未安装）自动回退并告警一次。上层轮换/刷新/reshape 全链复用。
   // Note: 为什么默认 SDK、翻译层代价与回退语义 — 见 .agents/notes/implemented/feature/2026-09-12-workbuddy-sdk-channel.md
-  const engineMode = resolveEngineMode(process.env, "MSLXDFF_WORKBUDDY_SDK");
+  // workbuddy 缺省 native transport（legacy）：上游对 DeepSeek 有非标字段要求
+  // （thinking 注入 / reasoning_content 回填，见 payload.js），AI SDK 序列化层 providerOptions
+  // 白名单无法承载这些字段——v0.1.111~118 的 SDK 缺省即 tool 校验 400 的温床。
+  // 显式 MSLXDFF_WORKBUDDY_SDK=sdk（或全局 MSLXDFF_UPSTREAM_ENGINE=sdk）仍可切回 SDK 通道。
+  const engineMode = resolveEngineMode(process.env, "MSLXDFF_WORKBUDDY_SDK", "legacy");
   let sdkFallbackLogged = false;
   async function fetchOnce(url, body, key, auth) {
+    const payload = rewriteWorkbuddyPayload(body);
     if (engineMode === "sdk") {
       try {
-        return await attemptOnceSdk({ url, body, key, auth, buildHeaders: buildAuthHeaders });
+        return await attemptOnceSdk({ url, body: payload, key, auth, buildHeaders: buildAuthHeaders });
       } catch (e) {
         if (!e || !e._sdkLoadFailed) throw e;
         if (!sdkFallbackLogged) {
@@ -113,7 +119,7 @@ export function createChatService({
         }
       }
     }
-    return transport.request({ url, headers: buildAuthHeaders(key, auth), body: { ...body, stream: true }, stream: true });
+    return transport.request({ url, headers: buildAuthHeaders(key, auth), body: { ...payload, stream: true }, stream: true });
   }
 
   async function withRefresh(url, body, key, auth) {
