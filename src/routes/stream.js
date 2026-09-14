@@ -2,6 +2,15 @@ import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
 import { json } from "./helpers.js";
 
+// SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
+// 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
+function chunkText(chunk) {
+  if (typeof chunk === "string") return chunk;
+  if (Buffer.isBuffer(chunk)) return chunk.toString("utf8");
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk).toString("utf8");
+  return "";
+}
+
 export const SLOW_TOTAL_MS = (() => {
   const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
   return Number.isInteger(n) && n > 0 ? n : 20_000;
@@ -42,6 +51,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     if (reason) res.setHeader("x-mslxdff-workbuddy-reason", reason);
     const allow = upRes.headers.get("x-mslxdff-allowlist");
     if (allow) res.setHeader("x-mslxdff-allowlist", allow);
+    const engine = upRes.headers.get("x-mslxdff-upstream-engine");
+    if (engine) res.setHeader("x-mslxdff-upstream-engine", engine);
   } catch {}
   if (fallback) applyFallbackHeaders(res, fallback);
 
@@ -124,7 +135,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           if (gap > SCORE_STALL_MS) detail.stallHits += 1;
           prevChunkAt = now;
           try {
-            const txt = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : typeof chunk === "string" ? chunk : "";
+            const txt = chunkText(chunk);
             if (txt.includes("[DONE]")) detail.sawDone = true;
             const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
             if (m) detail.sawFinishReason = m[1];
@@ -157,7 +168,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             } else {
               // 非 usage 的普通 delta 也累 chars
               try {
-                const txt2 = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+                const txt2 = chunkText(chunk);
                 const ms = txt2.match(/"content"\s*:\s*"([^"]*)"/g);
                 if (ms) for (const mm of ms) {
                   const c = JSON.parse(`{${mm}}`);

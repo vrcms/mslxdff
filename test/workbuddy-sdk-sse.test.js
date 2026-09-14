@@ -66,6 +66,16 @@ describe("createSseSerializer", () => {
     assert.equal(s.end(), "data: [DONE]\n\n");
   });
 
+  it("finish（V2 字符串口径）→ finish_reason 归一；tool-calls 映射 OpenAI tool_calls", () => {
+    const s = createSseSerializer();
+    const f1 = parseFrames(s.push({ type: "finish", finishReason: "length", usage: { inputTokens: 7, outputTokens: 9, totalTokens: 16 } }));
+    assert.equal(f1[0].choices[0].finish_reason, "length");
+    assert.deepEqual(f1[0].usage, { prompt_tokens: 7, completion_tokens: 9, total_tokens: 16 });
+    const s2 = createSseSerializer();
+    const f2 = parseFrames(s2.push({ type: "finish", finishReason: "tool-calls" }));
+    assert.equal(f2[0].choices[0].finish_reason, "tool_calls");
+  });
+
   it("response-metadata 更新 id/model", () => {
     const s = createSseSerializer();
     s.push({ type: "response-metadata", id: "cmb-x", modelId: "glm-5.3-flash", timestamp: "2026-09-12T10:00:00.000Z" });
@@ -85,11 +95,42 @@ describe("createSseSerializer", () => {
 });
 
 describe("usageToOpenAI", () => {
-  it("无 raw 时用 inputTokens/outputTokens 归一", () => {
+  it("V3 嵌套（openai@3）：无 raw 时用 inputTokens/outputTokens 归一", () => {
     assert.deepEqual(
       usageToOpenAI({ inputTokens: { total: 10 }, outputTokens: { total: 5 } }),
       { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     );
     assert.equal(usageToOpenAI(undefined), undefined);
+  });
+
+  it("V2 扁平（openai-compatible@2）：inputTokens/outputTokens 为 number 不再归零", () => {
+    assert.deepEqual(
+      usageToOpenAI({ inputTokens: 15, outputTokens: 236, totalTokens: 251 }),
+      { prompt_tokens: 15, completion_tokens: 236, total_tokens: 251 },
+    );
+    assert.deepEqual(
+      usageToOpenAI({ inputTokens: 3, outputTokens: 4 }),
+      { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+    );
+  });
+
+  it("Responses 口径 raw（input_tokens/output_tokens）→ chat 口径归一 + details", () => {
+    assert.deepEqual(
+      usageToOpenAI({
+        raw: {
+          input_tokens: 14,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 651,
+          output_tokens_details: { reasoning_tokens: 640 },
+        },
+      }),
+      {
+        prompt_tokens: 14,
+        completion_tokens: 651,
+        total_tokens: 665,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 640 },
+      },
+    );
   });
 });
