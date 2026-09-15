@@ -8,6 +8,12 @@ import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 const PEER_TIMEOUT_MS = 30_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
 const DEFAULT_PEER_CONNECT_TIMEOUT_MS = 3_000;
+// SSE 响应体数据间隔超时（undici bodyTimeout）。慢模型首块后可静默思考远超 30s，
+// 沿用 30s 会把组内转发的中继活流掐成 "terminated"（实测首块后 ~31s 必断，本地直连
+// 无此限制——组内因此比直连"不流畅"）。与应用层 MAX_STREAM_MS(120s) 对齐：
+// undici 层只做最后兜底，掐流交给应用层的首块/总时长策略。
+const PEER_BODY_TIMEOUT_MS = 120_000;
+export { PEER_BODY_TIMEOUT_MS };
 
 function peerConnectTimeoutMs() {
   const n = Number(process.env.MSLXDFF_PEER_CONNECT_TIMEOUT_MS);
@@ -25,7 +31,7 @@ function getPeerDispatcher() {
     peerDispatcher = new Agent({
       connect: { timeout: peerConnectTimeoutMs() },
       headersTimeout: PEER_TIMEOUT_MS,
-      bodyTimeout: PEER_TIMEOUT_MS,
+      bodyTimeout: PEER_BODY_TIMEOUT_MS,
       keepAliveTimeout: 30_000,
       keepAliveMaxTimeout: 60_000,
     });
@@ -104,8 +110,9 @@ export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_
   return p;
 }
 
-async function forwardToPeer(peer, body, model, hops) {
-  const controller = new AbortController();
+// controller 由调用方持有：赛跑 winner 确定后可主动 abort 其余 in-flight，
+// 避免迟到流挂满 bodyTimeout（并给对方省下无用负载）。30s timer 仅覆盖"等响应头"。
+async function forwardToPeer(peer, body, model, hops, controller = new AbortController()) {
   const timer = setTimeout(() => controller.abort(), PEER_TIMEOUT_MS);
   try {
     const headers = {
@@ -178,23 +185,39 @@ export async function racePeerCandidates(candidates, ctx) {
     const completed = await new Promise((resolve) => {
       const order = [];
       const total = prepared.length;
+      const ctrls = new Map(); // url -> controller（winner 后统一取消其余）
       let settled = false;
       const finish = (winner) => {
         if (settled) return;
         settled = true;
+        if (winner) {
+          for (const c of ctrls.values()) {
+            if (c === winner.ctrl) continue;
+            c.killedByUs = true;
+            c.abort();
+          }
+        }
         resolve({ list: order, winner });
       };
       for (const { peer, target } of prepared) {
         tried.add(peer.url);
+        const ctrl = new AbortController();
+        ctrls.set(peer.url, ctrl);
         ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1 });
         // 插件 hook：peer:beforeForward — 转发给组员前观察
         if (ctx.plugins?.length) {
           runHook(ctx.plugins, "peer:beforeForward", { reqId: ctx.reqId, peer: peer.url, model: target, hops: ctx.hops + 1 }).catch(() => {});
         }
         const t0 = performance.now();
-        forwardToPeer(peer, ctx.body, target, ctx.hops).then((res) => {
+        forwardToPeer(peer, ctx.body, target, ctx.hops, ctrl).then((res) => {
           const latencyMs = Math.round(performance.now() - t0);
           const failed = res instanceof Error || res.status >= 400;
+          // winner 已定后被我们主动取消：静默，不记账不报错（否则污染健康统计与错误日志）
+          if (res instanceof Error && ctrl.killedByUs) {
+            order.push({ ok: false, peer, target, res, status: 0, killed: true });
+            if (order.length === total) finish(null);
+            return;
+          }
           ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1, latencyMs, ok: !failed });
           // 插件 hook：peer:result — 组员响应后观察
           if (ctx.plugins?.length) {
@@ -211,7 +234,7 @@ export async function racePeerCandidates(candidates, ctx) {
             recordLater(() => ctx.peers.recordResult(peer.url, { ok: false }));
             if (order.length === total) finish(null);
           } else {
-            const entry = { ok: true, peer, target, res, latencyMs };
+            const entry = { ok: true, peer, target, res, latencyMs, ctrl };
             order.push(entry);
             if (!settled) {
               // 第一个成功立即返回：不等慢/黑洞候选（迟到者的记账由各分支自理）
