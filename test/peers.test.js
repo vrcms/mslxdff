@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPeersService, normalizePeerUrl } from "../src/peers.js";
-import { stripCallerBoundReasoning } from "../src/routes/peers.js";
+import { stripCallerBoundReasoning, PEER_BODY_TIMEOUT_MS } from "../src/routes/peers.js";
 import { createAutoSelector } from "../src/auto.js";
 import { startServer } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
@@ -749,15 +749,19 @@ test("peer status endpoint unreachable -> peer skipped, local fallback serves", 
   }
 });
 
-test("two peers race: the fast responder wins even when the slow peer also succeeds", async () => {
+test("two peers race: fast wins and the losing in-flight peer is cancelled", async () => {
+  let slowAborted = false;
   const slowHits = [];
   const fastHits = [];
   const slowSrv = await stubChatServer(
     (req, res, body) => {
       slowHits.push(JSON.parse(body).model);
+      res.on("close", () => { if (!res.writableEnded) slowAborted = true; });
       setTimeout(() => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ from: "slow", model: JSON.parse(body).model }));
+        try {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ from: "slow", model: JSON.parse(body).model }));
+        } catch {}
       }, 250);
     },
     () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
@@ -794,14 +798,16 @@ test("two peers race: the fast responder wins even when the slow peer also succe
     // both peers were hit concurrently (both were prepared and forwarded)
     assert.equal(slowHits.length, 1, "slow peer was also raced");
     assert.equal(fastHits.length, 1, "fast peer was raced");
-    // winner remembered: fast cached with the winning model; the late-arriving
-    // slow success is also warmed so it stays a candidate next round
     assert.equal(peers.stat(fastUrl).model, "deepseek-v4-flash-free");
-    // 赢家立即返回；迟到成功由后台记账队列登记（等一拍再断言）
+    // winner 确定即取消其余 in-flight：loser 不再产出"迟到成功"（不记热、不记错），
+    // 僵尸连接被主动断开（否则会挂到 bodyTimeout）。peer 的洗白改由"它自己赢"完成。
+    assert.equal(peers.stat(slowUrl)?.model, undefined, "cancelled loser must not be warmed by a late success");
+    assert.equal(peers.errors()[slowUrl], undefined, "cancelled loser must not be recorded as an error");
     await new Promise((r) => setTimeout(r, 400));
-    assert.equal(peers.stat(slowUrl)?.model, "deepseek-v4-flash-free", "late slow success also warmed");
+    assert.equal(slowAborted, true, "the losing in-flight peer must be aborted once a winner is picked");
   } finally {
     await app.close();
+    slowSrv.closeAllConnections?.();
     await new Promise((r) => slowSrv.close(r));
     await new Promise((r) => fastSrv.close(r));
   }
@@ -810,6 +816,7 @@ test("two peers race: the fast responder wins even when the slow peer also succe
 test("all peers fail -> retry ordered by earliest error, success clears error memory", async () => {
   let t = 1_000_000;
   let bFail = true;
+  let aFail = false;
   const slowHits = [];
   // B failed 10 min ago, A failed 2 min ago -> B must be retried first
   const srvB = await stubChatServer(
@@ -827,6 +834,11 @@ test("all peers fail -> retry ordered by earliest error, success clears error me
   );
   const srvA = await stubChatServer(
     (req, res) => {
+      if (aFail) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ from: "a" }));
     },
@@ -861,13 +873,16 @@ test("all peers fail -> retry ordered by earliest error, success clears error me
     assert.ok(peers.errors()[urlB], "B keeps its failure record (long-lived until success)");
     assert.equal(peers.errors()[urlA], undefined, "A's failure memory cleared by its success");
 
-    // Next race: B recovers; A succeeds first again (still hot from before),
-    // but the late-arriving success from B must ALSO clear B's memory.
+    // Next race: B recovers and A is down -> B wins on its own; its success
+    // must clear its failure memory.（改由"自己赢"洗白：winner-cancel 之后
+    // loser 不再产出"迟到成功"，见上一用例）
     bFail = false;
+    aFail = true;
     t += 60_000; // let cooldowns pass so B is eligible again
-    await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    const res2 = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal((await res2.json()).from, "b", "B wins when A is down");
     await new Promise((r) => setTimeout(r, 400));
-    assert.equal(peers.errors()[urlB], undefined, "success clears B's error memory");
+    assert.equal(peers.errors()[urlB], undefined, "B's own win clears its error memory");
   } finally {
     await app.close();
     await new Promise((r) => srvB.close(r));
@@ -964,4 +979,10 @@ test("first success returns immediately; a stalled peer does not block the race"
     await new Promise((r) => stalledSrv.close(r));
     await new Promise((r) => fastSrv.close(r));
   }
+});
+
+test("peer body timeout outlives any SSE silent gap (must not kill a thinking relay)", () => {
+  // 实测：muse-spark 首块后 ~31s 静默，旧 30s bodyTimeout 把组内中继活流掐成 terminated。
+  // 这里锁死"不能回退到小值"：undici 层只做最后兜底，掐流交给应用层首块/总时长策略。
+  assert.equal(PEER_BODY_TIMEOUT_MS, 120_000);
 });
