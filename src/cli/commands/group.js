@@ -2,6 +2,7 @@ import { createGroupsService, createBansService, refreshGroupMembers, syncPeersF
 import { createPeersService } from "../../peers.js";
 import { loadToken, loadGroupsJoined, saveGroupsJoined } from "../../state.js";
 import { groupIs, markJoined, probeHealth, syncAllJoinedGroups } from "../group-helpers.js";
+import { joinGroupCore } from "../join-core.js";
 import { errMsg } from "../util.js";
 import { argValue } from "../policy.js";
 import { compatFetch, timeoutSignal } from "../../compat.js";
@@ -149,49 +150,24 @@ export async function handleAddToGroup(args) {
   const isBroadband = rawArgs.includes("--broadband");
   const filtered = rawArgs.filter((a) => a !== "--broadband");
   const [leaderHost, name] = filtered;
-  if (!leaderHost || !name || filtered.length > 2) {
+  if (filtered.length > 2) {
     console.error("usage: mslxdff -addtogroup <leader-host> <name> [--broadband]");
     process.exit(1);
   }
-  const groups = createGroupsService({});
-  const peers = createPeersService({});
-  const myToken = (await loadToken()).token;
-  const leaderUrl = leaderHost.includes("://")
-    ? leaderHost.replace(/\/+$/, "")
-    : `http://${leaderHost}${leaderHost.includes(":") ? "" : ":8989"}`;
-  const kind = isBroadband ? "broadband" : "static";
-  let joinBody;
-  if (isBroadband) {
-    const relayId = `relay://${myToken.slice(0, 8)}`;
-    joinBody = { name, key: name, leaderUrl, url: relayId, token: myToken, kind: "broadband" };
-  } else {
-    const { effectivePort } = await import("../policy.js");
-    const myPort = effectivePort(args);
-    joinBody = { name, key: name, leaderUrl, myPort, token: myToken, kind: "static" };
+  if (!leaderHost || !name) {
+    // 缺参数 → 手机宽带接入向导（默认 broadband：手机无公网入站，只出站）
+    const { runJoinWizard } = await import("../join-wizard.js");
+    const r = await runJoinWizard({ leaderInput: leaderHost || null, groupName: name || null });
+    process.exit(r.ok ? 0 : 1);
   }
-  try {
-    const res = await compatFetch(`${leaderUrl}/v1/groups/join`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(joinBody),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`join failed (HTTP ${res.status}): ${text}`);
-    }
-    const data = await res.json();
-    const myUrl = data.you?.url || joinBody.url || "";
-    const memberName = isBroadband ? myUrl : myUrl;
-    markJoined({ name, leaderUrl, myUrl, memberName, kind });
-    const synced = await syncAllJoinedGroups({ peers, groups });
-    const s = synced.find((x) => x.name === name);
-    console.log(`joined group "${name}" at ${leaderUrl}${isBroadband ? " [broadband]" : ""}`);
-    if (s?.error) console.log(`  local failover setup failed: ${s.error}`);
-    else console.log(`  ${s?.added ?? 0} failover target(s) configured${isBroadband ? " (broadband via leader, local 127.0.0.1)" : ""}`);
-  } catch (err) {
-    console.error(`join failed: ${err.message}`);
+  const r = await joinGroupCore({ leaderHost, name, isBroadband, args });
+  if (!r.ok) {
+    console.error(`join failed: ${r.error}`);
     process.exit(1);
   }
+  console.log(`joined group "${name}" at ${r.leaderUrl}${isBroadband ? " [broadband]" : ""}`);
+  if (r.syncError) console.log(`  local failover setup failed: ${r.syncError}`);
+  else console.log(`  ${r.added ?? 0} failover target(s) configured${isBroadband ? " (broadband via leader, local 127.0.0.1)" : ""}`);
   process.exit(0);
 }
 

@@ -106,3 +106,27 @@ test("入站：无 type 的 message（responses 规范 type 可省，AI SDK/open
   assert.equal(body.messages[1].content, "你好，我是20209933");
   assert.equal(body.messages[3].content, "你可以重复我的话吗，比如，你说：你好，20209933");
 });
+
+test("dropEncrypted：剥掉加密态——留摘要文本、无摘要整条跳过、明文 reasoning_content 兜底", () => {
+  const msgs = [
+    { role: "assistant", content: "a1", reasoning_items: [{ id: "rs_1", encrypted_content: "ENC1", summary: [{ text: "摘要一" }] }] },
+    { role: "user", content: "u2" },
+    { role: "assistant", content: "a3", reasoning_items: [{ id: "rs_3", encrypted_content: "ENC3", summary: [] }], reasoning_content: "明文思考" },
+    { role: "user", content: "u4" },
+    { role: "assistant", content: "a5", reasoning_items: [{ id: "rs_5", encrypted_content: "ENC5" }] },
+  ];
+  const prompt = toModelPrompt(msgs, { dropEncrypted: true });
+  const p0 = prompt[0].content.filter((p) => p.type === "reasoning");
+  assert.equal(p0.length, 1);
+  assert.equal(p0[0].text, "摘要一");
+  assert.equal(p0[0].providerOptions, undefined, "不得带加密态");
+  const p2 = prompt[2].content.filter((p) => p.type === "reasoning");
+  assert.equal(p2.length, 1, "无摘要的加密 item 应跳过而非留空占位");
+  assert.equal(p2[0].text, "明文思考");
+  assert.equal(p2[0].providerOptions, undefined);
+  const p4 = prompt[4].content.filter((p) => p.type === "reasoning");
+  assert.equal(p4.length, 0, "无摘要无明文 → 不带任何 reasoning part");
+  const keep = toModelPrompt(msgs, {});
+  const k0 = keep[0].content.find((p) => p.type === "reasoning");
+  assert.equal(k0.providerOptions.openai.reasoningEncryptedContent, "ENC1", "默认路径仍带加密态");
+});

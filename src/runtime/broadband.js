@@ -6,10 +6,11 @@ import { compatFetch, timeoutSignal } from "../compat.js";
 /**
  * 宽带中继 — poll 模式（heartbeat + poll）与 stream 模式分发。
  * stream 长连下沉 broadband-stream.js，本文件保留任务执行与降级分支。
+ * 空组不再早退：加组后由 ensure（stream 10s / poll 每次读组）自动接上，无需重启 daemon。
+ * // Note: 空组不早退与向导默认 broadband 的取舍 — 见 .agents/notes/implemented/feature/2026-09-16-mobile-broadband-join-wizard.md
  */
 export function startBroadband({ token, upstream }) {
   const broadbandGroups = () => loadGroupsJoined().filter((g) => g.kind === "broadband" && g.leaderUrl);
-  if (!broadbandGroups().length) return;
   const streamEnabled = (() => {
     const v = process.env.MSLXDFF_BROADBAND_STREAM;
     if (v === "0" || v === "false" || v === "off") return false;
@@ -91,7 +92,8 @@ export function startBroadband({ token, upstream }) {
     hbTimer.unref();
     const pollTimer = setInterval(doPoll, 1000);
     pollTimer.unref();
-    console.log(`broadband relay: heartbeat 30s + poll 1s for ${broadbandGroups().length} group(s) [poll mode]`);
+    const n = broadbandGroups().length;
+    console.log(n ? `broadband relay: heartbeat 30s + poll 1s for ${n} group(s) [poll mode]` : "broadband relay: idle (0 group) — waiting for a group join [poll mode]");
     return;
   }
   startBroadbandStream({ token, upstream, execAndPost, broadbandGroups });

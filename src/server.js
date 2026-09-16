@@ -30,8 +30,15 @@ export function startServer({ router, signals = true, host, onBeforeClose }, por
   };
 
   if (signals) {
-    process.on("SIGINT", close);
-    process.on("SIGTERM", close);
+    // 关停留痕（Linux 有效：可捕获 SIGTERM/SIGINT 并记录）。Windows 注意：process.kill 的
+    // SIGTERM 实为 TerminateProcess 强杀，被杀的 JS 进程收不到该事件，此处不会触发——
+    // Windows 的"谁杀了我"靠 src/daemon.js stopDaemon() 的杀者留痕 + 最后一条 heartbeat。
+    const onSignal = (sig) => {
+      try { console.log(`[lifecycle] ${sig} received — shutting down (pid ${process.pid}, uptime ${Math.round(process.uptime())}s)`); } catch {}
+      close();
+    };
+    process.on("SIGINT", () => onSignal("SIGINT"));
+    process.on("SIGTERM", () => onSignal("SIGTERM"));
   }
 
   return { server, ready, close };

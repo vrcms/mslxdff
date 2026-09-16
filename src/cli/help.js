@@ -29,7 +29,7 @@ Usage:
   mslxdff -workbuddy checkin        daily 100 credits（双域幂等，已签 code 10001 视为成功）
   mslxdff -providers list          list all configured upstream providers (opencode, openrouter, generic, workbuddy)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
-  mslxdff -addtogroup <leader-host> <name> [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站，默认127.0.0.1）
+  mslxdff -addtogroup [<host> [<name>]] [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站）；省略参数＝手机宽带向导（问地址+组名，自动起服务，报出口 IP）
   mslxdff -group sync              pull the freshest member list for all joined groups
   mslxdff -group leave <name>      leave a group (removes its members from this node)
   mslxdff -group list              list groups on this node (numbered members)
@@ -45,6 +45,8 @@ Usage:
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -use-group [on|off]     本机失败时是否走组员网络（默认 on；off 则所有供应商仅本机，MSLXDFF_USE_GROUP 环境变量可覆盖）
   mslxdff -help                    show this help
+
+手机接入（Android/Termux）: pkg install nodejs-lts → npm i -g mslxdff → mslxdff -addtogroup → termux-wake-lock（详见 docs/MOBILE.md）
 
 Environment:
   MSLXDFF_PORT          listen port (default 8989; use mslxdff -port N to persist)

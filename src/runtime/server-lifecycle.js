@@ -66,7 +66,7 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
     const msg = String(err?.message || err);
     const code = err?.code || "";
     if (code === "EADDRINUSE" || msg.includes("EADDRINUSE")) {
-      console.log(`port ${resolvePort()} in use — freeing stale holder and retrying...`);
+      console.log(`[lifecycle] EADDRINUSE on port ${resolvePort()} — freeing stale holder and retrying...`);
       try {
         const { execFile } = await import("node:child_process");
         const execAsync2 = (f, a) => new Promise((res) => execFile(f, a, { windowsHide: true, timeout: 4000 }, (e, so, se) => res({ e, so: String(so||""), se: String(se||"") })));
@@ -86,6 +86,8 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
             while ((m2 = re2.exec(line))) pids.add(Number(m2[1]));
           }
         }
+        if (pids.size) console.log(`[lifecycle] killing stale holder(s): ${[...pids].join(",")} (self=${process.pid})`);
+        else console.log(`[lifecycle] no holder pid discoverable (ss/fuser unavailable on this platform?) — retry may fail`);
         for (const p of pids) { if (p !== process.pid) try { process.kill(p, "SIGTERM"); } catch {} }
         if (pids.size) await new Promise((r2) => setTimeout(r2, 600));
         for (const p of pids) try { const { isPidAlive } = await import("../daemon.js"); if (isPidAlive(p)) process.kill(p, "SIGKILL"); } catch {}
@@ -147,7 +149,7 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
   }
   const addr = srv.server.address();
   const host = addr.address === "0.0.0.0" || addr.address === "::" ? "localhost" : addr.address;
-  console.log(`mslxdff v${VERSION} listening on http://${host}:${addr.port}`);
+  console.log(`mslxdff v${VERSION} listening on http://${host}:${addr.port} (pid ${process.pid})`);
   if (created) {
     console.log(`auth token: ${token}`);
   }

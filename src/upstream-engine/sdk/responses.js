@@ -8,6 +8,15 @@ import { ENGINE_MARKER } from "./chat.js";
 
 export const RESPONSES_CHAT_PATH = "/zen/v1/responses";
 
+// 降级阈值：加密思考块（encrypted_content）由上游按 caller（出口）签发，客户端跨出口回传
+// （经组员/换代理/直连切换）会被拒 400 "reasoning `encrypted_content` was not issued to this caller"。
+// 命中即剥掉加密态重试一次；仍失败原样返回，交上层转组员接力（保底不变差）。
+const ENC_CALLER_400_RE = /encrypted_content[^"]*was not issued to this caller/i;
+
+export function isEncryptedCallerError(text) {
+  return typeof text === "string" && ENC_CALLER_400_RE.test(text);
+}
+
 // 上游 encrypted reasoning 只在 output_item.done 里给，而 AI SDK 仅在有 summary 文本时才透出到 parts
 // （muse-spark 这类无 summary 的思考模型会被吞掉）。这里在 fetch 层 tee 一份原始 SSE 自行解析，
 // 侧信道把加密思考交给序列化器，收尾帧补发。
@@ -104,20 +113,38 @@ export async function attemptOnceResponsesSdk({
     },
   };
   let res;
+  let encRetry = false;
+  const streamOnce = (prompt) => model.doStream({
+    prompt,
+    ...params,
+    providerOptions,
+    tools: toModelTools(body?.tools),
+    toolChoice: toModelToolChoice(body?.tool_choice),
+  });
   try {
-    res = await model.doStream({
-      prompt: toModelPrompt(body?.messages),
-      ...params,
-      providerOptions,
-      tools: toModelTools(body?.tools),
-      toolChoice: toModelToolChoice(body?.tool_choice),
-    });
+    res = await streamOnce(toModelPrompt(body?.messages));
   } catch (e) {
-    const mapped = errorResponseFromSdkError(e, { marker });
+    let mapped = errorResponseFromSdkError(e, { marker });
+    if (mapped && mapped.status === 400) {
+      let txt = "";
+      try { txt = await mapped.clone().text(); } catch {}
+      if (isEncryptedCallerError(txt)) {
+        try {
+          res = await streamOnce(toModelPrompt(body?.messages, { dropEncrypted: true }));
+          mapped = null;
+          encRetry = true;
+        } catch (e2) {
+          const mapped2 = errorResponseFromSdkError(e2, { marker });
+          if (mapped2) return mapped2;
+          throw e2;
+        }
+      }
+    }
     if (mapped) return mapped;
-    throw e;
   }
-  return streamResponseFromParts(res.stream, { marker, clock, t0, captured });
+  const out = streamResponseFromParts(res.stream, { marker, clock, t0, captured });
+  if (encRetry) { try { out._t.encRetry = true; } catch {} }
+  return out;
 }
 
 export function createSdkResponses({

@@ -39,7 +39,7 @@ function parseToolArgs(raw) {
   try { return JSON.parse(String(raw)); } catch { return {}; }
 }
 
-export function toModelPrompt(messages) {
+export function toModelPrompt(messages, { dropEncrypted = false } = {}) {
   const out = [];
   for (const m of Array.isArray(messages) ? messages : []) {
     if (!m || typeof m !== "object") continue;
@@ -55,11 +55,17 @@ export function toModelPrompt(messages) {
       // 无加密态时才退回纯文本 reasoning（chat 通道的 reasoning_content）。
       // 空串是 payload 回填的有意标记（requiresReasoningContentOnAssistantMessages）：所有 assistant
       // 必须带该字段——AI SDK 以 length>0 判定是否输出，故用 " " 占位而非 ""。
+      // dropEncrypted：上游拒收跨 caller 的加密态时的降级重试——只留可读摘要（无摘要则整条跳过，
+      // 留给下面的明文 reasoning_content 兜底），不置 pushedEncrypted。
       const items = Array.isArray(m.reasoning_items) ? m.reasoning_items : [];
       let pushedEncrypted = false;
       for (const r of items) {
         if (!r || typeof r !== "object") continue;
         const summaryText = Array.isArray(r.summary) ? r.summary.map((s) => s?.text || "").join("\n") : "";
+        if (dropEncrypted) {
+          if (summaryText) parts.push({ type: "reasoning", text: summaryText });
+          continue;
+        }
         parts.push({
           type: "reasoning",
           text: summaryText || " ",

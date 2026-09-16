@@ -11,6 +11,8 @@ const logs = { appendCall, appendError, appendEvent };
  * 重活下沉 providers-setup / server-lifecycle / group-sync / broadband(-stream)。
  */
 export async function startDaemonMain(VERSION) {
+  const { installLifecycleLog } = await import("./lifecycle-log.js");
+  installLifecycleLog({ version: VERSION, logs });
   const ctx = await setupProviders();
   const { srv, bus } = await startServerLifecycle({ VERSION, ...ctx, logs });
   void srv;
