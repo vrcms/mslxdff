@@ -40,7 +40,7 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
     if (!aliasInfo) aliasInfo = null;
   }
 
-  // workbuddy <uid>:model 形式的 uid 钉死在 normalizeFullId 侧处理，这里透传原始 requested 供 planner 二次剥离
+  // workbuddy <uid>:model 形式的 uid 钉死在 normalizeFullId 侧处理，这里透传原始 requested
   // 若 requested 含 workbuddy/ 前缀且含 :，则尝试提取 uid
   let extractedUid = workbuddyUid;
   if (!extractedUid && requested.startsWith("workbuddy/") && requested.includes(":")) {
@@ -52,7 +52,7 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
   const useAuto = isAutoModel(requested);
 
   // 对 workbuddy 前缀的 model，做 normalizeFullId 归一（剥 uid 供上游）
-  // 但保留 requested 为完整带前缀形态，供 planner 做 ViaRoute 判定
+  // 但保留 requested 为完整带前缀形态，供 serial-trial 做 ViaRoute 判定与组员路由
   let normalizedForUpstream = requested;
   try {
     const norm = normalizeFullId(requested);

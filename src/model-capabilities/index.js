@@ -121,7 +121,7 @@ export function createCapabilitiesService({
   return { ready, get, list, providers, npmIndex: () => new Map(npmIndex) };
 }
 
-// 模块级单例（与 globalDedup 同模式）：HTTP handler 懒加载，测试 _reset 后注入
+// 模块级单例：HTTP handler 懒加载，测试 _reset 后注入
 let _global = null;
 export function globalCapabilities() {
   if (!_global) _global = createCapabilitiesService({ cacheFile: defaultCacheFile() });
