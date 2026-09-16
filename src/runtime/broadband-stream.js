@@ -25,6 +25,7 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
         if (!res.ok) throw new Error(`stream ${res.status}`);
         if (!res.body) throw new Error("no body");
         attempts = 0;
+        console.log(`broadband relay: connected ${g.name} via ${g.leaderUrl} (SSE)`);
         let buf = "";
         const decodeChunk = (c) => {
           if (typeof c === "string") return c;
@@ -73,5 +74,6 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
     for (const g of broadbandGroups()) if (!streamManagers.has(g.name)) startStreamForGroup(g);
   }, 10_000);
   ensureTimer.unref();
-  console.log(`broadband relay: stream (SSE) + ping 25s for ${broadbandGroups().length} group(s)`);
+  const n = broadbandGroups().length;
+  console.log(n ? `broadband relay: stream (SSE) + ping 25s for ${n} group(s)` : "broadband relay: idle (0 group) — waiting for a group join, checked every 10s");
 }

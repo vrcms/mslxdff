@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -16,11 +16,17 @@ export function logFile() {
   return join(daemonDir(), "daemon.log");
 }
 
-export function startDaemon(args = []) {
+// 当前代码所在的 CLI 入口（bin/mslxdff.js 绝对路径）：startDaemon 与
+// auto-update 的 -restart 委托共用（后者从 daemon 进程 spawn 时必须指向同一份代码）。
+export function daemonEntry() {
   const here = fileURLToPath(import.meta.url);
-  const entry = here.endsWith("bin/mslxdff.js")
+  return here.endsWith("bin/mslxdff.js")
     ? here
     : join(dirname(here), "..", "bin", "mslxdff.js");
+}
+
+export function startDaemon(args = []) {
+  const entry = daemonEntry();
   const dir = daemonDir();
   mkdirSync(dir, { recursive: true });
   const logFd = openSync(logFile(), "a", 0o600);
@@ -70,6 +76,12 @@ export function isPidAlive(pid) {
 export function stopDaemon() {
   const pid = readPid();
   if (!pid) return { stopped: false, reason: "no pid file" };
+  // 杀者留痕（写 daemon.log）：Windows 的 SIGTERM 是 TerminateProcess 强杀，被杀的 daemon
+  // 在 JS 层收不到任何事件（无法自记），故由"杀者"记录调用方 pid——
+  // 没有这行 = 非我方所杀（外部 taskkill/任务管理器/崩溃），配合最后一条 heartbeat 定位死亡时刻。
+  try {
+    appendFileSync(logFile(), `[lifecycle] stopDaemon called by pid=${process.pid} — killing daemon pid=${pid}\n`);
+  } catch {}
   try {
     process.kill(pid, "SIGTERM");
   } catch (err) {

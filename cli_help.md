@@ -92,7 +92,7 @@
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
 | `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；`workbuddy/` 模型不在目录 → 走上游原生字段兜底（上下文/读图/推理默认档），其余未收录模型仅写名称不影响使用；旧格式条目自动升级注入（缺 variants 的也补）） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
-| `mslxdff -addtogroup <host> <name> [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式 | 是（`groupsJoined`） | 否 |
+| `mslxdff -addtogroup [<host> [<name>]] [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式（不占端口，只出站）；**省略参数进手机宽带接入向导**（问组长地址+组名，自动起服务并回报出口 IP） | 是（`groupsJoined`） | 否 |
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
 | `mslxdff -group leave <name>` | — | 成员侧离开单群组（本地移除） | 是 | — |
 | `mslxdff -group list` | — | 列出本节点群组与成员（带健康探测与序号，宽带显示 via leader） | 否 | — |
@@ -919,18 +919,19 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   ```
 - **示例**：`mslxdff -creategroup my@mslxd`
 
-### `-addtogroup <leader-host> <name> [--broadband]` / `--addtogroup`
+### `-addtogroup [<leader-host> [<name>]] [--broadband]` / `--addtogroup`
 
 - **语法**：`mslxdff -addtogroup <leader-host> <name> [--broadband]`
-  - `<leader-host>` 可为 `host`、`host:port` 或完整 `http(s)://host:port`（尾斜杠自动去除，缺端口默认 `:8989`）。
+  - `<leader-host>` 可为 `host`、`host:port` 或完整 `http(s)://host:port`（尾斜杠自动去除，缺端口默认 `:8989`；非法输入给人话原因）。
   - `[--broadband]` 可选，位于任意位置（会被过滤），表示宽带动态 IP 成员。
+  - **省略参数**（`-addtogroup` 或 `-addtogroup <host>`）→ 进入**手机宽带接入向导**（见下节）。
 - **作用**：以成员身份加入远端 leader 的群组。
 - **流程**：
-  1. 归一化 `leaderUrl`，取 `myToken`、`myPort`（`effectivePort()`）。
+  1. 归一化 `leaderUrl`（`normalizeLeaderUrl`），取 `myToken`、`myPort`（`effectivePort()`）。
   2. 组装 `joinBody`：
      - 普通：`{ name, key:name, leaderUrl, myPort, token, kind:"static" }`，`myUrl` 由 leader 返回的 `data.you.url` 确定。
      - 宽带：`{ name, key:name, leaderUrl, url:"relay://<token8>", token, kind:"broadband" }`，`myUrl`/`memberName` 均为 `relay://...`。
-  3. `POST <leaderUrl>/v1/groups/join`，失败抛 `join failed (HTTP status): text`。
+  3. `POST <leaderUrl>/v1/groups/join`（8s 超时），失败回 `HTTP <status> <text>` 或 `fetch failed`。
   4. `markJoined({ name, leaderUrl, myUrl, memberName, kind })`，`syncAllJoinedGroups`。
 - **输出**：
   ```
@@ -945,6 +946,49 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
   ```bash
   mslxdff -addtogroup 1.2.3.4 my@mslxd
   mslxdff -addtogroup http://1.2.3.4:8989 my@mslxd --broadband
+  ```
+
+### 手机宽带接入向导（Termux 一键入组）
+
+- **语法**：`mslxdff -addtogroup`（零参数）或 `mslxdff -addtogroup <leader-host>`（只缺组名）
+- **作用**：面向手机等无公网入站设备：只问「组长地址」「组名」两问，自动以 `--broadband` 加入、自动确保后台服务运行、回报出口 IP，全程人话反馈。
+- **流程**：
+  1. 打印 banner，依次问 `1/2 组长地址（ip:端口）`、`2/2 组名`（非法输入给人话原因并重试，最多 3 次；输入结束则体面取消）。
+  2. `joinGroupCore({ isBroadband: true })` 加组；失败给「地址/端口、组长是否在跑、网络是否可达」三条排障 + 重试命令。
+  3. 调组长 `POST /v1/groups/relay/heartbeat` 取 `ip`（组长 `clientIp()` 视角）作为**出口 IP**；组长暂时不可达时降级显示「待确认」，不阻塞。
+  4. `ensureServiceRunning()`：已有后台 daemon 则复用（daemon 每 10s 自动接上 SSE 长连，无需重启），否则 `startDaemon()` + 等 `/health`。
+  5. 打印保活指引（Termux 环境提示 `termux-wake-lock`）。
+- **输出**：
+  ```
+    手机宽带接入 — 让这台设备成为组内出口（不占端口，只出站）
+
+  1/2 组长地址（ip:端口，如 149.13.91.10:8989）: 149.13.91.10:8989
+  2/2 组名: my@mslxd
+  → 正在连接组长 http://149.13.91.10:8989 ...
+  ✓ 已加入组「my@mslxd」（宽带成员 relay://08cb0592）
+  → 正在确认出口 IP ...
+  ✓ 出口 IP: 203.0.113.7（组长视角，上游分流按这个 IP）
+  → 正在启动后台服务 ...
+  ✓ 后台服务已启动（pid 1234）
+
+  保持在线：
+    • termux-wake-lock    防止系统休眠杀进程（强烈建议）
+    • mslxdff -status     查看组与出口状态
+    • mslxdff -stop       停止贡献
+  ```
+- **Termux 首次使用**：
+  ```bash
+  pkg install nodejs-lts      # 装 Node（Termux 仓库自带，无需 root）
+  npm i -g mslxdff            # 或 npx -y mslxdff@latest
+  mslxdff -addtogroup         # 进向导：输入组长 ip:端口 与组名
+  termux-wake-lock            # 防系统休眠杀进程
+  ```
+- **失败**：地址/组名非法重试 3 次后 `exit 1`；加入失败 → 人话原因 + 排障三条 + `exit 1`；输入结束 → `· 已取消（输入结束）`。
+- **完整手机接入指南（Termux 上手 5 步 + 排错表）**：`docs/MOBILE.md`
+- **示例**：
+  ```bash
+  mslxdff -addtogroup                    # 交互式（手机推荐）
+  mslxdff -addtogroup 149.13.91.10:8989  # 只缺组名，仍交互
   ```
 
 ### `-group sync`

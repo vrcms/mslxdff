@@ -1,6 +1,24 @@
+import { closeSync, openSync } from "node:fs";
 import { autoUpdateIntervalMs } from "../cli/policy.js";
 import { errMsg, npmCmd, run } from "../cli/util.js";
-import { resolvePort } from "../server.js";
+
+// 升级后的重启委托：在 daemon 进程内直调 stopDaemon() 是自杀式 SIGTERM，
+// 会打断紧随其后的 startDaemon()/waitForHealth()（2026-09-15 实测：0.1.124→0.1.125
+// 自动升级后 daemon 反复抢占/静默消失 7 分钟）。改为 spawn 一个 CLI 子进程执行
+// `-restart`（成熟路径：杀旧 + 起新 + health 二次确认），daemon 自己不再掌舵重启。
+// env 必须剔除 MSLXDFF_DAEMON，否则子进程的 handleRestart 守卫会把 -restart 当 no-op。
+export function spawnRestartViaCli({ spawnFn, nodePath, entry, logFd, env }) {
+  const clean = { ...env };
+  delete clean.MSLXDFF_DAEMON;
+  delete clean.MSLXDFF_DEBUG;
+  const child = spawnFn(nodePath, [entry, "-restart"], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: clean,
+  });
+  child.unref();
+  return child.pid;
+}
 
 export function setupAutoUpdate({ VERSION, bus, logs }) {
   const autoUpdateMs = autoUpdateIntervalMs();
@@ -78,12 +96,18 @@ export function setupAutoUpdate({ VERSION, bus, logs }) {
     emitAutoUpdate("auto-update-installed", { current: VERSION, latest, stdout: String(up.stdout || "").slice(0, 500) });
     console.log(`auto-update: installed v${latest}, restarting daemon...`);
     emitAutoUpdate("auto-update-restarting", { current: VERSION, latest });
-    const { stopDaemon, startDaemon } = await import("../daemon.js");
-    try { stopDaemon(); } catch (e) { emitAutoUpdate("auto-update-stop-failed", { error: errMsg(e) }); }
-    const { waitForHealth } = await import("../cli/policy.js");
-    const newPid = startDaemon([]);
-    await waitForHealth(resolvePort(), 8000);
-    console.log(`auto-update: restarted as v${latest} (pid ${newPid})`);
-    emitAutoUpdate("auto-update-restarted", { current: VERSION, latest, newPid });
+    const { daemonEntry, logFile } = await import("../daemon.js");
+    const { spawn } = await import("node:child_process");
+    const logFd = openSync(logFile(), "a", 0o600);
+    let restarterPid = null;
+    try {
+      restarterPid = spawnRestartViaCli({ spawnFn: spawn, nodePath: process.execPath, entry: daemonEntry(), logFd, env: process.env });
+    } finally {
+      try { closeSync(logFd); } catch {}
+    }
+    // 不再自己 stopDaemon()/startDaemon()/waitForHealth()：-restart 会杀旧（我们）并起新版本；
+    // 若它失败，本进程保持服务（下轮 60m 检查重试），绝不让重启半途变成"两个都死"。
+    console.log(`auto-update: restart handed to CLI -restart (pid ${restarterPid})`);
+    emitAutoUpdate("auto-update-restart-spawned", { current: VERSION, latest, pid: restarterPid });
   }
 }

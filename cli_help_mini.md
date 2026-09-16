@@ -59,6 +59,8 @@
 | WorkBuddy 桌面导入 | `mslxdff -provider workbuddy import [--file=路径]` | 桌面已登录新号时最快：跨平台自动发现登录态（找不到时 `--file`/env `MSLXDFF_WORKBUDDY_DESKTOP_INFO` 显式指定），无需浏览器/抓包 |
 | WorkBuddy 多号追加（路径A） | `mslxdff -provider workbuddy login` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：`run_command: "mslxdff -provider workbuddy login"`（设备授权：打印浏览器链接→用户用新账号登录→自动轮询落盘 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，不走抓包，桌面端不用退旧号）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；新号次日自动纳入 daemon 每日签到；抓包兜底路径B：`node workbuddy-token-auto.js --force`（需桌面先切新号登录）；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径C） |
 | WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额；daemon 每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN=0` 关，`_HOUR` 改时间） |
+| WorkBuddy 成长任务 | `-workbuddy growth [--json]` / `-wb growth` | 成长任务全自动（拉列表→参与→触发→领奖，串行 1.2s/1s，已领幂等跳过）；可自动 `chat_5`/`automation_1`/`skill_1`/`Model_chat_GLM5.2`，需客户端任务标 MANUAL 不发包；daemon 每日 09:30 自动（`MSLXDFF_WORKBUDDY_GROWTH=0` 关，`_GROWTH_HOUR`/`_GROWTH_MODEL` 可配） |
+| WorkBuddy 猫猫旅行 | `-workbuddy travel [--json]` / `-wb travel` | 无猫自动同意协议+领养（+300，门槛未达自动补一次对话解锁）；到站领奖 / 空闲派出（location 4）/ 旅行中跳过 |
 | WorkBuddy 余额 | `-workbuddy balance [--json]` / `-wb balance` | 查多号余额（`total/dailyPacks/nextExpire`，TTL 5min） |
 | WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
 | WorkBuddy SDK 通道（缺省启用） | `MSLXDFF_WORKBUDDY_SDK`（未设置则继承 `MSLXDFF_UPSTREAM_ENGINE`） | 底层缺省走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18，不可用自动回退原生）；设 `legacy`/关闭词回退原生 transport，上层轮换/刷新/reshape 不变 |
@@ -69,7 +71,7 @@
 | 同步 opencode | `-setto opencode [modelId\|--all]` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，直写裸名如 `deepseek-v4-flash-free`，`/`→`-` 如 `bai/deepseek`→`bai-deepseek` 到 8989 自动还原，`--all` 批量同步全部 picks；picks 非空时摘除失效模型；自动附模型能力：models.dev 目录 + workbuddy 走上游原生字段，opencode 原生识别；写 variants 档位供 ctrl+t 切换（effort 型按档位写，toggle 型不写，TUI 改配置后需重启）） |
 | 同步 chatgpt | `-setto chatgpt [modelId]` | 写 Codex 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `127.0.0.1/v1/responses`，鉴权走 `mslxdff -showtoken` 不落盘），换模型重跑 setto 或 `codex exec -m <id>` 单次覆盖，`codex exec "hi"` 验证；排障 `MSLXDFF_RESPONSES_DEBUG=1` 看 daemon.log `[responses]` |
 | 建组 | `-creategroup <name>` / `-group create <name>` | 建组，本机为 leader |
-| 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继 |
+| 加组 | `-addtogroup <host> <name> [--broadband]` | 加远端组，broadband 走中继（不占端口纯出站）；**零参数/单参数进手机宽带向导**：问组长地址+组名，自动起服务，回报出口 IP |
 | 组同步 | `-group sync` | 刷新全组成员 |
 | 组离开单 | `-group leave <name>` | 离开单组 |
 | 组列表 | `-group list` | 列组+成员+健康/序号 |
