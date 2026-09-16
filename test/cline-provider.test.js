@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createClineProvider } from "../src/providers/cline/index.js";
 
 const DUMMY_RT = "eyJhbGciOiJIUzI1NiJ9.fake_refresh_token_long_12345678901234567890";
@@ -181,4 +184,72 @@ test("cline: refresh failure cools account and retry hits next", async () => {
   const resp = await p.chat({ model: "poolside/laguna-s-2.1:free", messages: [{ role: "user", content: "hi" }], stream: true });
   assert.equal(resp.status, 200);
   assert.ok(n >= 2, "must retry refresh after first failure");
+});
+
+test("cline: models fallback aligns with upstream free 5 (incl cline-free/*)", async () => {
+  const p = createClineProvider({ id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl: async () => new Response("boom", { status: 500 }) });
+  const models = await p.listModels();
+  const ids = models.map((m) => m.id);
+  assert.equal(ids.length, 5, "fallback must carry 5 entries");
+  assert.ok(ids.includes("clinebot/cline-free/deepseek-v4.1-flash"), "must include cline-free/deepseek-v4.1-flash");
+  assert.ok(ids.includes("clinebot/cline-free/muse-spark-1.3-contributor"), "must include cline-free/muse-spark-1.3-contributor");
+  assert.ok(ids.includes("clinebot/z-ai/glm-5.3-flash"), "must include z-ai/glm-5.3-flash");
+  assert.ok(ids.includes("clinebot/cline-free/solar-pro4"), "must include cline-free/solar-pro4");
+  assert.ok(ids.includes("clinebot/poolside/laguna-s-2.1:free"), "must include poolside/laguna-s-2.1:free");
+  await p.close();
+});
+
+test("cline: preheat creates snapshot, stays silent when unchanged, reports diff on change", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cline-free-"));
+  const snap = join(dir, "snap.json");
+  let free = ["z-ai/glm-5.3-flash", "cline-free/solar-pro4"];
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  const mk = () => createClineProvider({
+    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    fetchImpl: async () => new Response(JSON.stringify({ free: free.map((id) => ({ id })) }), { status: 200 }),
+  });
+  try {
+    const p1 = mk();
+    await p1.preheat();
+    await p1.close();
+    assert.deepEqual(JSON.parse(readFileSync(snap, "utf8")).free, free, "snapshot must persist free ids on first run");
+    assert.ok(logs.some((l) => l.includes("snapshot created")), "first run must log snapshot creation");
+
+    logs.length = 0;
+    const p2 = mk();
+    await p2.preheat();
+    await p2.close();
+    assert.equal(logs.filter((l) => l.includes("free models updated")).length, 0, "unchanged run must stay silent");
+
+    logs.length = 0;
+    free = ["z-ai/glm-5.3-flash", "cline-free/deepseek-v4.1-flash"];
+    const p3 = mk();
+    await p3.preheat();
+    await p3.close();
+    const upd = logs.find((l) => l.includes("free models updated"));
+    assert.ok(upd, "change must be logged");
+    assert.ok(upd.includes("cline-free/deepseek-v4.1-flash"), "added id must appear in log");
+    assert.ok(upd.includes("cline-free/solar-pro4"), "removed id must appear in log");
+    assert.deepEqual(JSON.parse(readFileSync(snap, "utf8")).free, free, "snapshot must update after change");
+  } finally {
+    console.log = origLog;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cline: preheat failure leaves snapshot untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cline-free-"));
+  const snap = join(dir, "snap.json");
+  writeFileSync(snap, JSON.stringify({ free: ["z-ai/glm-5.3-flash"] }), "utf8");
+  const p = createClineProvider({
+    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    fetchImpl: async () => new Response("bad", { status: 500 }),
+  });
+  const r = await p.preheat();
+  assert.equal(r.ok, false, "preheat must report failure");
+  assert.deepEqual(JSON.parse(readFileSync(snap, "utf8")).free, ["z-ai/glm-5.3-flash"], "failed fetch must not wipe snapshot");
+  await p.close();
+  rmSync(dir, { recursive: true, force: true });
 });

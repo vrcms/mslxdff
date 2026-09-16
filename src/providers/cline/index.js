@@ -3,6 +3,8 @@ import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProv
 import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createChatRunner } from "../base.js";
 import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
+import { logDir } from "../../logs.js";
+import { join } from "node:path";
 import { createAuthPool } from "./auth.js";
 import { clineHeaders, isRefreshToken } from "./headers.js";
 import { createChatService } from "./chat.js";
@@ -24,6 +26,7 @@ export function createClineProvider({
   apiKey,
   modelsPath,
   chatPath,
+  snapshotPath,
   connectTimeoutMs = Number(process.env.MSLXDFF_CLINE_TIMEOUT_MS) || 30_000,
   cooldownMs = envInt("MSLXDFF_CLINE_COOLDOWN_MS", 30_000),
   retry = { network: { attempts: 2, delayMs: 300 }, 429: { attempts: 1, delayMs: 100 }, 502: { attempts: 1, delayMs: 100 }, 503: { attempts: 1, delayMs: 100 }, 504: { attempts: 1, delayMs: 100 } },
@@ -105,7 +108,8 @@ export function createClineProvider({
     return oldRunner.runChat(body, tmpRing, "shared provider keys");
   }
 
-  const modelsSvc = createModelsService({ id, baseUrl: resolvedBase, modelsPath: resolvedModelsPath, fetchImpl, dispatcher, ring, loadKeys: (pid) => loadProviderKeys(pid, file ? { file } : {}) });
+  // 快照文件供 daemon 启动自检 free 列表增删（默认 logDir 下，gitignored；测试可注入 tmp 路径）
+  const modelsSvc = createModelsService({ id, baseUrl: resolvedBase, modelsPath: resolvedModelsPath, fetchImpl, dispatcher, ring, loadKeys: (pid) => loadProviderKeys(pid, file ? { file } : {}), snapshotPath: snapshotPath || join(logDir(), "cline-free.json") });
 
   async function listModels() {
     const list = await modelsSvc.listModels();
