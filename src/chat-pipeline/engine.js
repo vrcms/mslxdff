@@ -7,7 +7,7 @@ import { runSerialTrial } from "./serial-trial.js";
  */
 export function createEngine(deps = {}) {
   const { raceDeps, serialDeps } = deps;
-  async function run(_plan, state) {
+  async function run(state) {
     const race = await runAutoRace(state, raceDeps);
     if (race.done) return;
     await runSerialTrial({ ...state, order: race.order }, serialDeps);

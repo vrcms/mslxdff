@@ -1,15 +1,13 @@
 import { performance } from "node:perf_hooks";
 import { analyzePolicy } from "./policy.js";
-import { planRoute } from "./planner.js";
 import { createEngine } from "./engine.js";
 import { runHook } from "../plugins.js";
 import { isFreeModel } from "../models.js";
-import { shouldUseGroupForModel } from "../state/schemas/use-group.js";
 import { clientIp, summarizePrompt } from "../routes/helpers.js";
 
 /**
  * ChatPipeline 深模块门面 — 对外 execute(req) 单一 inlet
- * 内部组合 Policy→Planner→Engine：解析 header/model → 产 order → 委托 engine 执行
+ * 内部组合 Policy→Engine：解析 header/model → 产 order → 委托 engine 执行
  * gateway 仅薄适配：readBody + request:received hook + 调 execute
  */
 export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, token, plugins, maxHops } = {}) {
@@ -30,6 +28,20 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     if (aliasInfo && req?.body && req.body.model !== requested) {
       req.body = { ...req.body, model: requested };
     }
+
+    // 事件/日志帮手先于 order 推导声明：evt 在 auto-scope 分支即被使用，
+    // 声明置后会让 useAuto && autoProvider 的请求在 TDZ 上崩（线上 -chat 回退路径）
+    const logCall = (model, status) => logs?.appendCall({ reqId, model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(req?.body?.stream), stages });
+    const logError = (model, status, message) => logs?.appendError({ reqId, model, auto: useAuto, status, message, stages });
+    const evt = (type, data) => {
+      const entry = { ts: Date.now(), reqId, type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
+      if (bus) bus.emit(entry);
+      logs?.appendEvent?.(entry);
+    };
+    const done = (info) => {
+      if (!plugins?.length) return;
+      runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(req?.body?.stream), durationMs: Date.now() - startedAt, ...info }).catch(() => {});
+    };
 
     // order 推导 + plugin model:select 可改
     // 语义：指定模型 = 死锁单模型（本机→组员同款，挂了就报挂，不兜其他 picks）；只有 auto 才轮 picks
@@ -55,18 +67,6 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const canForwardPeers = Boolean(peers) && hops < (maxHops ?? 3);
     mark("ordered");
 
-    const logCall = (model, status) => logs?.appendCall({ reqId, model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(req?.body?.stream), stages });
-    const logError = (model, status, message) => logs?.appendError({ reqId, model, auto: useAuto, status, message, stages });
-    const evt = (type, data) => {
-      const entry = { ts: Date.now(), reqId, type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
-      if (bus) bus.emit(entry);
-      logs?.appendEvent?.(entry);
-    };
-    const done = (info) => {
-      if (!plugins?.length) return;
-      runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(req?.body?.stream), durationMs: Date.now() - startedAt, ...info }).catch(() => {});
-    };
-
     evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(req?.body?.stream), prompt: summarizePrompt(req?.body), rawModel: policy.rawModel, requested, lockModel: lockModel || null });
     if (aliasInfo) evt("alias", { reqId, alias: aliasInfo, rawModel: policy.rawModel, requested });
     if (Object.keys(shareKeys).length) evt("share-keys", { reqId, providers: Object.keys(shareKeys) });
@@ -88,11 +88,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession };
     if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
-    const plan = planRoute(policy, {
-      candidates: order,
-      viaRoute: Boolean(!useAuto && requested.includes("/") && canForwardPeers && shouldUseGroupForModel(requested)) ? { via: true } : null,
-    });
-    await engine.run(plan, {
+    await engine.run({
       reqId, startedAt, req, res, body: req?.body, policy,
       useAuto, lockModel, requested, hops,
       canFallback, canForwardPeers,
@@ -102,5 +98,5 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     });
   }
 
-  return { execute, _policy: analyzePolicy, _plan: planRoute, _engine: engine };
+  return { execute, _policy: analyzePolicy, _engine: engine };
 }
