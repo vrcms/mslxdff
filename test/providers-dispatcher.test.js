@@ -161,6 +161,35 @@ test("dispatcher uses chatWithKeys when shareKeys hit the provider (no local key
   } finally { await d.close(); if (prev) process.env.MSLXDFF_STATE_FILE = prev; else delete process.env.MSLXDFF_STATE_FILE; }
 });
 
+test("dispatcher preheat calls only the default provider (opencode)", async () => {
+  const calls = [];
+  const mk = (id) => ({
+    id,
+    preheat: async () => { calls.push(id); return { ok: true, status: 200, ms: 1 }; },
+    listModels: async () => [],
+    chat: async () => new Response(""),
+  });
+  const d = createProviderDispatcher([mk("opencode"), mk("workbuddy"), mk("clinebot"), mk("aihubmix")]);
+  const r = await d.preheat();
+  assert.deepEqual(calls, ["opencode"], "only the default provider may be preheated");
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 200);
+});
+
+test("dispatcher preheat degrades safely when default provider missing", async () => {
+  const calls = [];
+  const mk = (id) => ({
+    id,
+    preheat: async () => { calls.push(id); return { ok: true }; },
+    listModels: async () => [],
+    chat: async () => new Response(""),
+  });
+  const d = createProviderDispatcher([mk("workbuddy"), mk("clinebot")]);
+  const r = await d.preheat();
+  assert.deepEqual(calls, [], "non-default providers must not be preheated");
+  assert.equal(r.skipped, true);
+});
+
 test("dispatcher ignores shareKeys for providers that opt out (chatWithKeys absent)", async () => {
   const d = createProviderDispatcher([
     { id: "opencode", chat: async (b) => ({ status: 200, body: null, _t: {} }), listModels: async () => [], close: async () => {} },

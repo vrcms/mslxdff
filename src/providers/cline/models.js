@@ -71,9 +71,9 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     } catch { return fallbackList(); } finally { clearTimeout(timer); }
   }
 
-  // 每次 daemon 启动（server-lifecycle → dispatcher.preheat）自检 free 列表：
+  // 每次 daemon 启动自检 free 列表（server-lifecycle 显式调 checkFreeUpdates，不经 dispatcher.preheat）：
   // 对比快照报增删并留痕（daemon.log），顺带把结果填缓存（省一次 listModels 请求）。
-  // 快照路径由 index.js 注入 logDir 下文件；未注入时仅跳过自检，不影响预热。
+  // 快照路径由 index.js 注入 logDir 下文件；未注入时仅跳过自检，不影响拉取。
   function readSnapshotFree() {
     try { const j = JSON.parse(readFileSync(snapshotPath, "utf8")); return Array.isArray(j?.free) ? j.free : null; } catch { return null; }
   }
@@ -104,7 +104,8 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     return { added, removed };
   }
 
-  async function preheat() {
+  // 启动自检入口：拉 recommended-models → 填缓存 → 对比快照报 free 增删。
+  async function checkFreeUpdates() {
     const url = resolveModelsUrl();
     const t0 = performance.now();
     try {
@@ -142,5 +143,10 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     }
   }
 
-  return { listModels, preheat };
+  // preheat 保留为别名：dispatcher 已不再调 clinebot，手动/测试/未来钩子仍可用，行为与自检一致
+  async function preheat() {
+    return checkFreeUpdates();
+  }
+
+  return { listModels, preheat, checkFreeUpdates };
 }

@@ -92,17 +92,18 @@ export function createProviderDispatcher(providers = [], opts = {}) {
     return out;
   }
 
+  // 只预热默认供应商（opencode）：连接池与模型缓存预热是其主链路收益；
+  // 其他供应商按需在首次请求时自拉（10min 缓存）。不再逐家预热，避免 daemon 每次启动
+  // 对所有上游各发一次 GET；MSLXDFF_PREHEAT=0 的关闭由唯一被调的 opencode preheat 自行尊重。
+  // 见 .agents/notes/implemented/simplification/2026-09-16-preheat-opencode-only.md
   async function preheat() {
-    const results = [];
-    for (const p of providers) {
-      if (typeof p.preheat !== "function") continue;
-      try {
-        results.push(await p.preheat());
-      } catch {
-        results.push({ ok: false, error: "preheat failed" });
-      }
+    const p = byId.get(DEFAULT_PROVIDER);
+    if (!p || typeof p.preheat !== "function") return { ok: false, skipped: true };
+    try {
+      return await p.preheat();
+    } catch {
+      return { ok: false, error: "preheat failed" };
     }
-    return results.length ? results[0] : { ok: false, skipped: true };
   }
 
   async function close() {
