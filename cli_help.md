@@ -1209,7 +1209,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |
 | `MSLXDFF_FREE_ANON_DELAY_MS` | `1000` | 匿名重试间隔 |
 | `MSLXDFF_FREE_ANON_LOG` | `<cwd>/free-anon-extra.txt` | 匿名命中日志路径 |
-| `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；开启时 daemon 每次启动顺带自检 `clinebot` free 列表增删，变化写 `daemon.log` 并更新快照 `logDir/cline-free.json`） |
+| `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；仅预热 opencode 的连接池与模型缓存，其他供应商按需首次请求自拉）；clinebot free 自检独立于此开关（daemon 启动时对比快照报增删，写 `daemon.log` + 更新 `logDir/cline-free.json`） |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_TIMEOUT` | `30000` | opencode 上游 keepAlive 超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_MAX_TIMEOUT` | `60000` | keepAlive 最大超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_CONNECTIONS` | `20` | keepAlive 连接数 |

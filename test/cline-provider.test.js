@@ -239,6 +239,22 @@ test("cline: preheat creates snapshot, stays silent when unchanged, reports diff
   }
 });
 
+test("cline: checkFreeUpdates is independently callable (startup hook, not dispatcher preheat)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cline-free-"));
+  const snap = join(dir, "snap.json");
+  const p = createClineProvider({
+    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    fetchImpl: async () => new Response(JSON.stringify({ free: [{ id: "z-ai/glm-5.3-flash" }] }), { status: 200 }),
+  });
+  assert.equal(typeof p.checkFreeUpdates, "function", "provider must expose checkFreeUpdates for the startup hook");
+  const r = await p.checkFreeUpdates();
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 200);
+  assert.deepEqual(JSON.parse(readFileSync(snap, "utf8")).free, ["z-ai/glm-5.3-flash"], "startup hook must refresh the snapshot");
+  await p.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("cline: preheat failure leaves snapshot untouched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cline-free-"));
   const snap = join(dir, "snap.json");

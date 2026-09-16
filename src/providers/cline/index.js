@@ -117,10 +117,10 @@ export function createClineProvider({
     return list;
   }
 
-  const { preheat } = (() => {
-    try { return modelsSvc; } catch { return { preheat: async () => ({ ok: false }) }; }
+  const { preheat, checkFreeUpdates } = (() => {
+    try { return modelsSvc; } catch { return { preheat: async () => ({ ok: false }), checkFreeUpdates: async () => ({ ok: false }) }; }
   })();
 
   async function close() { if (agent?.close) try { await agent.close(); } catch {} }
-  return { id, chat, chatWithKeys, listModels, preheat, close, agent, keyRing: ring, baseUrl: resolvedBase, _authPool: authPool };
+  return { id, chat, chatWithKeys, listModels, preheat, checkFreeUpdates, close, agent, keyRing: ring, baseUrl: resolvedBase, _authPool: authPool };
 }
