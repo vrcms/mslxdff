@@ -41,7 +41,7 @@
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
-| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`--json` 供脚本） |
+| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`clinebot` 与聚合目录同源走 `recommended-models` 的 `free`，daemon 启动自检增删写 `daemon.log`；`--json` 供脚本） |
 | 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick；**deepseek 网页通道不支持 bench**（防禁言，改用 `-provider deepseek health` 体检） |
 | 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；**deepseek 一律跳过**（防禁言）；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
 | Cline 登录 | `-provider clinebot login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`clinebot` 走 `refresh→workos:token`+指纹头，deepseek-v4-flash 免 403（强制 stream 聚合）；多账号重复 login 追加；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |

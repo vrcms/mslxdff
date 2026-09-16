@@ -34,6 +34,10 @@ export async function handleProviderModels(id, sub, args, rest) {
     let provider;
     if (id === "workbuddy") {
       provider = createWorkbuddyProvider({ baseUrl, apiKeys: keys, auths, file: defaultStateFile() });
+    } else if (id === "cline" || id === "clinebot") {
+      // 与聚合目录同源：recommended-models 的 free（generic 的 /api/v1/models 是全量目录，含大量不可用条目）
+      const { createClineProvider } = await import("../../../providers/cline.js");
+      provider = createClineProvider({ id, baseUrl: baseUrl || undefined, apiKeys: keys, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);

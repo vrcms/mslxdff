@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.79`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速 + `bench --via` 直连 vs 经 peer 延迟对比 + opencode 匿名 hermes 优先）。最后更新：2026-09-01。
+> 适用版本：`>=0.1.79`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速 + `bench --via` 直连 vs 经 peer 延迟对比 + opencode 匿名 hermes 优先 + clinebot free 单一源与启动自检）。最后更新：2026-09-16。
 
 ## 目录
 
@@ -61,9 +61,9 @@
 | `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除 | 是 | — |
 | `mslxdff -model picks` | — | 列出当前勾选集 | 否 | — |
 | `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
-| `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`clinebot=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`） | 是 | 重启生效 |
+| `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`workbuddy=/console/enterprises/personal/models`；`clinebot` 内置 `recommended-models`，无需配置） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
-| `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 29 个、`clinebot` 3 个等，无需 `curl`；表格含能力列：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用，workbuddy 走上游原生字段，无此字段的供应商显示 `—`） | 否 | 否 |
+| `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 29 个、`clinebot` 5 个等，无需 `curl`；`clinebot` 与聚合目录同源走 `recommended-models` 的 `free`（不再列全量 443 个内部目录）；表格含能力列：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用，workbuddy 走上游原生字段，无此字段的供应商显示 `—`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider clinebot login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `clinebot` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
@@ -1209,7 +1209,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |
 | `MSLXDFF_FREE_ANON_DELAY_MS` | `1000` | 匿名重试间隔 |
 | `MSLXDFF_FREE_ANON_LOG` | `<cwd>/free-anon-extra.txt` | 匿名命中日志路径 |
-| `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭） |
+| `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；开启时 daemon 每次启动顺带自检 `clinebot` free 列表增删，变化写 `daemon.log` 并更新快照 `logDir/cline-free.json`） |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_TIMEOUT` | `30000` | opencode 上游 keepAlive 超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_MAX_TIMEOUT` | `60000` | keepAlive 最大超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_CONNECTIONS` | `20` | keepAlive 连接数 |
