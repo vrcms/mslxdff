@@ -89,6 +89,62 @@ test("auth: concurrent same uid dedupes refresh to single fetch", async () => {
   } finally { await closeSrv(srv); }
 });
 
+test("auth: refresh 落盘经单一 seam——数组/state/auths 文件三处一致（0600）", async () => {
+  const srv = await stub((req, res) => {
+    if (req.url.includes("/v2/plugin/auth/token/refresh")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 0, data: { accessToken: makeJwt(Math.floor(Date.now() / 1000) + 3600), refreshToken: "rt-new" } }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: 0 }));
+  });
+  const fs = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tmp = join(tmpdir(), `wb-refresh-state-${suffix}.json`);
+  const authDir = join(tmpdir(), `wb-refresh-auths-${suffix}`);
+  await fs.writeFile(tmp, JSON.stringify({}));
+  const origState = process.env.MSLXDFF_STATE_FILE;
+  const origAuthDir = process.env.WORKBUDDY_AUTH_DIR;
+  process.env.MSLXDFF_STATE_FILE = tmp;
+  process.env.WORKBUDDY_AUTH_DIR = authDir;
+  const { clearStateCache } = await import("../src/state/store.js");
+  clearStateCache();
+  try {
+    const { createAuthService } = await import("../src/providers/workbuddy/auth.js");
+    const keys = ["k-old"];
+    const authList = [{ uid: "u-persist", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-old" }];
+    const svc = createAuthService({ baseUrl: urlOf(srv), fetchImpl: fetch, clock: Date.now, store: { keys, authList }, file: tmp });
+    const newAt = await svc.refreshTokenFor("k-old", authList[0]);
+    assert.ok(newAt && newAt !== "k-old");
+    assert.deepEqual(keys, [newAt], "调用方数组就地更新");
+    assert.equal(authList[0].refreshToken, "rt-new");
+    const { loadProviderConfigs } = await import("../src/state.js");
+    const cfg = loadProviderConfigs({ file: tmp }).workbuddy || {};
+    assert.deepEqual(cfg.keys, [newAt], "state 单行无重复");
+    assert.deepEqual(cfg.auths.map((a) => a.uid), ["u-persist"]);
+    assert.equal(cfg.auths[0].refreshToken, "rt-new");
+    const fp = join(authDir, "workbuddy-u-persist.json");
+    const doc = JSON.parse(await fs.readFile(fp, "utf8"));
+    assert.equal(doc.auth.accessToken, newAt);
+    assert.equal(doc.auth.refreshToken, "rt-new");
+    if (process.platform !== "win32") {
+      const st = await fs.stat(fp);
+      assert.equal(st.mode & 0o777, 0o600, "凭据文件权限 0600");
+    }
+  } finally {
+    process.env.MSLXDFF_STATE_FILE = origState;
+    if (origAuthDir === undefined) delete process.env.WORKBUDDY_AUTH_DIR;
+    else process.env.WORKBUDDY_AUTH_DIR = origAuthDir;
+    clearStateCache();
+    try { await fs.unlink(tmp); } catch {}
+    try { await fs.rm(authDir, { recursive: true, force: true }); } catch {}
+    await closeSrv(srv);
+  }
+});
+
 test("auth: maybeProactiveRefresh triggers within 5min and skips when far expired", async () => {
   let refreshCalls = 0;
   const srv = await stub((req, res) => {

@@ -8,7 +8,7 @@ import { mergeState, COLD_WINS } from "./merge.js";
 
 export const DEFAULT_PORT = 8989;
 
-function isTestEnv() {
+export function isTestEnv() {
   if (process.env.NODE_ENV === "test") return true;
   if (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test")) return true;
   if (process.argv.some((a) => String(a).includes("--test") || String(a).endsWith(".test.js"))) return true;

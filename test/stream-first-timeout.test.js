@@ -45,6 +45,7 @@ test("首块晚于闸门但最终到达：撤销超时判定，数据照常转�
   };
   const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 50 });
   assert.equal(r.status, 200);
+  assert.equal(r.timedOut, false, "救回后不再是超时");
   assert.ok(r.detail.wroteChunks >= 1, "数据必须被写出，不能因闸门触发而丢弃");
   assert.ok(r.detail.chars >= 2, "chars 应统计到");
   assert.equal(r.detail.sawDone, true);
@@ -64,7 +65,8 @@ test("上游真死（闸门内无任何数据、cancel 后流结束）：按首�
     cancel() { cancelled = true; },
   };
   const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 50 });
-  assert.equal(r.status, 50, "闸门值原样作为超时状态返回（供上层 failover 判定）");
+  assert.equal(r.timedOut, true, "超时是显式字段（status 数值不再是信号）");
+  assert.equal(r.status, 504, "status 回归 HTTP 语义");
   assert.equal(r.detail.wroteChunks, 0);
   assert.equal(res.wrote.length, 0);
 });
@@ -81,8 +83,46 @@ test("streamTimeoutMs=0：显式关闭首块超时，慢上游不再判死", asy
   };
   const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0 });
   assert.equal(r.status, 200);
+  assert.equal(r.timedOut, false);
   assert.ok(r.detail.wroteChunks >= 1);
   assert.equal(r.detail.exitReason, "normal");
+});
+
+test("流式 usage 归一化：reasoning_tokens 透传（口径收口 metrics.js）", async () => {
+  const res = fakeRes();
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield sseChunk({ choices: [{ delta: { content: "hi" } }] });
+      yield sseChunk({ choices: [{ finish_reason: "stop", delta: {} }], usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8, completion_tokens_details: { reasoning_tokens: 2 } } });
+      yield Buffer.from("data: [DONE]\n\n");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0 });
+  assert.equal(r.detail.usage?.completion_tokens, 5);
+  assert.equal(r.detail.usage?.reasoning_tokens, 2, "旧内联实现会丢 reasoning_tokens");
+  assert.ok(r.detail.chars >= 2);
+});
+
+test("非流式但上游给的是 SSE 文本：仍能提出 usage（此前直接丢）", async () => {
+  const res = fakeRes();
+  const sseText = [
+    'data: {"choices":[{"delta":{"content":"hi"}}]}',
+    "",
+    'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":7,"total_tokens":10}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const upRes = {
+    status: 200,
+    headers: new Headers({ "content-type": "text/event-stream" }),
+    text: async () => sseText,
+  };
+  const r = await relay(res, upRes, { stream: false }, { streamTimeoutMs: 0 });
+  assert.equal(r.timedOut, false);
+  assert.equal(r.detail.usage?.completion_tokens, 7, "非流式 SSE 文本应走 extractUsageFromSseText 兜底");
+  assert.equal(r.detail.chars, sseText.length);
 });
 
 test("等首块期间发 SSE 心跳帧（客户端不误判卡死）", async () => {

@@ -139,7 +139,7 @@ describe("relay-pipeline 深模块", () => {
     const auto = spyAuto();
     let logErrCalls = [];
     const { pipe } = makePipeline({
-      relayImpl: async () => ({ status: BASE.STREAM_TIMEOUT_MS, ttfMs: null, totalMs: 25000, aborted: true, interrupted: false, detail: { exitReason: "first-timeout" } }),
+      relayImpl: async () => ({ status: 504, timedOut: true, ttfMs: null, totalMs: 25000, aborted: true, interrupted: false, detail: { exitReason: "first-timeout" } }),
       auto,
       evtFn: probe,
       logCall: () => {},

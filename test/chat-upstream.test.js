@@ -191,6 +191,14 @@ describe("C3 cooling 冷却", () => {
     });
     assert.equal(await isCool2("mimo-v2.5-free"), false);
   });
+
+  test("US4 零注入默认是惰性空实现（不触碰 state、不抛错）", async () => {
+    const c = createCooling();
+    assert.equal(await c.isCooling("x"), false);
+    await c.recordError("x", 500);
+    await c.recordOk("x", 10);
+    assert.equal(await c.isCooling("x"), false);
+  });
 });
 
 describe("C3 orchestrator 三级降级与对冲", () => {

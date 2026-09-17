@@ -24,8 +24,14 @@ export function createGatewayClient({
       return String(loaded?.token || "").trim();
     } catch { return ""; }
   });
-  const _getPort = getPort || (() => {
-    try { const s = require("../state.js"); const p = s.getPort(); if (Number.isInteger(p) && p > 0) return p; } catch {}
+  // 默认实现与 loadToken/readModelsJson 同款：懒加载 state（ESM 里没有 require）
+  // Note: 这里曾用 require 导致 state.port 被静默忽略 — 见 .agents/notes/implemented/bug-fix/2026-09-17-esm-dead-require-and-orphan-cooling.md
+  const _getPort = getPort || (async () => {
+    try {
+      const s = await import("../state.js");
+      const p = s.getPort();
+      if (Number.isInteger(p) && p > 0) return p;
+    } catch {}
     const v = Number(env.MSLXDFF_PORT);
     if (Number.isInteger(v) && v > 0) return v;
     return defaultPort;
@@ -48,7 +54,7 @@ export function createGatewayClient({
     let token = "";
     try {
       token = String((await _loadToken()) || "").trim();
-      const p = _getPort();
+      const p = await _getPort();
       if (Number.isInteger(p) && p > 0) port = p;
     } catch {}
     if (!token) {

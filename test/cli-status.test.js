@@ -40,11 +40,11 @@ describe("C6 provider-row 纯函数", () => {
     const row = { id: "openrouter", enabled: true, baseUrl: "https://openrouter.ai/api/v1", keys: ["sk-1234567890"], allowed: ["a", "b", "c"], share: true, authCount: 0, note: "" };
     const s = formatProviderRow(row);
     assert.match(s, /● openrouter/);
-    assert.match(s, /enabled/);
-    assert.match(s, /sk-…890/);
-    assert.match(s, /allow=3/);
-    assert.match(s, /share=ON/);
-    assert.match(s, /baseUrl=https:\/\/openrouter/);
+    assert.match(s, /已启用/);
+    assert.match(s, /sk-…7890/);
+    assert.match(s, /allow 3/);
+    assert.match(s, /共享 开/);
+    assert.match(s, /https:\/\/openrouter/);
   });
 
   test("US3 workbuddy 桩检测", () => {
@@ -53,7 +53,7 @@ describe("C6 provider-row 纯函数", () => {
     const s1 = formatProviderRow({ ...row1, enabled: false, note: "测试桩 (key=k-new, baseUrl=127.0.0.1) — 请重跑 node workbuddy-token-auto.js 写入真实 JWT" });
     assert.match(s1, /测试桩/);
     assert.match(s1, /○ workbuddy/);
-    assert.match(s1, /disabled/);
+    assert.match(s1, /未启用/);
     const row2 = { id: "workbuddy", enabled: false, baseUrl: "http://127.0.0.1:8080", keys: ["sk-real-123456789012345"], allowed: [], share: false, authCount: 1, note: "测试桩 (key=k-new, baseUrl=127.0.0.1) — 请重跑" };
     const s2 = formatProviderRow(row2);
     assert.match(s2, /测试桩/);

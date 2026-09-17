@@ -1,7 +1,7 @@
 import { runHook } from "../../plugins.js";
 import { recordModelStats } from "../../state.js";
 import { normalizeFullId } from "../../providers/model-id.js";
-import { computeMetrics, extractUsageFromJson, extractUsageFromSseText } from "../../metrics.js";
+import { computeMetrics } from "../../metrics.js";
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -109,11 +109,12 @@ export function createRelayPipeline({
       totalMs: out.totalMs,
       aborted: out.aborted,
       interrupted: out.interrupted ?? false,
+      timedOut: out.timedOut ?? false,
       detail: out.detail ?? null,
     });
 
-    // 5a. 首块超时未写字节 → 回退
-    if (streamTimeoutMs > 0 && out.status === streamTimeoutMs) {
+    // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
+    if (out.timedOut === true) {
       if (auto) try { await auto.recordError(actual, { status: 502, slow: true, note: `stream timeout ${streamTimeoutMs}ms` }); } catch {}
       try { _logError(actual, 502, `stream timeout ${streamTimeoutMs}ms`); } catch {}
       _evt("upstream-error", { reqId, model: actual, status: 502, message: "stream timeout", timing: null });

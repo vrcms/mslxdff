@@ -138,3 +138,81 @@ describe("saveWorkbuddyAccount", () => {
     }
   });
 });
+
+describe("applyTokenRefresh（刷新落盘单缝）", () => {
+  async function withTmpState(fn) {
+    const fs = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = join(tmpdir(), `wbrefresh-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    const authDir = join(tmpdir(), `wbrefresh-auths-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await fs.writeFile(tmp, JSON.stringify({}));
+    const origState = process.env.MSLXDFF_STATE_FILE;
+    const origAuthDir = process.env.WORKBUDDY_AUTH_DIR;
+    process.env.MSLXDFF_STATE_FILE = tmp;
+    process.env.WORKBUDDY_AUTH_DIR = authDir;
+    const { clearStateCache } = await import("../src/state/store.js");
+    clearStateCache();
+    try { return await fn({ tmp, authDir, join, fs }); } finally {
+      process.env.MSLXDFF_STATE_FILE = origState;
+      if (origAuthDir === undefined) delete process.env.WORKBUDDY_AUTH_DIR;
+      else process.env.WORKBUDDY_AUTH_DIR = origAuthDir;
+      clearStateCache();
+      try { await fs.unlink(tmp); } catch {}
+      try { await fs.rm(authDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+
+  it("旧 key 命中：数组就地更新 + auths 文件与 state 双落（uid 去重）", async () => {
+    await withTmpState(async ({ tmp, authDir, join, fs }) => {
+      const { applyTokenRefresh } = await import("../src/providers/workbuddy/account-store.js");
+      const keys = ["k-old"];
+      const authList = [{ uid: "u1", domain: "www.codebuddy.cn", enterpriseId: "e1", refreshToken: "rt-old" }];
+      const r = await applyTokenRefresh({ uid: "u1", oldKey: "k-old", newToken: "k-new", refreshToken: "rt-new", auth: authList[0], keys, authList, file: tmp });
+      assert.equal(r.updated, true);
+      assert.deepEqual(keys, ["k-new"]);
+      assert.equal(authList[0].refreshToken, "rt-new");
+      assert.equal(authList[0].enterpriseId, "e1", "既有字段不被清空");
+      const { loadProviderConfigs } = await import("../src/state.js");
+      const cfg = loadProviderConfigs({ file: tmp }).workbuddy;
+      assert.deepEqual(cfg.keys, ["k-new"]);
+      assert.deepEqual(cfg.auths.map((a) => a.uid), ["u1"]);
+      const doc = JSON.parse(await fs.readFile(join(authDir, "workbuddy-u1.json"), "utf8"));
+      assert.equal(doc.auth.accessToken, "k-new");
+      assert.equal(doc.auth.refreshToken, "rt-new");
+    });
+  });
+
+  it("旧 key 不在 keys 但 uid 命中：按 uid 槽位更新并落盘（旧实现静默丢弃）", async () => {
+    await withTmpState(async ({ tmp, authDir, join, fs }) => {
+      const { applyTokenRefresh } = await import("../src/providers/workbuddy/account-store.js");
+      const keys = ["k-other"];
+      const authList = [{ uid: "u1", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-old" }];
+      const r = await applyTokenRefresh({ uid: "u1", oldKey: "k-stale", newToken: "k-new", refreshToken: "rt-new", auth: authList[0], keys, authList, file: tmp });
+      assert.equal(r.updated, true, "uid 命中即视为已更新（旧实现静默丢弃）");
+      assert.deepEqual(keys, ["k-new"], "平行数组按下标更新 u1 的槽位");
+      assert.equal(authList[0].refreshToken, "rt-new");
+      const { loadProviderConfigs } = await import("../src/state.js");
+      assert.deepEqual(loadProviderConfigs({ file: tmp }).workbuddy.keys, ["k-new"]);
+      const doc = JSON.parse(await fs.readFile(join(authDir, "workbuddy-u1.json"), "utf8"));
+      assert.equal(doc.auth.accessToken, "k-new");
+    });
+  });
+
+  it("uid/key 都不在：追加且不产生重复 uid 行", async () => {
+    await withTmpState(async ({ tmp, authDir, join, fs }) => {
+      const { applyTokenRefresh } = await import("../src/providers/workbuddy/account-store.js");
+      const keys = ["k-old"];
+      const authList = [{ uid: "u1", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-1" }];
+      const r = await applyTokenRefresh({ uid: "u2", oldKey: "k2-old", newToken: "k2-new", refreshToken: "rt-2", auth: { uid: "u2", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-2" }, keys, authList, file: tmp });
+      assert.equal(r.updated, false);
+      assert.deepEqual(keys, ["k-old", "k2-new"]);
+      const { loadProviderConfigs } = await import("../src/state.js");
+      const cfg = loadProviderConfigs({ file: tmp }).workbuddy;
+      assert.deepEqual(cfg.auths.map((a) => a.uid).sort(), ["u1", "u2"]);
+      assert.equal(cfg.keys.length, 2);
+      const doc = JSON.parse(await fs.readFile(join(authDir, "workbuddy-u2.json"), "utf8"));
+      assert.equal(doc.auth.accessToken, "k2-new");
+    });
+  });
+});
