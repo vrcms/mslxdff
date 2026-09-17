@@ -5,6 +5,7 @@ import { runOne } from "../../../bench/runner.js";
 import { formatViaReport } from "../../../bench/report.js";
 import { clineBenchOne } from "../../../bench/cline-bench.js";
 import { workbuddyBenchOne } from "../../../bench/workbuddy-bench.js";
+import { opencodeClientIdentity } from "../../../opencode-identity.js";
 
 export function buildHeadersForProvider(providerId, apiKey, auth) {
   const h = {};
@@ -20,6 +21,16 @@ export function buildHeadersForProvider(providerId, apiKey, auth) {
     h["X-Domain"] = auth?.domain || "www.codebuddy.cn";
     if (auth?.enterpriseId) { h["X-Enterprise-Id"] = auth.enterpriseId; h["X-Tenant-Id"] = auth.enterpriseId; }
     return h;
+  }
+  // opencode 免费层门禁：UA 带版本 + opencode 形状 session/request，否则 403
+  if (String(providerId).toLowerCase() === "opencode") {
+    const ident = opencodeClientIdentity();
+    h["Content-Type"] = "application/json";
+    if (!h["User-Agent"]) h["User-Agent"] = ident["User-Agent"];
+    h["x-opencode-client"] = "desktop";
+    h["x-opencode-session"] = ident["x-opencode-session"];
+    h["x-opencode-request"] = ident["x-opencode-request"];
+    h["x-opencode-project"] = "global";
   }
   if (apiKey) h["Authorization"] = `Bearer ${apiKey}`;
   return h;

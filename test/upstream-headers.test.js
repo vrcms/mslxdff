@@ -27,9 +27,9 @@ test("upstream emits 9Router-parity headers (session/request/project/UA)", async
     assert.equal(seen["x-opencode-client"],"desktop");
     assert.equal(seen["authorization"],"");
     assert.equal(seen["x-opencode-project"],"global");
-    assert.match(seen["x-opencode-session"], /^ses_[0-9a-f]{32}$/);
-    assert.match(seen["x-opencode-request"], /^msg_[0-9a-f]{32}$/);
-    assert.equal(seen["user-agent"],"opencode");
+    assert.match(seen["x-opencode-session"], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+    assert.match(seen["x-opencode-request"], /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+    assert.match(seen["user-agent"], /^opencode\/\d+\.\d+\.\d+$/);
     assert.equal(seen["accept"],"text/event-stream");
   } finally{ await closeSrv(srv); }
 });
@@ -66,7 +66,7 @@ test("x-opencode-request is unique per call, session format stable", async () =>
     await client.chat({stream:false});
     assert.equal(reqs.length,2);
     assert.notEqual(reqs[0],reqs[1]);
-    for(const r of reqs) assert.match(r, /^msg_[0-9a-f]{32}$/);
+    for(const r of reqs) assert.match(r, /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   } finally{ await closeSrv(srv); }
 });
 
@@ -84,7 +84,7 @@ test("同会话 session 稳定（system+首条 user 哈希）、多轮不漂移�
     await client.chat({model:"m",stream:false,messages:[{role:"system",content:"sys-prompt"},{role:"user",content:"另一个会话"}]});
     assert.equal(seen[0],seen[1],"同一会话多轮必须稳定（上游粘性路由/缓存亲和依赖它）");
     assert.notEqual(seen[0],seen[2],"不同会话应分散");
-    for(const s of seen) assert.match(s, /^ses_[0-9a-f]{32}$/);
+    for(const s of seen) assert.match(s, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   } finally{ await closeSrv(srv); }
 });
 
@@ -99,5 +99,27 @@ test("无 messages 时回退进程级固定 session（不再每请求随机）",
     await client.chat({stream:false});
     await client.chat({stream:false});
     assert.equal(seen[0],seen[1]);
+  } finally{ await closeSrv(srv); }
+});
+
+test("id 12 位 hex 前缀与 opencode Identifier 同构（timestamp*4096+counter 截 48bit）", async () => {
+  let seen;
+  const srv=await stubServer((req,res)=>{
+    seen=req.headers;
+    res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");
+  });
+  try{
+    const before=Date.now();
+    const client=createUpstreamClient({baseUrl:urlOf(srv)});
+    await client.chat({stream:false});
+    const after=Date.now();
+    const value=BigInt("0x"+seen["x-opencode-session"].slice(4,16));
+    const MASK=(1n<<48n)-1n;
+    const ok=[before,after].some((t)=>{
+      const base=BigInt(t)*0x1000n&MASK;
+      const diff=value>=base?value-base:value+(1n<<48n)-base;
+      return diff<4096n;
+    });
+    assert.ok(ok,"12 位 hex 必须可解出 timestamp*4096+counter");
   } finally{ await closeSrv(srv); }
 });

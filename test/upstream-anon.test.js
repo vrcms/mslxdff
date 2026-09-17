@@ -16,7 +16,7 @@ describe("upstream anon-first", () => {
     const c = createUpstreamClient({ baseUrl: "https://example.com", authToken: "public" });
     const h = c.buildHeaders({ stream: true });
     assert.equal(h["Authorization"], "");
-    assert.equal(h["User-Agent"], "opencode");
+    assert.match(h["User-Agent"], /^opencode\/\d+\.\d+\.\d+$/);
     assert.equal(h["HTTP-Referer"], "https://hermes-agent.nousresearch.com");
     assert.equal(h["X-Title"], "Hermes Agent");
     assert.equal(h["x-opencode-client"], "desktop");

@@ -7,11 +7,9 @@ import { isFreeModel } from "./models.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 import { createTransport } from "./transport/index.js";
 import { isResponsesModel, chatToResponsesBody, toChatResponse, reshapeResponsesSse } from "./upstream-responses.js";
-import { uuid } from "./compat.js";
+import { digestIdTail, genId, opencodeClientIdentity, opencodeUa } from "./opencode-identity.js";
 
-function genId(prefix) {
-  return `${prefix}${uuid().replace(/-/g, "")}`;
-}
+export { opencodeClientIdentity, opencodeUa };
 // 上游按 session 做粘性路由（实测：固定 session 两次请求均 ~1.2s；每次随机时可能撞冷机器 26s+）。
 // 客户端（opencode AI SDK 路径）不带会话标识 → 用对话首两条消息（system + 首条 user）哈希做稳定会话：
 // 同一会话多轮里这两条不变 ⇒ 路由亲和稳定；不同会话天然分散。
@@ -25,7 +23,7 @@ function sessionFromMessages(messages) {
     };
     const seed = `${pick("system")}|${pick("user")}`.slice(0, 4000);
     if (seed === "|") return null;
-    return `ses_${crypto.createHash("sha1").update(seed).digest("hex").slice(0, 32)}`;
+    return `ses_${digestIdTail(crypto.createHash("sha1").update(seed).digest())}`;
   } catch {
     return null;
   }
@@ -56,7 +54,7 @@ export function createOpencodeHeaderBuilder({ authToken = "public", env = proces
         "Content-Type": "application/json",
         Authorization: "",
         "x-opencode-client": "desktop",
-        "User-Agent": "opencode",
+        "User-Agent": opencodeUa(),
         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
         "X-Title": "Hermes Agent",
       }
@@ -73,7 +71,7 @@ export function createOpencodeHeaderBuilder({ authToken = "public", env = proces
     const base = {
       ...baseHeaders,
       Accept: isStream ? "text/event-stream" : "*/*",
-      "User-Agent": "opencode",
+      "User-Agent": opencodeUa(),
       "x-opencode-session": session,
       "x-opencode-request": genId("msg_"),
       "x-opencode-project": "global",
