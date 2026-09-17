@@ -79,21 +79,3 @@ export function createCooling({
 
   return { isCooling, isCoolingAsync, recordError, recordChatError, recordOk, recordChatOk };
 }
-
-// 默认实例（对接真实 state.js）
-let _default = null;
-export function getDefaultCooling() {
-  if (_default) return _default;
-  // 懒加载 state，避免循环
-  _default = createCooling({
-    loadModelErrors: () => {
-      try { const s = require("../state.js"); return s.loadModelErrors(); } catch { return {}; }
-    },
-    saveModelErrors: (o) => { try { const s = require("../state.js"); s.saveModelErrors(o); } catch {} },
-    loadModelLatencies: () => { try { const s = require("../state.js"); return s.loadModelLatencies(); } catch { return {}; } },
-    saveModelLatencies: (o) => { try { const s = require("../state.js"); s.saveModelLatencies(o); } catch {} },
-    flush: () => { try { const s = require("../state.js"); s.flushStateSync(); } catch {} },
-    now: () => Date.now(),
-  });
-  return _default;
-}

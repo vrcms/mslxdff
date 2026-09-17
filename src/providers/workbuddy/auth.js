@@ -1,6 +1,7 @@
 import { joinUrl } from "../base.js";
 import { compatFetch } from "../../compat.js";
 import { WORKBUDDY_DEFAULT_BASE_URL } from "../../state/schemas/provider.js";
+import { applyTokenRefresh } from "./account-store.js";
 
 export function decodeJwtExp(token) {
   try {
@@ -45,11 +46,7 @@ export function createAuthService({
   saveFn,
 } = {}) {
   const resolvedBase = baseUrl ? String(baseUrl).trim().replace(/\/+$/, "") : WORKBUDDY_DEFAULT_BASE_URL;
-  if (!fetchImpl) {
-    // 兼容层统一取（undici 优先，老 Node 兜底）
-    fetchImpl = compatFetch;
-  }
-  // lazy resolve UndiciFetch if not provided
+  // 兼容层统一取（undici 优先，老 Node 兜底）
   if (!fetchImpl) fetchImpl = compatFetch;
 
   const inflightRefresh = new Map();
@@ -84,50 +81,29 @@ export function createAuthService({
         if (j.code === 0 && j.data?.accessToken) {
           const newAt = j.data.accessToken;
           const newRt = j.data.refreshToken || rt;
-          // attempt to persist if store provided
+          // attempt to persist if store provided（落盘细节单一源：account-store.applyTokenRefresh）
           try {
             if (saveFn) {
               await saveFn({ newAt, newRt, uid, oldKey: key, auth });
             } else if (store && typeof store.save === "function") {
               await store.save({ newAt, newRt, uid, oldKey: key, auth });
             } else if (store && Array.isArray(store.keys) && Array.isArray(store.authList)) {
-              // direct mutation fallback (legacy shape)
-              const idx = store.keys.indexOf(key);
-              if (idx >= 0) {
-                store.keys[idx] = newAt;
-                store.authList[idx] = { ...auth, refreshToken: newRt };
-                try {
-                  const { saveProviderConfig } = await import("../../state.js");
-                  saveProviderConfig("workbuddy", { baseUrl: resolvedBase, keys: [...store.keys], auths: [...store.authList] }, file ? { file } : {});
-                } catch {}
-                try {
-                  const { writeFileSync, mkdirSync, existsSync } = await import("node:fs");
-                  const { join, dirname } = await import("node:path");
-                  const { tmpdir } = await import("node:os");
-                  const isTest = process.env.NODE_ENV === "test" || (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test"));
-                  const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTest ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
-                  mkdirSync(authDir, { recursive: true });
-                  const expAt = (() => { try { return JSON.parse(Buffer.from(newAt.split(".")[1], "base64").toString()).exp; } catch { return Math.floor(Date.now() / 1000) + 5184000; } })();
-                  const doc = { account: { uid, enterpriseId: auth.enterpriseId || "", nickname: "" }, auth: { accessToken: newAt, refreshToken: newRt, expiresAt: expAt, domain: auth.domain || "www.codebuddy.cn" } };
-                  const fp = join(authDir, `workbuddy-${uid}.json`);
-                  const tmp = fp + ".tmp";
-                  writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 });
-                  try {
-                    if (existsSync(fp)) {
-                      const { unlinkSync, renameSync } = await import("node:fs");
-                      unlinkSync(fp);
-                      renameSync(tmp, fp);
-                    } else {
-                      const { renameSync } = await import("node:fs");
-                      renameSync(tmp, fp);
-                    }
-                  } catch {
-                    writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 });
-                  }
-                } catch {}
-              }
+              await applyTokenRefresh({
+                uid,
+                oldKey: key,
+                newToken: newAt,
+                refreshToken: newRt,
+                domain: auth.domain || "www.codebuddy.cn",
+                enterpriseId: auth.enterpriseId || "",
+                auth,
+                keys: store.keys,
+                authList: store.authList,
+                file: file || undefined,
+              });
             }
-          } catch {}
+          } catch (err) {
+            console.error(`[workbuddy] token 落盘失败（刷新已成功，重启将丢失）: ${String(err?.message || err).slice(0, 200)}`);
+          }
           return newAt;
         }
       } catch {}
@@ -154,19 +130,4 @@ export function createAuthService({
   }
 
   return { refreshTokenFor, maybeProactiveRefresh, decodeJwtExp, isAuthError, isInsufficientStatus, _inflight: inflightRefresh };
-}
-
-function awaitImportUndici() {
-  try {
-    // dynamic to avoid top-level await
-    let UndiciFetch = null;
-    try {
-      // eslint-disable-next-line no-undef
-      const mod = globalThis.__mslxdff_undici || null;
-      if (mod) return mod;
-    } catch {}
-    return { UndiciFetch: null };
-  } catch {
-    return { UndiciFetch: null };
-  }
 }

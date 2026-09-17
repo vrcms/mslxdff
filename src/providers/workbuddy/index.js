@@ -1,26 +1,17 @@
 import { createKeyRing } from "../keyring.js";
-import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, saveProviderConfig, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { compatFetch } from "../../compat.js";
-import { join, dirname } from "node:path";
-import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { envInt, joinUrl, getUndici, createAgent } from "../base.js";
 import { createAuthService, isAuthError, isInsufficientStatus, decodeJwtExp } from "./auth.js";
+import { applyTokenRefresh, resolveAuthDir } from "./account-store.js";
 import { createChatService } from "./chat.js";
 import { createModelsService } from "./models.js";
 import { createBalanceCache, getCachedBalance as defaultGetCached, setCachedBalance as defaultSetCached } from "./balance.js";
 import { defaultLogger } from "./rotation-log.js";
 
 const { UndiciAgent, UndiciFetch } = getUndici();
-
-function isTestEnv() {
-  if (process.env.NODE_ENV === "test") return true;
-  if (process.env.MSLXDFF_STATE_FILE && String(process.env.MSLXDFF_STATE_FILE).includes("mslxdff-test")) return true;
-  if (process.argv.some((a) => String(a).includes("--test") || String(a).endsWith(".test.js"))) return true;
-  if (Array.isArray(process.execArgv) && process.execArgv.some((a) => String(a).includes("--test"))) return true;
-  if (process.env.NODE_TEST_CONTEXT) return true;
-  return false;
-}
 
 function resolveBaseUrl(baseUrl) {
   if (baseUrl) return String(baseUrl).trim().replace(/\/+$/, "");
@@ -71,7 +62,7 @@ export function createWorkbuddyProvider({
 
   if (!authList.length && !keys.length) {
     try {
-      const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
+      const authDir = resolveAuthDir();
       if (existsSync(authDir)) {
         const files = readdirSync(authDir).filter((f) => f.startsWith("workbuddy-") && f.endsWith(".json"));
         for (const f of files) {
@@ -112,48 +103,28 @@ export function createWorkbuddyProvider({
 
   const logger = loggerOpt || defaultLogger;
 
-  // authService with saveFn that mutates outer keys/authList/ring and persists
   const authService = createAuthService({
     baseUrl: resolvedBase,
     fetchImpl,
     clock,
     dispatcher,
     file,
+    // 落盘细节单一源：account-store.applyTokenRefresh（数组就地更新 + state + auths 文件）
     saveFn: async ({ newAt, newRt, uid, oldKey, auth }) => {
-      const idx = keys.indexOf(oldKey);
-      if (idx >= 0) {
-        keys[idx] = newAt;
-        authList[idx] = { ...(authList[idx] || auth), refreshToken: newRt };
-        try { ring.replace(oldKey, newAt); } catch {}
-        try { saveProviderConfig(id, { baseUrl: resolvedBase, keys: [...keys], auths: [...authList] }, file ? { file } : {}); } catch {}
-        try {
-          const authDir = process.env.WORKBUDDY_AUTH_DIR || (isTestEnv() ? join(tmpdir(), "mslxdff-test-auths") : (file && String(file).includes("mslxdff-") ? join(dirname(String(file)), "auths") : join(process.cwd(), "auths")));
-          mkdirSync(authDir, { recursive: true });
-          const expAt = (() => { try { return JSON.parse(Buffer.from(newAt.split(".")[1], "base64").toString()).exp; } catch { return Math.floor(Date.now() / 1000) + 5184000; } })();
-          const doc = { account: { uid, enterpriseId: auth.enterpriseId || "", nickname: "" }, auth: { accessToken: newAt, refreshToken: newRt, expiresAt: expAt, domain: auth.domain || "www.codebuddy.cn" } };
-          const fp = join(authDir, `workbuddy-${uid}.json`);
-          const tmp = fp + ".tmp";
-          writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 });
-          try {
-            if (existsSync(fp)) {
-              const { unlinkSync, renameSync } = await import("node:fs");
-              unlinkSync(fp);
-              renameSync(tmp, fp);
-            } else {
-              const { renameSync } = await import("node:fs");
-              renameSync(tmp, fp);
-            }
-          } catch {
-            writeFileSync(fp, JSON.stringify(doc, null, 2), { mode: 0o600 });
-          }
-        } catch {}
-      } else {
-        if (!keys.includes(newAt)) {
-          keys.push(newAt);
-          authList.push({ ...(auth || {}), uid, refreshToken: newRt });
-          try { ring.replace(oldKey, newAt); } catch {}
-        }
-      }
+      const r = await applyTokenRefresh({
+        uid,
+        oldKey,
+        newToken: newAt,
+        refreshToken: newRt,
+        domain: auth?.domain || "www.codebuddy.cn",
+        enterpriseId: auth?.enterpriseId || "",
+        auth,
+        keys,
+        authList,
+        file,
+      });
+      try { ring.replace(oldKey, newAt); } catch {}
+      return r;
     },
   });
 

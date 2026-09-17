@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
 import { json } from "./helpers.js";
+import { extractUsageFromJson, extractUsageFromSseText } from "../metrics.js";
 
 // SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
 // 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
@@ -163,8 +164,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (txt.includes("[DONE]")) detail.sawDone = true;
             const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
             if (m) detail.sawFinishReason = m[1];
-            // 尝试提取 usage（流式末帧）
-            if (txt.includes("\"usage\"") || txt.includes("prompt_tokens")) {
+            // 尝试提取 usage（流式末帧）：口径收口到 metrics.js，与未流式分支共用
+            if (txt.includes("\"usage\"") || txt.includes("\"prompt_tokens\"")) {
               try {
                 const lines = txt.split("\n");
                 for (const line of lines) {
@@ -172,28 +173,22 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
                   if (!t.startsWith("data:")) continue;
                   const d = t.slice(5).trim();
                   if (d === "[DONE]" || !d) continue;
-                  const j = JSON.parse(d);
-                  if (j && j.usage && typeof j.usage === "object") {
-                    const u = j.usage;
-                    const pt = Number(u.prompt_tokens ?? u.promptTokens ?? u.input_tokens);
-                    const ct = Number(u.completion_tokens ?? u.completionTokens ?? u.output_tokens);
-                    const tt = Number(u.total_tokens ?? u.totalTokens);
-                    const cur = {};
-                    if (Number.isFinite(pt)) cur.prompt_tokens = pt;
-                    if (Number.isFinite(ct)) cur.completion_tokens = ct;
-                    if (Number.isFinite(tt)) cur.total_tokens = tt;
-                    if (Object.keys(cur).length) detail.usage = cur;
+                  // 行级隔离：单行坏 JSON 不拖累同 chunk 其余行
+                  try {
+                    const j = JSON.parse(d);
+                    if (!j || typeof j !== "object") continue;
+                    const u = extractUsageFromJson(j);
+                    if (u) detail.usage = u;
                     // 兜底 chars：从 choices 文本长度累加
                     const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.message?.content || "";
                     if (delta) detail.chars += String(delta).length;
-                  }
+                  } catch { /* 单行坏帧忽略 */ }
                 }
               } catch {}
             } else {
               // 非 usage 的普通 delta 也累 chars
               try {
-                const txt2 = chunkText(chunk);
-                const ms = txt2.match(/"content"\s*:\s*"([^"]*)"/g);
+                const ms = txt.match(/"content"\s*:\s*"([^"]*)"/g);
                 if (ms) for (const mm of ms) {
                   const c = JSON.parse(`{${mm}}`);
                   if (c.content) detail.chars += String(c.content).length;
@@ -250,14 +245,15 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       }
       if (timedOut && !wroteAny) {
         res.removeListener("close", onClose);
-        return { status: streamTimeoutMs, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
+        // Note: 超时是显式字段（timedOut），别再用 status 数值当信号 — 见 .agents/notes/implemented/architecture/2026-09-17-relay-timedout-explicit-and-metrics-seam.md
+        return { status: 504, timedOut: true, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
       }
       if ((stalled || tooLong) && wroteAny) {
         interrupted = true;
         detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
         res.removeListener("close", onClose);
         try { res.end(); } catch { /* ignore */ }
-        return { status: 200, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, detail };
+        return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, detail };
       }
     } else {
       detail.exitReason = "empty-body";
@@ -267,7 +263,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     finishedNormally = true;
     res.removeListener("close", onClose);
     try { res.end(); } catch { /* ignore */ }
-    return { status: 200, ttfMs: ttf, totalMs, aborted: false, interrupted: false, detail };
+    return { status: 200, timedOut: false, ttfMs: ttf, totalMs, aborted: false, interrupted: false, detail };
   }
 
   finishedNormally = true;
@@ -275,32 +271,24 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const text = await upRes.text();
   detail.receivedBytes = Buffer.byteLength(text);
   detail.exitReason = "normal-non-stream";
-  // 非流式 usage 与 chars 提取
+  // 非流式 usage 与 chars 提取（口径与流式分支共用 metrics.js）
   try {
     const parsed = JSON.parse(text);
-    const u = parsed.usage;
-    if (u && typeof u === "object") {
-      const pt = Number(u.prompt_tokens ?? u.promptTokens ?? u.input_tokens);
-      const ct = Number(u.completion_tokens ?? u.completionTokens ?? u.output_tokens);
-      const tt = Number(u.total_tokens ?? u.totalTokens);
-      const cur = {};
-      if (Number.isFinite(pt)) cur.prompt_tokens = pt;
-      if (Number.isFinite(ct)) cur.completion_tokens = ct;
-      if (Number.isFinite(tt)) cur.total_tokens = tt;
-      if (Object.keys(cur).length) detail.usage = cur;
-      if (parsed.choices?.[0]?.message?.content) detail.chars = String(parsed.choices[0].message.content).length;
-      else if (parsed.choices?.[0]?.text) detail.chars = String(parsed.choices[0].text).length;
-    }
+    const u = extractUsageFromJson(parsed);
+    if (u) detail.usage = u;
+    if (parsed.choices?.[0]?.message?.content) detail.chars = String(parsed.choices[0].message.content).length;
+    else if (parsed.choices?.[0]?.text) detail.chars = String(parsed.choices[0].text).length;
     const enriched = enrichNonStreamJson(parsed, fallback);
     json(res, upRes.status, enriched);
   } catch {
     res.statusCode = upRes.status;
     res.setHeader("Content-Type", contentType || "text/plain");
     res.end(text);
-    // 纯文本时按长度估 chars
+    // 纯文本时按长度估 chars；若文本其实是 SSE（client 未要流但上游给流）仍尝试提 usage
     try { detail.chars = text.length; } catch {}
+    try { const u = extractUsageFromSseText(text); if (u) detail.usage = u; } catch {}
   }
   // 非流式 ttf 视为 total（一次性返回）
   const totalMs = Math.round(performance.now() - t0);
-  return { status: upRes.status, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, detail };
+  return { status: upRes.status, timedOut: false, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, detail };
 }

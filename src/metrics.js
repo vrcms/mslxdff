@@ -47,7 +47,6 @@ export function extractUsageFromSseText(sseText) {
     try {
       const j = JSON.parse(data);
       if (j.usage) return extractUsageFromJson(j);
-      if (j.choices?.[0]?.finish_reason && j.usage) return extractUsageFromJson(j);
     } catch {}
   }
   return null;
