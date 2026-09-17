@@ -10,12 +10,14 @@ function fakeRes() {
     headers: {},
     wrote: [],
     ended: false,
+    _handlers: {},
     setHeader(k, v) { this.headers[k.toLowerCase()] = String(v); },
     getHeader(k) { return this.headers[k.toLowerCase()]; },
     write(c) { this.wrote.push(Buffer.isBuffer(c) ? c.toString("utf8") : String(c)); return true; },
-    end() { this.ended = true; },
-    on() { return this; },
-    removeListener() { return this; },
+    end(c) { this.ended = true; if (c != null) this.wrote.push(String(c)); },
+    on(k, fn) { (this._handlers[k] ??= []).push(fn); return this; },
+    removeListener(k, fn) { const a = this._handlers[k]; if (a) this._handlers[k] = a.filter((f) => f !== fn); return this; },
+    emit(k, ...args) { for (const f of [...(this._handlers[k] || [])]) f(...args); },
   };
   return res;
 }
@@ -140,4 +142,92 @@ test("等首块期间发 SSE 心跳帧（客户端不误判卡死）", async () 
   assert.ok(joined.includes(": keepalive"), "等待期间应有心跳帧");
   assert.ok(joined.includes("你好"), "正文照常转发");
   assert.equal(r.status, 200);
+});
+
+// 真实 undici ReadableStream 形态：getReader() 锁定 + reader.cancel() 才有效；
+// 顶层 body.cancel() 在锁定后必 reject（P0-2 根因，旧测试的假 body 掩盖了这一点）。
+function hangingReaderBody({ onCancel } = {}) {
+  let resolvePending = null;
+  let cancelled = false;
+  const reader = {
+    read() {
+      if (cancelled) return Promise.resolve({ done: true, value: undefined });
+      return new Promise((r) => { resolvePending = r; });
+    },
+    cancel() {
+      cancelled = true;
+      onCancel?.();
+      resolvePending?.({ done: true, value: undefined });
+      return Promise.resolve();
+    },
+  };
+  return { getReader: () => reader, cancel: () => reader.cancel(), locked: false };
+}
+
+function commentStreamBody({ intervalMs = 15, onCancel } = {}) {
+  let timer = null;
+  let cancelled = false;
+  let resolvePending = null;
+  const reader = {
+    read() {
+      if (cancelled) return Promise.resolve({ done: true, value: undefined });
+      return new Promise((resolve) => {
+        resolvePending = resolve;
+        timer = setTimeout(() => resolve({ done: false, value: Buffer.from(": keepalive\n\n", "utf8") }), intervalMs);
+      });
+    },
+    cancel() {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      onCancel?.();
+      resolvePending?.({ done: true, value: undefined });
+      return Promise.resolve();
+    },
+  };
+  return { getReader: () => reader, cancel: () => reader.cancel() };
+}
+
+test("真实 reader 形态：闸门到点 reader.cancel() 真生效 → 立即 504，不再等 bodyTimeout", async () => {
+  const res = fakeRes();
+  let cancelled = 0;
+  const body = hangingReaderBody({ onCancel: () => { cancelled += 1; } });
+  const t0 = Date.now();
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 50, keepaliveMs: 0 });
+  const ms = Date.now() - t0;
+  assert.equal(r.timedOut, true, "闸门到点必须判超时（旧实现 cancel 空操作 → 永挂）");
+  assert.equal(r.status, 504);
+  assert.equal(r.detail.wroteChunks, 0);
+  assert.equal(cancelled, 1, "必须真掐上游读");
+  assert.ok(ms < 1500, `闸门到点应立即收场，实测 ${ms}ms`);
+  assert.equal(res.wrote.length, 0);
+});
+
+test("keepalive 注释帧不算首块：不解除闸门、不触发救回，照常透传", async () => {
+  const res = fakeRes();
+  let cancelled = 0;
+  const body = commentStreamBody({ intervalMs: 15, onCancel: () => { cancelled += 1; } });
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 70, keepaliveMs: 0 });
+  assert.equal(r.timedOut, true, "注释帧不得解除闸门");
+  assert.equal(r.status, 504);
+  assert.equal(r.detail.recoveries, 0, "注释帧不得触发超时救回");
+  assert.ok(r.detail.wroteChunks >= 1, "注释帧照常透传（客户端连接保活）");
+  assert.ok(res.wrote.join("").includes(": keepalive"));
+  assert.equal(cancelled, 1);
+  // 已写过注释帧 → headers 已发；此时 failover 收尾（json）不能再 setHeader，否则抛 ERR_HTTP_HEADERS_SENT
+  res.headersSent = true;
+  const { json } = await import("../src/routes/helpers.js");
+  json(res, 502, { error: "terminated" });
+  assert.ok(res.wrote.join("").includes("terminated"), "failover 收尾不得因 headers 已发而抛错");
+});
+
+test("客户端断开：立即取消上游读（不再空转读完）", async () => {
+  const res = fakeRes();
+  let cancelled = 0;
+  const body = hangingReaderBody({ onCancel: () => { cancelled += 1; } });
+  const p = relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 0 });
+  await sleep(30);
+  res.emit("close");
+  const r = await p;
+  assert.equal(cancelled, 1, "断开即掐上游");
+  assert.equal(r.detail.downstreamClosed, true);
 });

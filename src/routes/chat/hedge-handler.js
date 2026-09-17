@@ -27,14 +27,16 @@ export async function handleHedge({
   plugins,
   res,
   hedgeDelayMs,
+  deps = {},
 }) {
+  const { createPipeline = createRelayPipeline, hedgedFirstChunkRace: race = hedgedFirstChunkRace } = deps;
   const d = hedgeDelayMs;
   try {
-    const hedged = await hedgedFirstChunkRace({ localUpRes: upRes, peers, handlerCtx, hedgeDelayMs: d, evt });
+    const hedged = await race({ localUpRes: upRes, peers, handlerCtx, hedgeDelayMs: d, evt });
     if (hedged && hedged.winner) {
       if (hedged.winner === "local") {
         const bufferedUpRes = { ...upRes, body: hedged.bufferedBody, headers: upRes.headers, status: upRes.status, _t: upRes._t };
-        const pipeline = createRelayPipeline({
+        const pipeline = createPipeline({
           relay,
           buildFallbackInfo,
           auto,
@@ -72,7 +74,7 @@ export async function handleHedge({
         evt("peer-race-win", { reqId: handlerCtx.reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs, hedged: true, ttfMs: hedged.ttfMs });
         await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
         const bufferedPeerRes = { ...win.res, body: hedged.bufferedBody, headers: win.res.headers, status: win.res.status, _t: win.res._t };
-        const pipeline = createRelayPipeline({
+        const pipeline = createPipeline({
           relay,
           buildFallbackInfo,
           auto,
@@ -85,7 +87,7 @@ export async function handleHedge({
           startedAt,
           stages,
         });
-        await pipeline.execute({
+        const r = await pipeline.execute({
           res,
           upRes: bufferedPeerRes,
           body,
@@ -101,6 +103,7 @@ export async function handleHedge({
           stages,
           startedAt,
         });
+        if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
         return { handled: true };
       }
     }
