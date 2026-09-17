@@ -7,6 +7,7 @@ import { FORBIDDEN } from "./config.js";
 import { logDir } from "../logs.js";
 import { defaultStateFile, loadProviderKeys, loadProviderConfigs } from "../state.js";
 import { compatFetch } from "../compat.js";
+import { opencodeClientIdentity } from "../opencode-identity.js";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const allowedRoots = [
@@ -220,12 +221,17 @@ export async function curlTool({ url, method, headers, body, timeoutMs }) {
   if (headers && typeof headers === "object") {
     for (const [k, v] of Object.entries(headers)) if (typeof v === "string") h[String(k)] = v;
   }
-  // 上游自动补最小可用头
+  // 上游自动补最小可用头（zen 免费层门禁：UA 带版本 + opencode 形状 session/request）
   if (/opencode\.ai/i.test(target)) {
+    const ident = opencodeClientIdentity();
     if (!h["x-opencode-client"]) h["x-opencode-client"] = "desktop";
     if (!h["Authorization"] && !h["authorization"]) h["Authorization"] = "Bearer public";
     if (!h["Accept"]) h["Accept"] = m === "GET" ? "*/*" : "application/json";
     if (!h["Content-Type"] && m !== "GET" && m !== "HEAD") h["Content-Type"] = "application/json";
+    if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = ident["User-Agent"];
+    if (!h["x-opencode-session"]) h["x-opencode-session"] = ident["x-opencode-session"];
+    if (!h["x-opencode-request"]) h["x-opencode-request"] = ident["x-opencode-request"];
+    if (!h["x-opencode-project"]) h["x-opencode-project"] = "global";
   }
   // 本机自动带 token（/v1/* 需要鉴权）；/v1/models 必须是 GET，模型常误用 POST 直接纠正
   if (/127\.0\.0\.1|localhost/i.test(target) && /\/v1\//i.test(target)) {

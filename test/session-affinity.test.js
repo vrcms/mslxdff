@@ -40,6 +40,6 @@ test("客户端会话头经 dispatcher→provider→upstream 透传为 x-opencod
     await dispatcher.chat({ model: "big-pickle", messages, stream: false });
     assert.equal(seen[1], seen[2], "无会话头时内容哈希兜底必须稳定（非随机）");
     assert.notEqual(seen[1], "ses_from_opencode_plugin_1");
-    assert.match(seen[1], /^ses_[0-9a-f]{32}$/);
+    assert.match(seen[1], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   } finally { await closeSrv(srv); }
 });

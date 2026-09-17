@@ -1105,7 +1105,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 - **工具**（3 类 + 纯回答）：
   - `run_command`：执行 `cli_help.md` 所列任意命令（不含 `mslxdff` 前缀），**仅拦截 `-uninstall`**，`-stop`/`-port` 等可执行；模糊匹配与精确性由大模型负责，进程侧不做二次归一。
   - `read_file`：读取**项目内**文件（`src/` `docs/` `package.json`）或日志目录（`~/.config/mslxdff/*`），用于“看看日志/配置”，超出项目根或超 20KB 截断，目录则列文件名。
-  - `curl`：网络/HTTP 探活，检测上游或本机可用性。支持 `url` 简写（`upstream`=`https://opencode.ai/zen/v1/models`、`local/health`=`http://127.0.0.1:<port>/health`、`local/models`），也支持完整 `http(s)` URL；可选 `method`/`headers`/`body`/`timeoutMs`，上游自动补 `x-opencode-client/desktop` 与 `Authorization: Bearer public`，本机 `/v1/*` 自动带 state token。返回状态码、耗时、响应头与前 6KB body，便于自检“上游是否活着/本地是否监听”。
+  - `curl`：网络/HTTP 探活，检测上游或本机可用性。支持 `url` 简写（`upstream`=`https://opencode.ai/zen/v1/models`、`local/health`=`http://127.0.0.1:<port>/health`、`local/models`），也支持完整 `http(s)` URL；可选 `method`/`headers`/`body`/`timeoutMs`，上游自动补 `x-opencode-client/desktop` + `Authorization: Bearer public` + `User-Agent: opencode/<semver>` + opencode 形状 `x-opencode-session/request`（zen 免费层 2026-09-17 起的客户端身份门禁），本机 `/v1/*` 自动带 state token。返回状态码、耗时、响应头与前 6KB body，便于自检“上游是否活着/本地是否监听”。
   - 纯回答：闲聊或解释时不调工具，直接中文回复。
 - **历史与压缩**：
   - 持久化：`~/.config/mslxdff/chat-history.json`（`MSLXDFF_CHAT_HISTORY` 可覆盖），存最近 120 条，`daemon` 重启不影响（chat 是前台独立进程，与 daemon 无父子关系）。
@@ -1209,6 +1209,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |
 | `MSLXDFF_FREE_ANON_DELAY_MS` | `1000` | 匿名重试间隔 |
 | `MSLXDFF_FREE_ANON_LOG` | `<cwd>/free-anon-extra.txt` | 匿名命中日志路径 |
+| `MSLXDFF_OPENCODE_UA` | `opencode/1.17.20` | opencode 上游身份 `User-Agent`（zen 免费层门禁要求 `opencode/<semver>`，缺版本即 403；配了就以配置为准，用于跟随官方版本升级） |
 | `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；仅预热 opencode 的连接池与模型缓存，其他供应商按需首次请求自拉）；clinebot free 自检独立于此开关（daemon 启动时对比快照报增删，写 `daemon.log` + 更新 `logDir/cline-free.json`） |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_TIMEOUT` | `30000` | opencode 上游 keepAlive 超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_MAX_TIMEOUT` | `60000` | keepAlive 最大超时 |

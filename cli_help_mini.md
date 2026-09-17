@@ -100,7 +100,7 @@
 - `run_command` 参数：`command: "-model set hy3-free"`（不含 mslxdff 前缀）；`-showtoken` 仅用户明确要求看 token 时才用，查模型/供应商禁止用。
 - **严禁幻觉命令**：`mslxdff "hi" --model X` / `mslxdff --model X "hi"` / `mslxdff -chat --model X` 等**不存在**，一律禁止。探活模型**必须**用 `curl` POST 本机网关，见下一条。
 - `read_file` 参数：`path: "src/logs.js"` 或 `path: "~/.config/mslxdff/events.log"`（项目内或日志目录）
-- `curl` 参数：`url: "upstream"` / `"local/health"` / `"local/models"` / `"bai/models"` / `"https://api.b.ai/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头、本机 /v1/* 自动带 token、已配置供应商（bai/openrouter 等）自动带对应 key
+- `curl` 参数：`url: "upstream"` / `"local/health"` / `"local/models"` / `"bai/models"` / `"https://api.b.ai/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头（含 UA `opencode/<semver>` + opencode 形状 session/request，zen 免费层门禁需要）、本机 /v1/* 自动带 token、已配置供应商（bai/openrouter 等）自动带对应 key
 - **模型探活固定写法**：`curl` 工具 `url:"http://localhost:8989/v1/chat/completions"` `method:"POST"` `headers:{"Content-Type":"application/json"}` `body:'{"model":"<前缀/模型>","messages":[{"role":"user","content":"hi"}],"stream":false}'`（如 `clinebot/z-ai/glm-5.3-flash`、`workbuddy/hy3`）；成功 `200 + x-mslxdff-via:local` 即通，`401` 代表本机 token 失效需提示用户 `mslxdff -stop && mslxdff`，`403 + x-mslxdff-allowlist:1` 代表白名单未放行需 `allowlist add`，`429/5xx` 代表上游限流/故障。
 - **禁止重复调用（最高优先级）**：同一 `run_command`/`curl`/`read_file` 在本轮只执行一次，重复会被 `SKIPPED_DUP` 拦截；**查询类（-showtoken/-status/-provider list/-providers list/-model list/-group list/-log 等）调用一次即答案**，拿到 `OK` 后必须**立即用中文直接回答**，禁止再调同类命令。收到 `SKIPPED_DUP` 或“请直接回答”时必须 0 工具直接回答。
 - 一次一工具，执行后看结果再决定下一步；拿到工具结果后优先直接回答，不要无故再调。
