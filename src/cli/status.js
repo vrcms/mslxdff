@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readPid, readPidVersion, isPidAlive, pidFile } from "../daemon.js";
 import { defaultStateFile, getPort, loadGroupsJoined, loadModelErrors, loadModelStats, loadModelPicks } from "../state.js";
 import { resolvePort } from "../server.js";
-import { loadProviderKeys, loadProviderAuths, loadProviderConfigs, loadProviderAllowedModels, loadProviderShareKeys, loadProviderBaseUrl } from "../state.js";
+import { loadProviderKeys, loadProviderAuths, loadProviderConfigs, loadProviderAllowedModels, loadProviderBaseUrl } from "../state.js";
 import { loadToken } from "../state.js";
 import { logDir } from "../logs.js";
 import { createGroupsService } from "../groups.js";

@@ -16,7 +16,7 @@ export async function handleProviderAdd(id, sub, rest) {
     console.error(`provider "${gid}" is built-in — use: mslxdff -provider ${gid} add <key>  or  mslxdff -provider ${gid} set-url <url>`);
     process.exit(1);
   }
-  const { saveProviderConfig, loadProviderConfig, loadProviderShareKeys } = await import("../../../state.js");
+  const { saveProviderConfig, loadProviderConfig } = await import("../../../state.js");
   const { normalizeProviderId } = await import("../../../providers/model-id.js");
   const nid = normalizeProviderId(gid);
   if (!nid) { console.error(`invalid provider id: ${gid}`); process.exit(1); }
@@ -98,7 +98,7 @@ export async function handleProviderAdd(id, sub, rest) {
   console.log(`  keys: ${keys.length} (${keys.map((k) => `${k.slice(0, 4)}…${k.slice(-4)}`).join(", ")})`);
   if (allowedModels.length) console.log(`  allowedModels: ${allowedModels.length} (${allowedModels.join(", ")})`);
   else console.log(`  allowedModels: (none — BLOCKED, otherwise unusable)  → mslxdff -provider ${nid} allowlist set <model...>  OR  mslxdff -provider ${nid} allowAny on (allow all)`);
-  console.log(`  share: ${loadProviderShareKeys(nid) ? "ON" : "off"}   (mslxdff -provider ${nid} share on|off)`);
+  console.log(`  share: 借出（默认，key 随转发自动附带，ADR-0019）`);
   console.log(`  allowAny: OFF (secure, empty allowlist = 403 block before upstream) — enable via: mslxdff -provider ${nid} allowAny on`);
   console.log(`  use as: ${nid}/<model-id>  — restart daemon to activate`);
   if (allowedModels.length) console.log(`  opencode 中使用: mslxdff -setto opencode ${nid}/${allowedModels[0]}  (同步进 opencode.json，会一并设为默认模型)`);

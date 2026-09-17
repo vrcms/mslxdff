@@ -5,7 +5,6 @@
 export const COLD_WINS = new Set([
   "providerConfigs",
   "providerKeys",
-  "providerShareKeys",
   "port",
   "token",
   "preferredModel",

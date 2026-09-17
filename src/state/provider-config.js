@@ -56,10 +56,9 @@ export function defaultChatPath(id) {
 
 export const providerKeyEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_KEY`;
 export const providerBaseUrlEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_BASE_URL`;
-export const providerShareEnv = (id) => `MSLXDFF_${String(id || "").toUpperCase().replace(/[^A-Z0-9]/g, "_")}_SHARE_KEYS`;
 
 /**
- * validate 7 字段：baseUrl, keys, auths, allowedModels, modelsPath, chatPath, shareKeys?（share 单独）
+ * validate 7 字段：baseUrl, keys, auths, allowedModels, modelsPath, chatPath（share 已删，key 随转发自动借出）
  * 返回 {ok, clean, errors}
  */
 export function validateProviderConfig(raw = {}, providerId = "") {

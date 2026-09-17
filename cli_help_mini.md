@@ -16,7 +16,7 @@
 |---|---|---|
 | 无参启动 | `mslxdff` | 已有 daemon 显示 status，否则后台启动 |
 | daemon | `-d` / `--daemon` | 后台启动（只升不降，低版本不覆盖高版本） |
-| 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/share）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(含首字/tps)/last error/autostart/plugins — 全量聚合体检 |
+| 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(含首字/tps)/last error/autostart/plugins — 全量聚合体检 |
 | 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10（含首字/tps/tok 详情） |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
@@ -40,7 +40,7 @@
 | 供应商 | `-provider <id> [keys]` | 批量设 keys（覆盖） |
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
-| 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys+share/baseUrl |
+| 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys/baseUrl/共享（借出固定） |
 | 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`clinebot` 与聚合目录同源走 `recommended-models` 的 `free`，daemon 启动自检增删写 `daemon.log`；`--json` 供脚本） |
 | 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick；**deepseek 网页通道不支持 bench**（防禁言，改用 `-provider deepseek health` 体检） |
 | 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；**deepseek 一律跳过**（防禁言）；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
@@ -51,7 +51,7 @@
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
-| 供应商共享 | `-provider <id> share [on\|off]` | 查/设 瞬时共享开关 |
+| 供应商共享 | key 随转发自动借出（ADR-0019，无开关无白名单） | 借道时自动附带；opencode/workbuddy/cline 硬排除 |
 | 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=阻塞除非 `allowAny on`，非空仅名单内可用（防昂贵模型） |
 | 空名单开关 | `-provider <id> allowAny on\|off` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |

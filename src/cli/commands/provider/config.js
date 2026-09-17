@@ -5,7 +5,7 @@ export async function handleProviderConfig(id, sub, rest) {
       console.error("opencode 是内置供应商，不能删除");
       process.exit(1);
     }
-    const { loadProviderConfigs, saveProviderConfig, saveProviderShareKeys } = await import("../../../state.js");
+    const { loadProviderConfigs, saveProviderConfig } = await import("../../../state.js");
     const { isPidAlive, readPid } = await import("../../../daemon.js");
     const configs = loadProviderConfigs();
     if (!configs[id] && !configs[nid]) {
@@ -33,16 +33,9 @@ export async function handleProviderConfig(id, sub, rest) {
         writeStateImmediate(file, { providerKeys: nk });
         changed = true;
       }
-      if (raw.providerShareKeys && raw.providerShareKeys[id] !== undefined) {
-        const ns = { ...raw.providerShareKeys };
-        delete ns[id];
-        writeStateImmediate(file, { providerShareKeys: ns });
-        changed = true;
-      }
       // 清理模型错误/延迟中该供应商前缀的条目（可选，不阻塞）
       void changed;
     } catch {}
-    try { saveProviderShareKeys(id, false); } catch {}
     console.log(`已删除供应商: ${id} — 配置已清空`);
     // 需要重启才生效，自动重启
     const pid = readPid();
@@ -120,22 +113,6 @@ export async function handleProviderConfig(id, sub, rest) {
     const cur = loadProviderConfig(id) || { baseUrl: "", keys: [] };
     saveProviderConfig(id, { baseUrl: String(url).trim(), keys: cur.keys || [] });
     console.log(`set ${id} baseUrl: ${String(url).trim().replace(/\/+$/, "")} — restart daemon to activate`);
-    process.exit(0);
-  }
-  if (sub === "share") {
-    const { loadProviderShareKeys, saveProviderShareKeys } = await import("../../../state.js");
-    const on = rest[1];
-    if (!on) {
-      console.log(`share keys to peers: ${loadProviderShareKeys(id) ? "ON" : "off"}`);
-      process.exit(0);
-    }
-    if (!["on", "off", "1", "0", "true", "false"].includes(String(on).toLowerCase())) {
-      console.error("usage: mslxdff -provider openrouter share on|off");
-      process.exit(1);
-    }
-    const state = ["on", "1", "true"].includes(String(on).toLowerCase());
-    saveProviderShareKeys(id, state);
-    console.log(`share keys to peers: ${state ? "ON" : "off"} — restart daemon to activate`);
     process.exit(0);
   }
   return false;
