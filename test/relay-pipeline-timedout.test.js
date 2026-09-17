@@ -54,7 +54,7 @@ function makeHarness(outRelay) {
   return { pipe, rec };
 }
 
-async function exec(pipe, handlerCtx) {
+async function exec(pipe, handlerCtx, extra = {}) {
   return pipe.execute({
     res: fakeRes(),
     upRes: fakeUpRes(),
@@ -70,6 +70,7 @@ async function exec(pipe, handlerCtx) {
     perf0: 1000,
     stages: [],
     startedAt: Date.now(),
+    ...extra,
   });
 }
 
@@ -101,4 +102,23 @@ test("流正常（timedOut=false, status 200）：记账 ok", async () => {
   assert.equal(r.handled, true);
   assert.equal(rec.oks.length, 1);
   assert.equal(rec.errors.length, 0);
+});
+
+test("显式 streamTimeoutMs 覆盖候选位置推断（借道走耐心档）", async () => {
+  const cap = [];
+  const pipe = createRelayPipeline({
+    relay: async (res, upRes, body, opts) => { cap.push(opts.streamTimeoutMs); return { status: 200, ttfMs: 5, totalMs: 50, aborted: false, interrupted: false, detail: { stallHits: 0, exitReason: "normal" } }; },
+    buildFallbackInfo: () => null,
+    auto: null,
+    plugins: [],
+    evt: () => {},
+    mark: () => {},
+    logCall: () => {},
+    logError: () => {},
+    constants: BASE,
+    startedAt: 1000,
+    stages: [],
+  });
+  await exec(pipe, { reqId: "r5", hops: 0, model: "m", orderLen: 3, idx: 0 }, { streamTimeoutMs: 120_000 });
+  assert.equal(cap[0], 120_000, "显式档位优先于候选位置推断");
 });

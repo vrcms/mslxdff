@@ -19,7 +19,8 @@ export function authorized(req, token) {
 
 export function json(res, status, body) {
   res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
+  // 已发 headers（如 failover 时前一个候选写过 SSE 注释帧）不可再设，否则抛 ERR_HTTP_HEADERS_SENT
+  try { if (!res.headersSent) res.setHeader("Content-Type", "application/json"); } catch { /* ignore */ }
   res.end(JSON.stringify(body));
 }
 

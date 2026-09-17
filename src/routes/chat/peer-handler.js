@@ -22,14 +22,16 @@ export async function handlePeerRelay({
   startedAt,
   plugins,
   res,
+  deps = {},
 }) {
+  const { createPipeline = createRelayPipeline, racePeerCandidates: race = racePeerCandidates } = deps;
   evt("peer-race-start", { reqId: handlerCtx.reqId, model, peers: peers.ordered().length });
   const peerErrors = [];
   const pctx = { ...handlerCtx, peerErrors };
   const win =
-    (await racePeerCandidates(peers.ordered(), pctx)) ||
-    (await racePeerCandidates(peers.orderedByLastError(), pctx)) ||
-    (await racePeerCandidates(peers.coolingByLastError(), pctx));
+    (await race(peers.ordered(), pctx)) ||
+    (await race(peers.orderedByLastError(), pctx)) ||
+    (await race(peers.coolingByLastError(), pctx));
   if (!win) {
     evt("peer-race-lose", { reqId: handlerCtx.reqId, model });
     // 组员全失败：把每个组员的真实返回汇总给调用者（否则只剩一个无信息的 429/502）
@@ -42,7 +44,7 @@ export async function handlePeerRelay({
   evt("peer-race-win", { reqId: handlerCtx.reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs });
   await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
 
-  const pipeline = createRelayPipeline({
+  const pipeline = createPipeline({
     relay,
     buildFallbackInfo,
     auto,
@@ -55,7 +57,7 @@ export async function handlePeerRelay({
     startedAt,
     stages,
   });
-  await pipeline.execute({
+  const r = await pipeline.execute({
     res,
     upRes: win.res,
     body,
@@ -71,5 +73,7 @@ export async function handlePeerRelay({
     stages,
     startedAt,
   });
+  // Note: 超时/失败必须把 handled:false 交回上层换候选（丢弃 → 响应永不 end）— 见 .agents/notes/implemented/bug-fix/2026-09-17-relay-first-chunk-gate-real-cancel.md
+  if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
   return { handled: true };
 }

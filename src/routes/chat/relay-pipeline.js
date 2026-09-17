@@ -5,7 +5,7 @@ import { computeMetrics } from "../../metrics.js";
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
-const LAST_CANDIDATE_TIMEOUT_MS = (() => {
+export const LAST_CANDIDATE_TIMEOUT_MS = (() => {
   const n = Number(process.env.MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS);
   return Number.isInteger(n) && n >= 0 ? n : 120_000;
 })();
@@ -60,6 +60,7 @@ export function createRelayPipeline({
     perf0,
     stages: s2,
     startedAt: sa2,
+    streamTimeoutMs: ctxStreamTimeoutMs,
   } = {}) {
     const markFn = m2 || _mark;
     const curStartedAt = sa2 ?? defaultStartedAt ?? Date.now();
@@ -79,13 +80,15 @@ export function createRelayPipeline({
     }
     _evt("relay-start", { reqId, model: actual, via, isStream: Boolean(body?.stream), fallback });
 
-    // 3. relay（唯一/最后候选：无 failover 去向 → 闸门放宽到防泄漏级别）
+    // 3. relay（唯一/最后候选：无 failover 去向 → 闸门放宽到防泄漏级别；显式 streamTimeoutMs 优先）
     const orderLen = handlerCtx?.orderLen;
     const curIdx = handlerCtx?.idx;
     const isLastCandidate =
       Number.isInteger(orderLen) && orderLen > 0 &&
       (orderLen === 1 || (Number.isInteger(curIdx) && curIdx >= orderLen - 1));
-    const streamTimeoutMs = isLastCandidate ? LAST_CANDIDATE_TIMEOUT_MS : C.STREAM_TIMEOUT_MS;
+    const streamTimeoutMs = Number.isInteger(ctxStreamTimeoutMs) && ctxStreamTimeoutMs >= 0
+      ? ctxStreamTimeoutMs
+      : (isLastCandidate ? LAST_CANDIDATE_TIMEOUT_MS : C.STREAM_TIMEOUT_MS);
     const out = await _relay(res, upRes, body, {
       fallback,
       streamTimeoutMs,
@@ -115,11 +118,12 @@ export function createRelayPipeline({
 
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
     if (out.timedOut === true) {
+      const why = out.detail?.upstreamError ? ` (upstream read error: ${out.detail.upstreamError})` : "";
       if (auto) try { await auto.recordError(actual, { status: 502, slow: true, note: `stream timeout ${streamTimeoutMs}ms` }); } catch {}
-      try { _logError(actual, 502, `stream timeout ${streamTimeoutMs}ms`); } catch {}
+      try { _logError(actual, 502, `stream timeout ${streamTimeoutMs}ms${why}`); } catch {}
       _evt("upstream-error", { reqId, model: actual, status: 502, message: "stream timeout", timing: null });
       _evt("fallback", { reqId, from: actual, to: null, reason: "stream timeout" });
-      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `stream timed out after ${streamTimeoutMs}ms` } };
+      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `stream timed out after ${streamTimeoutMs}ms${why}` } };
     }
 
     // 5b. 中断（stall 超时 / max 流时长）

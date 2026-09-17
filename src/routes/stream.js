@@ -20,6 +20,29 @@ function cancelBody(body) {
   } catch { /* ignore */ }
 }
 
+// 注释帧（": keepalive" 等）不是模型输出：不算首块、不解除闸门、不触发超时救回，但照常透传
+function hasPayload(text) {
+  for (const line of String(text).split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith(":")) continue;
+    return true;
+  }
+  return false;
+}
+
+// 自持 reader 优先：for-await 会锁定 ReadableStream，使 body.cancel() 必 reject（真流上等于空操作），
+// 超时/断下游要真能掐上游必须走 reader.cancel()
+async function* bodyChunks(body, reader) {
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      yield value;
+    }
+  }
+  for await (const c of body) yield c;
+}
+
 export const SLOW_TOTAL_MS = (() => {
   const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
   return Number.isInteger(n) && n > 0 ? n : 20_000;
@@ -94,16 +117,26 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     recoveries: 0,
   };
   let prevChunkAt = t0;
+  // 断下游即掐上游：流式分支装配真实取消，非流式保持 no-op
+  let cancelUpstream = () => {};
   const onClose = () => {
     detail.downstreamClosed = true;
-    if (!finishedNormally && onDownstreamAbort) onDownstreamAbort();
+    if (!finishedNormally) {
+      cancelUpstream();
+      if (onDownstreamAbort) onDownstreamAbort();
+    }
   };
   res.on("close", onClose);
 
   if (isStream) {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
+    // failover 重入时 headers 可能已发（前一个候选只发过 keepalive 注释帧就被掐）——已发则不可再设
+    if (!res.headersSent) {
+      try {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+      } catch { /* ignore */ }
+    }
     if (fallback?.fallback) {
       try {
         res.write(`: mslxdff fallback ${fallback.requested_model} -> ${fallback.actual_model} (${fallback.reason})\n`);
@@ -113,10 +146,21 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     if (upRes.body) {
       let first = true;
       let wroteAny = false;
+      let wrotePayload = false; // 真实数据帧（注释帧不算）：决定能否安全 failover
       let timedOut = false;
       let stalled = false;
       let tooLong = false;
       let stallTimer = null;
+      // 自持 reader：超时/断下游时 reader.cancel() 才真的掐得断上游
+      // Note: 闸门真取消 + 注释帧不算首块 + wrotePayload 判据 — 见 .agents/notes/implemented/bug-fix/2026-09-17-relay-first-chunk-gate-real-cancel.md
+      const reader = typeof upRes.body.getReader === "function" ? upRes.body.getReader() : null;
+      let cancelled = false;
+      cancelUpstream = () => {
+        if (cancelled) return;
+        cancelled = true;
+        if (reader) { try { reader.cancel().catch(() => {}); } catch { /* ignore */ } }
+        else cancelBody(upRes.body);
+      };
       let pingTimer = keepaliveMs > 0
         ? setInterval(() => {
             if (wroteAny) return;
@@ -129,7 +173,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           ? setTimeout(() => {
               stalled = true;
               detail.exitReason = "stall";
-              cancelBody(upRes.body);
+              cancelUpstream();
             }, STALL_TIMEOUT_MS)
           : null;
       };
@@ -137,18 +181,18 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
         ? setTimeout(() => {
             timedOut = true;
             detail.exitReason = "first-timeout";
-            cancelBody(upRes.body);
+            cancelUpstream();
           }, streamTimeoutMs)
         : null;
       const maxTimer = MAX_STREAM_MS
         ? setTimeout(() => {
             tooLong = true;
             detail.exitReason = "max";
-            cancelBody(upRes.body);
+            cancelUpstream();
           }, MAX_STREAM_MS)
         : null;
       try {
-        for await (const chunk of upRes.body) {
+        for await (const chunk of bodyChunks(upRes.body, reader)) {
           const now = performance.now();
           detail.receivedChunks += 1;
           const len = chunk?.length ?? chunk?.byteLength ?? 0;
@@ -159,8 +203,9 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           if (gap > detail.maxGapMs) detail.maxGapMs = gap;
           if (gap > SCORE_STALL_MS) detail.stallHits += 1;
           prevChunkAt = now;
+          const txt = chunkText(chunk);
+          const isPayload = hasPayload(txt);
           try {
-            const txt = chunkText(chunk);
             if (txt.includes("[DONE]")) detail.sawDone = true;
             const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
             if (m) detail.sawFinishReason = m[1];
@@ -196,9 +241,10 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
               } catch {}
             }
           } catch { /* ignore */ }
-          // 首块/空闲超时后上游仍吐出了数据 → 只是慢，不是死：撤销超时判定，照常转发
-          //（cancel 是协作式的，缓冲数据仍会到达；丢掉已到达的数据是纯损失）
-          if (timedOut || stalled) {
+          // 首块/空闲超时后上游仍吐出了真实数据 → 只是慢，不是死：撤销超时判定，照常转发
+          //（cancel 是异步的，竞态窗口内已到达的数据是纯收益；丢掉是纯损失）
+          // 注释帧（keepalive）不算：否则对端只要在发心跳，闸门就永远解除
+          if (isPayload && (timedOut || stalled)) {
             timedOut = false;
             stalled = false;
             detail.recoveries = (detail.recoveries || 0) + 1;
@@ -206,14 +252,14 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
           if (timedOut || stalled || tooLong) break;
-          if (first) {
+          if (isPayload && first) {
             first = false;
             ttf = Math.round(now - t0);
             onFirstChunk?.(ttf);
             if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
           let outChunk = chunk;
-          if (first === false && fallback?.fallback && wroteAny === false) {
+          if (first === false && fallback?.fallback && wrotePayload === false) {
             try {
               let txt = "";
               if (Buffer.isBuffer(chunk)) txt = chunk.toString("utf8");
@@ -226,16 +272,17 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             } catch {}
           }
           wroteAny = true;
+          if (isPayload) wrotePayload = true;
           detail.wroteChunks += 1;
           detail.wroteBytes += Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
-          res.write(outChunk);
+          try { res.write(outChunk); } catch { /* 下游已断开：onClose 已掐上游 */ }
           armStall();
         }
-        if (!detail.exitReason) detail.exitReason = "normal";
+        if (!detail.exitReason) detail.exitReason = detail.downstreamClosed ? "downstream-closed" : "normal";
       } catch (err) {
         detail.upstreamError = String(err?.message || err).slice(0, 300);
         detail.exitReason = "upstream-error";
-        if (!wroteAny) timedOut = true;
+        if (!wrotePayload) timedOut = true;
         else stalled = true;
       } finally {
         if (firstTimer) clearTimeout(firstTimer);
@@ -243,12 +290,13 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
         if (stallTimer) clearTimeout(stallTimer);
         if (pingTimer) clearInterval(pingTimer);
       }
-      if (timedOut && !wroteAny) {
+      // 任一闸门到点且未写出真实数据 → 可安全 failover（注释帧对客户端无意义，不算已响应）
+      if ((timedOut || stalled || tooLong) && !wrotePayload) {
         res.removeListener("close", onClose);
         // Note: 超时是显式字段（timedOut），别再用 status 数值当信号 — 见 .agents/notes/implemented/architecture/2026-09-17-relay-timedout-explicit-and-metrics-seam.md
         return { status: 504, timedOut: true, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
       }
-      if ((stalled || tooLong) && wroteAny) {
+      if ((stalled || tooLong) && wrotePayload) {
         interrupted = true;
         detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
         res.removeListener("close", onClose);

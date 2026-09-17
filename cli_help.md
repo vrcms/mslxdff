@@ -1186,7 +1186,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_VIA_ROUTE_TTL_MS` | `0` | via-routes 条目 TTL（`0`=不过期，手动 `bench --via --apply` 重跑即更新） |
 | `MSLXDFF_BENCH_DELAY_MS` | `120` | bench --via 串行间隔 ms |
 | `MSLXDFF_SLOW_TOTAL_MS` | `20000` | 慢模型判定：总耗时阈值 |
-| `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块超时（未写字节才 failover） |
+| `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块闸门：非末位候选到点即真掐上游换候选（`0`=关闭；keepalive 注释帧不算首块、不解除闸门） |
+| `MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS` | `120000` | 末位/唯一候选与借道（via-route）的耐心档：首块未到才放弃（`0`=不限，慢上游可调大） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
 | `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |
 | `MSLXDFF_MODELS_DEV_TTL_MS` | `86400000` (24h) | 能力目录缓存 TTL（过期重拉；`0`=每请求拉） |

@@ -1,4 +1,4 @@
-import { createRelayPipeline } from "./relay-pipeline.js";
+import { createRelayPipeline, LAST_CANDIDATE_TIMEOUT_MS } from "./relay-pipeline.js";
 import { relay, SLOW_TOTAL_MS, STREAM_TIMEOUT_MS, STALL_TIMEOUT_MS, SCORE_STALL_MS } from "../stream.js";
 import { buildFallbackInfo } from "../fallback.js";
 import { getViaRoute } from "../../bench/via-routes.js";
@@ -121,7 +121,7 @@ export async function handleViaRoute({
     startedAt,
     stages,
   });
-  await pipeline.execute({
+  const r = await pipeline.execute({
     res,
     upRes,
     body,
@@ -136,6 +136,9 @@ export async function handleViaRoute({
     perf0,
     stages,
     startedAt,
+    // 借道单路径无第二候选可比：按末位耐心档（默认 120s，MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS 可调/0=不限）
+    streamTimeoutMs: LAST_CANDIDATE_TIMEOUT_MS,
   });
+  if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
   return { handled: true };
 }

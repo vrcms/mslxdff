@@ -25,13 +25,15 @@ export async function handleBroadbandRelay({
   res,
   startedAt,
   plugins,
+  deps = {},
 }) {
-  const bb = await tryBroadbandRelay({ groups, token, model, body, hops, bus, logs, reqId: handlerCtx.reqId, evt, res, mark, perf0, stages });
+  const { createPipeline = createRelayPipeline, tryBroadbandRelay: tryRelay = tryBroadbandRelay } = deps;
+  const bb = await tryRelay({ groups, token, model, body, hops, bus, logs, reqId: handlerCtx.reqId, evt, res, mark, perf0, stages });
   if (!bb) {
     evt("relay-miss", { reqId: handlerCtx.reqId, model });
     return { handled: false };
   }
-  const pipeline = createRelayPipeline({
+  const pipeline = createPipeline({
     relay,
     buildFallbackInfo,
     auto,
@@ -46,7 +48,8 @@ export async function handleBroadbandRelay({
   });
   const isResponse = bb.result && typeof bb.result.status === "number" && typeof bb.result.headers?.get === "function";
   if (isResponse) {
-    await pipeline.execute({ res, upRes: bb.result, body, requested, actual: model, lastErr, via: "broadband", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    const r = await pipeline.execute({ res, upRes: bb.result, body, requested, actual: model, lastErr, via: "broadband", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
     return { handled: true };
   }
   if (bb.result && typeof bb.result.status === "number") {
@@ -59,7 +62,8 @@ export async function handleBroadbandRelay({
       text: async () => str,
       body: isSSE ? (async function* () { yield Buffer.from(str); })() : null,
     };
-    await pipeline.execute({ res, upRes: fakeRes, body, requested, actual: model, lastErr, via: "broadband-local", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    const r = await pipeline.execute({ res, upRes: fakeRes, body, requested, actual: model, lastErr, via: "broadband-local", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
     return { handled: true };
   }
   evt("relay-miss", { reqId: handlerCtx.reqId, model });
