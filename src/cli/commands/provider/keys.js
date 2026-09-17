@@ -1,6 +1,6 @@
 export async function handleProviderKeys(id, sub, rest, args) {
   if (sub === "list" || sub === "status") {
-    const { loadProviderKeys, loadProviderConfig, loadProviderShareKeys, loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("../../../state.js");
+    const { loadProviderKeys, loadProviderConfig, loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("../../../state.js");
     const keys = loadProviderKeys(id);
     const cfg = loadProviderConfig(id);
     const allowed = loadProviderAllowedModels(id);
@@ -15,7 +15,7 @@ export async function handleProviderKeys(id, sub, rest, args) {
     } else {
       console.log(`  keys: (no keys configured)`);
     }
-    console.log(`  share keys to peers:   ${loadProviderShareKeys(id) ? "ON" : "off"}   (mslxdff -provider ${id} share on|off)`);
+    console.log(`  share keys to peers:   借出（默认，key 随转发自动附带，ADR-0019）`);
     console.log(`  allowAnyModels: ${allowAny ? "ON (empty allowlist = allow all)" : "OFF (empty allowlist = BLOCK ALL)"}  (mslxdff -provider ${id} allowAny on|off)`);
     if (allowed.length) console.log(`  allowedModels: ${allowed.length} (${allowed.join(", ")})  — only these can be used`);
     else console.log(`  allowedModels: (none — ${allowAny ? "allow all" : "BLOCK ALL"})  (mslxdff -provider ${id} allowlist set <model...>  or  allowAny on)`);

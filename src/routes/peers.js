@@ -122,7 +122,7 @@ async function forwardToPeer(peer, body, model, hops, controller = new AbortCont
       "x-mslxdff-model-lock": model,
       "Accept": "text/event-stream",
     };
-    // ADR-0008：该模型命中的供应商若开启 share → 附带瞬时 key 给组员借用（opencode 恒排除）
+    // ADR-0019：命中供应商的 key 随转发自动借出（组内互信，无开关；opencode/workbuddy/cline 硬排除）
     const shareHeader = buildShareKeysHeader(model);
     if (shareHeader) headers[SHARE_KEYS_HEADER] = shareHeader;
     const dispatcher = getPeerDispatcher();

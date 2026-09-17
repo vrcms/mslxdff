@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
-import { loadProviderKeys, loadProviderAuths, loadProviderConfigs, loadProviderAllowedModels, loadProviderAllowAnyModels, loadProviderShareKeys, loadProviderBaseUrl } from "../state.js";
+import { loadProviderKeys, loadProviderAuths, loadProviderConfigs, loadProviderAllowedModels, loadProviderAllowAnyModels, loadProviderBaseUrl } from "../state.js";
 
 /**
  * 聚合 genericIds：来自 providerConfigs + providerKeys + env MSLXDFF_*_KEY
@@ -37,12 +37,10 @@ export function buildProviderRows({ stateFile, env = process.env } = {}) {
     const cfg = configs[gid];
     let keys = [];
     let baseUrl = "";
-    let share = false;
     let allowed = [];
     let allowAny = false;
     try { keys = loadProviderKeys(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     try { baseUrl = loadProviderBaseUrl(gid, stateFile ? { file: stateFile } : undefined) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : ""); } catch { baseUrl = cfg?.baseUrl || ""; }
-    try { share = loadProviderShareKeys(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     try { allowed = loadProviderAllowedModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     try { allowAny = loadProviderAllowAnyModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     // openrouter 特殊：opencode 例外默认 allowAny true，其余默认 false
@@ -61,7 +59,7 @@ export function buildProviderRows({ stateFile, env = process.env } = {}) {
     } else if (gid === "workbuddy" && auths.length && auths.length !== keys.length) {
       note = `${auths.length} auth(s) / ${keys.length} key(s) — 数量不一致请重跑 workbuddy-token-auto.js`;
     }
-    rows.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, allowed, allowAny, share, note, authCount: auths.length });
+    rows.push({ id: gid, enabled, baseUrl: baseUrl || "(none)", keys, allowed, allowAny, note, authCount: auths.length });
   }
   return rows;
 }
@@ -94,8 +92,8 @@ export function formatProviderRow(p) {
     const more = p.allowed.length > 2 ? ` …+${p.allowed.length - 2}` : "";
     allowInfo = `allow ${p.allowed.length} → ${head}${more}`;
   }
-  // share
-  const shareInfo = p.id === "opencode" ? "无法共享" : `共享 ${p.share ? "开" : "关"}`;
+  // share（ADR-0019：默认借出，无开关）
+  const shareInfo = p.id === "opencode" ? "无法共享" : "共享 借出";
   // base
   const base = p.baseUrl && p.baseUrl !== "(none)" ? p.baseUrl : "(none)";
   const baseLine = `    └ ${base}${p.note ? `  · ${p.note}` : ""}`;

@@ -1,5 +1,5 @@
 import { createKeyRing } from "../keyring.js";
-import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, loadProviderShareKeys, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
+import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { compatFetch } from "../../compat.js";
 import { join } from "node:path";
@@ -176,15 +176,7 @@ export function createWorkbuddyProvider({
   }
 
   async function chatWithKeys(body, keysOverride) {
-    const shareOn = (() => {
-      try { return loadProviderShareKeys(id, file ? { file } : {}); } catch { return false; }
-    })();
-    // allow injected balanceCache/logger to bypass share check for isolated tests:
-    // if keysOverride provided and logger is injected (test mode), permit share without state flag
-    const isTestInjection = !!balanceCacheOpt || !!loggerOpt;
-    if (!shareOn && !isTestInjection) {
-      return chatSvc.runChat(body, ring);
-    }
+    // 借入的 key（ADR-0019：转发时自动附带）——用隔离的 tmp ring/auth，不改动本机 ring。
     // Isolated tmp ring and auth without mutating shared arrays
     const tmpKeys = [...keysOverride].filter((k) => typeof k === "string" && k.trim().length).map((k) => k.trim());
     const tmpAuth = authList[0] || { uid: "", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "" };

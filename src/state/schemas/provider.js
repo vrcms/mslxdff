@@ -9,7 +9,6 @@ export {
   defaultChatPath,
   providerKeyEnv,
   providerBaseUrlEnv,
-  providerShareEnv,
 } from "../provider-config.js";
 import {
   normalizeBaseUrl as _normalizeBaseUrl,
@@ -20,7 +19,6 @@ import {
   defaultChatPath as _defaultChatPath,
   providerKeyEnv as _providerKeyEnv,
   providerBaseUrlEnv as _providerBaseUrlEnv,
-  providerShareEnv as _providerShareEnv,
   WORKBUDDY_DEFAULT_BASE_URL as _WORKBUDDY,
 } from "../provider-config.js";
 
@@ -52,6 +50,16 @@ export function loadProviderKeys(id, { file = defaultStateFile() } = {}) {
   return [];
 }
 export function loadProviderKey(id, opts = {}) { return loadProviderKeys(id, opts)[0] || ""; }
+// 本节点所有「有 key」的供应商 id（providerConfigs ∪ providerKeys，含 env 覆盖）——
+// 转发时默认借出的候选集合由它枚举；见 src/providers/share-keys.js
+export function listProviderIdsWithKeys({ file = defaultStateFile() } = {}) {
+  const st = readState(file);
+  const ids = new Set();
+  for (const src of [st.providerConfigs, st.providerKeys]) {
+    if (src && typeof src === "object" && !Array.isArray(src)) for (const id of Object.keys(src)) ids.add(id);
+  }
+  return [...ids].filter((id) => loadProviderKeys(id, { file }).length > 0);
+}
 export function saveProviderKeys(id, list, { file = defaultStateFile() } = {}) {
   const keys = { ...(readState(file).providerKeys || {}) };
   const clean = [...new Set((Array.isArray(list) ? list : []).map((k) => String(k || "").trim()).filter(Boolean))];
@@ -71,18 +79,6 @@ export function removeProviderKeys(id, targets = [], opts = {}) {
   const set = new Set((Array.isArray(targets) ? targets : [targets]).map((k) => String(k || "").trim()).filter(Boolean));
   const list = loadProviderKeys(id, opts).filter((k) => !set.has(k));
   return saveProviderKeys(id, list, opts);
-}
-export function loadProviderShareKeys(id, { file = defaultStateFile() } = {}) {
-  const env = process.env[_providerShareEnv(id)] || "";
-  if (env) return ["1", "true", "on", "yes"].includes(String(env).trim().toLowerCase());
-  const map = readState(file).providerShareKeys;
-  return !!(map && typeof map === "object" && map[id]);
-}
-export function saveProviderShareKeys(id, on, { file = defaultStateFile() } = {}) {
-  const map = { ...(readState(file).providerShareKeys || {}) };
-  if (on) map[id] = true; else delete map[id];
-  writeStateImmediate(file, { providerShareKeys: map });
-  return !!on;
 }
 export function loadProviderConfigs({ file = defaultStateFile() } = {}) {
   const v = readState(file).providerConfigs;

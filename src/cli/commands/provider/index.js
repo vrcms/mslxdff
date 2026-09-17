@@ -25,13 +25,12 @@ export async function handleProvider(args) {
   const sub = args[idx + 2];
   const rest = args.slice(idx + 2);
   if (!id) {
-    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|models|clear|share|set-url|allowlist|allowAny]");
+    console.error("usage: mslxdff -provider <id> [key...|add|remove|list|models|clear|set-url|allowlist|allowAny]");
     console.error("       e.g. mslxdff -provider openrouter sk-1 sk-2 sk-3      set multiple keys (replaces all)");
     console.error("            mslxdff -provider openrouter add sk-4             append one key");
     console.error("            mslxdff -provider openrouter remove sk-1          remove a key by value");
     console.error("            mslxdff -provider openrouter list                 list all keys (masked)");
     console.error("            mslxdff -provider openrouter models [--json]      list provider models (allowlist filtered)");
-    console.error("            mslxdff -provider openrouter share on|off         share keys with peers on outgoing forward (ADR-0008)");
     console.error("            mslxdff -provider openrouter set-url https://api.example.com/v1");
     console.error("            mslxdff -provider openrouter set-models-path /v1/models");
     console.error("            mslxdff -provider openrouter set-chat-path /v1/chat/completions");

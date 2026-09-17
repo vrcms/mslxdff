@@ -93,22 +93,6 @@ describe("provider-config merge 三级", () => {
   });
 });
 
-describe("provider-config shareEnv", () => {
-  test("US7 ON 大小写不敏感", async () => {
-    const prev = process.env.MSLXDFF_MY_SHARE_KEYS;
-    process.env.MSLXDFF_MY_SHARE_KEYS = "ON";
-    const { loadProviderShareKeys } = await import("../src/state/schemas/provider.js");
-    const file = tmpFile();
-    assert.equal(loadProviderShareKeys("my", { file }), true);
-    process.env.MSLXDFF_MY_SHARE_KEYS = "true";
-    assert.equal(loadProviderShareKeys("my", { file }), true);
-    process.env.MSLXDFF_MY_SHARE_KEYS = "off";
-    assert.equal(loadProviderShareKeys("my", { file }), false);
-    if (prev === undefined) delete process.env.MSLXDFF_MY_SHARE_KEYS;
-    else process.env.MSLXDFF_MY_SHARE_KEYS = prev;
-  });
-});
-
 describe("merge 同源", () => {
   test("US8 COLD_WINS 仅 merge.js 定义", async () => {
     const fs = await import("node:fs");

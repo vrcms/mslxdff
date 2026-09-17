@@ -2,8 +2,7 @@ import { createRelayPipeline } from "./relay-pipeline.js";
 import { relay, SLOW_TOTAL_MS, STREAM_TIMEOUT_MS, STALL_TIMEOUT_MS, SCORE_STALL_MS } from "../stream.js";
 import { buildFallbackInfo } from "../fallback.js";
 import { getViaRoute } from "../../bench/via-routes.js";
-import { loadProviderKeys } from "../../state.js";
-import { SHARE_KEYS_HEADER } from "../../providers/share-keys.js";
+import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../../providers/share-keys.js";
 import { errMsg } from "../helpers.js";
 import { compatFetch } from "../../compat.js";
 
@@ -61,12 +60,9 @@ export async function handleViaRoute({
   evt("via-route-hit", { reqId: handlerCtx.reqId, model, peer: peer.url, peerLabel, routeBest: route.best, at: route.at });
   // 单路径转发，不并发：直接打 best peer
   const hops = handlerCtx.hops || 0;
-  const providerId = String(model).split("/")[0] || "";
-  let shareHeader = null;
-  try {
-    const keys = loadProviderKeys(providerId) || [];
-    if (keys.length) shareHeader = `${providerId}=${keys.join(",")}`;
-  } catch {}
+  // ADR-0019：借道 = 用 A 的 key —— 转发时自动附带（组内互信，无开关），与 peers.js 共用同一组装点。
+  // Note: 见 .agents/notes/implemented/architecture/2026-09-17-share-keys-no-switch.md
+  const shareHeader = buildShareKeysHeader(model);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("via-route timeout 30000ms")), 30000);
   let upRes;
