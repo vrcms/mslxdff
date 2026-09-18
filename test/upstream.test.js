@@ -37,7 +37,13 @@ test("client posts to upstream with required headers", async () => {
     assert.equal(seen.headers["x-opencode-client"], "desktop");
     assert.equal(seen.headers["authorization"], "");
     assert.equal(seen.headers["accept"], "text/event-stream");
-    assert.deepEqual(JSON.parse(seen.body), { model: "deepseek-v4-flash-free", messages: [] });
+    const parsed = JSON.parse(seen.body);
+    assert.equal(parsed.model, "deepseek-v4-flash-free");
+    assert.deepEqual(parsed.messages, []);
+    // 免费层 agent 形状门禁（2026-09-18）：强制流式 + 核心五工具
+    assert.equal(parsed.stream, true);
+    const names = (parsed.tools || []).map((t) => t.function?.name);
+    for (const n of ["bash", "edit", "glob", "grep", "read"]) assert.ok(names.includes(n), `缺核心工具 ${n}`);
   } finally {
     await closeSrv(srv);
   }

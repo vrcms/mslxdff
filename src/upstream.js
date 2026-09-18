@@ -7,6 +7,7 @@ import { isFreeModel } from "./models.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 import { createTransport } from "./transport/index.js";
 import { isResponsesModel, chatToResponsesBody, toChatResponse, reshapeResponsesSse } from "./upstream-responses.js";
+import { ensureFreeLaneShape, aggregateChatSse } from "./free-lane.js";
 import { digestIdTail, genId, opencodeClientIdentity, opencodeUa } from "./opencode-identity.js";
 
 export { opencodeClientIdentity, opencodeUa };
@@ -136,6 +137,27 @@ export function createUpstreamClient({
     const sessionId = opts?.sessionId || sessionFromMessages(body?.messages) || null;
     const url = isResp ? `${baseUrl}/zen/v1/responses` : `${baseUrl}/zen/v1/chat/completions`;
     const reqBody = isResp ? chatToResponsesBody(body) : body;
+    const clientWantsStream = body?.stream !== false;
+    // zen 免费层 agent 形状门禁（2026-09-18）：必须流式 + 含核心五工具名，否则 403 FreeTierError
+    const freeLane = authToken === "public" && isFreeModel(body?.model);
+    if (freeLane) ensureFreeLaneShape(reqBody, { responses: isResp });
+    const laneDebug = freeLane && envInt("MSLXDFF_FREE_LANE_DEBUG", 0) === 1;
+    if (laneDebug) {
+      try { console.error(`[free-lane] send model=${body?.model} url=${url} stream=${reqBody.stream} tools=${(reqBody.tools || []).length} ua=${opencodeUa()} want=${clientWantsStream}`); } catch {}
+    }
+    // 非流式调用者实际拿到的是被强制流式的上游 → 聚合回 chat completion JSON
+    async function agentJson(resp) {
+      if (!(freeLane && !clientWantsStream && resp.ok)) return resp;
+      const ct = resp.headers?.get?.("content-type") || "";
+      if (!ct.includes("text/event-stream")) return resp;
+      try {
+        const out = await aggregateChatSse(resp);
+        out._t = resp._t;
+        return out;
+      } catch {
+        return resp;
+      }
+    }
     const t0 = performance.now();
 
      // 首发请求（transport 已处理 network/429 等重试）
@@ -146,13 +168,16 @@ export function createUpstreamClient({
         method: "POST",
         headers: buildHeaders(reqBody, { sessionId }),
         body: reqBody,
-        stream: body?.stream !== false,
+        stream: reqBody.stream !== false,
         timeoutMs: connectTimeoutMs,
         retry,
       });
     } catch (e) {
       e._t = e._t || { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - t0) };
       throw e;
+    }
+    if (laneDebug) {
+      try { console.error(`[free-lane] resp model=${body?.model} status=${res.status} ct=${res.headers?.get?.("content-type") || ""}`); } catch {}
     }
 
     // 匿名兜底：仅非 anonFirst 时，public 429 + free 模型才走 hermes 空头重试
@@ -168,7 +193,7 @@ export function createUpstreamClient({
             method: "POST",
             headers: buildHeaders(reqBody, { anonymous: true, sessionId }),
             body: reqBody,
-            stream: body?.stream !== false,
+            stream: reqBody.stream !== false,
             timeoutMs: connectTimeoutMs,
             retry,
           });
@@ -180,7 +205,7 @@ export function createUpstreamClient({
           let outAnon = anonRes;
           if (isResp && anonRes.ok) {
             const ctAnon = anonRes.headers.get("content-type") || "";
-            const isStreamAnon = body?.stream !== false && ctAnon.includes("text/event-stream");
+            const isStreamAnon = (clientWantsStream || freeLane) && ctAnon.includes("text/event-stream");
             if (isStreamAnon) {
               outAnon = reshapeResponsesSse(anonRes, body.model);
             } else {
@@ -201,7 +226,7 @@ export function createUpstreamClient({
           if (consecutiveHits >= 2) {
             try { appendFile(freeAnonLogFile(), `  -> 连续额外额度 ${consecutiveHits} 次\n`).catch(() => {}); } catch {}
           }
-          return outAnon;
+          return await agentJson(outAnon);
         }
       }
       if (anonRes) {
@@ -215,11 +240,11 @@ export function createUpstreamClient({
     // responses 模型成功态转 chat（复用 upstream-responses）
     if (isResp && res.ok) {
       const ct = res.headers.get("content-type") || "";
-      const isStream = body?.stream !== false && ct.includes("text/event-stream");
+      const isStream = (clientWantsStream || freeLane) && ct.includes("text/event-stream");
       if (isStream) {
         const transformed = reshapeResponsesSse(res, body.model);
         transformed._t = { ...(res._t || {}), totalMs: Math.round(performance.now() - t0) };
-        return transformed;
+        return await agentJson(transformed);
       }
       try {
         const txt = await res.text();
@@ -238,7 +263,7 @@ export function createUpstreamClient({
       }
     }
     res._t = { ...(res._t || {}), totalMs: res._t?.totalMs ?? Math.round(performance.now() - t0) };
-    return res;
+    return await agentJson(res);
   }
 
   async function preheat() {

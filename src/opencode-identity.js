@@ -3,9 +3,10 @@ import crypto from "node:crypto";
 // opencode 客户端身份规格单一来源（源码 packages/schema/src/identifier.ts +
 // packages/opencode/src/session/llm/request.ts）：id = <prefix>_ + 12 位 hex
 // (timestamp*4096+同毫秒计数，截 48bit) + 14 位 base62，共 26 字符；UA 必须 "opencode/<semver>"。
-// zen 免费层 2026-09-17 起按该规格放行（缺版本 UA 或 id 形状不符 → 403 FreeTierError）。
+// zen 免费层 2026-09-17 起按该规格放行（缺版本 UA 或 id 形状不符 → 403 FreeTierError）；
+// 2026-09-18 起还要求 UA 版本 ≥ 1.18.0（低版本 426 UpgradeRequired），默认跟 npm latest。
 const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const DEFAULT_OPENCODE_UA = "opencode/1.17.20";
+const DEFAULT_OPENCODE_UA = "opencode/1.18.31";
 let idLastTs = 0;
 let idCounter = 0;
 

@@ -5,6 +5,7 @@
 import { createUpstreamClient, createOpencodeHeaderBuilder } from "../upstream.js";
 import { isResponsesModel } from "../upstream-responses.js";
 import { isFreeModel } from "../models.js";
+import { ensureFreeLaneShape } from "../free-lane.js";
 import { createSdkChat } from "./sdk/chat.js";
 import { createSdkResponses } from "./sdk/responses.js";
 import { dispatcherFetch } from "./sdk/attempt.js";
@@ -32,9 +33,11 @@ export function createUpstreamEngine(opts = {}) {
   let logged = false;
 
   async function chat(body) {
-    if (sdkDown) return legacy.chat(body);
-    // doGenerate 聚合未实现：非流式（含 responses 非流式）委派 legacy，避免把 JSON 客户端 SSE 化
-    if (body?.stream === false) return legacy.chat(body);
+    // zen 免费层 agent 形状门禁（2026-09-18）：SDK 流式通道不经 legacy.chat，必须在这里补形状。
+    // 非流式先委派 legacy（它在自己内部注入并把 SSE 聚合回 JSON，避免这里先改 stream 导致误判）。
+    const wantsStream = body?.stream !== false;
+    if (sdkDown || !wantsStream) return legacy.chat(body);
+    if (isFreeModel(body?.model)) ensureFreeLaneShape(body);
     const useResponses = isResponsesModel(body?.model);
     try {
       const res = useResponses ? await responses.chat(body) : await sdk.chat(body);

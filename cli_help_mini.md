@@ -65,6 +65,7 @@
 | WorkBuddy 列表 | `-workbuddy list` / `-wb list` | 列账号（`uid/domain/enterpriseId`） |
 | WorkBuddy SDK 通道（缺省启用） | `MSLXDFF_WORKBUDDY_SDK`（未设置则继承 `MSLXDFF_UPSTREAM_ENGINE`） | 底层缺省走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18，不可用自动回退原生）；设 `legacy`/关闭词回退原生 transport，上层轮换/刷新/reshape 不变 |
 | 上游引擎（默认，ADR-0017） | `MSLXDFF_UPSTREAM_ENGINE`（缺省 `sdk`） | opencode 流式 chat 走 `@ai-sdk/openai-compatible`、`muse-spark*` 走 `@ai-sdk/openai` 的 responses 适配器（响应标记头 `x-mslxdff-upstream-engine: sdk`，复用 legacy 连接池）；通用 OpenAI 兼容族与 cline 同源（供应商级 `MSLXDFF_<ID>_SDK` 未设置即继承本变量）；非流式自动委派 legacy，SDK 不可用回退并告警；显式 `legacy`/关闭词回退原实现 |
+| 免费层形状门禁（ADR-0020） | `MSLXDFF_FREE_LANE`（缺省 1）/`MSLXDFF_FREE_LANE_DEBUG=1` | zen 免费模型必须 `stream:true` + tools 含 bash/edit/glob/grep/read 五名且 UA≥`opencode/1.18.0`（否则 403/426）；`src/free-lane.js` 自动补形状、非流式聚合回 JSON；`0`=关（逃生阀），DEBUG 打 `[free-lane]` 日志 |
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
 | 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |
 | 同步 WB | `-setto workbuddy [modelId]` | 同步到 WorkBuddy（原子写 `~/.workbuddy/models.json`，`127.0.0.1/v1`，多模型累积；picks 非空时摘除失效本地条目） |

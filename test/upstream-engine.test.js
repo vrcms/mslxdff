@@ -267,3 +267,34 @@ test("responses 适配器：HTTP 错误映射状态码 / 装载失败抛 _sdkLoa
     "装载失败标记 _sdkLoadFailed 供引擎回退",
   );
 });
+
+test("agent 形状门禁：免费模型非流式经 engine 委派 legacy 并聚合回 JSON（上游 SSE）", async () => {
+  let captured = null;
+  const srv = await openaiSseServer((req, body) => { captured = JSON.parse(body); });
+  try {
+    const engine = createUpstreamEngine({ baseUrl: urlOf(srv), env: { MSLXDFF_UPSTREAM_ENGINE: "sdk" } });
+    const res = await engine.chat({ model: "big-pickle", messages: [{ role: "user", content: "hi" }], stream: false });
+    assert.equal(res.status, 200);
+    assert.match(String(res.headers.get("content-type")), /application\/json/);
+    const j = await res.json();
+    assert.equal(j.choices[0].message.content, "答案");
+    assert.equal(captured.stream, true, "上游收到强制流式");
+    const names = (captured.tools || []).map((t) => t.function?.name);
+    for (const n of ["bash", "edit", "glob", "grep", "read"]) assert.ok(names.includes(n), `缺核心工具 ${n}`);
+    await engine.close();
+  } finally { await closeSrv(srv); }
+});
+
+test("agent 形状门禁：SDK 流式路径请求体也补核心五工具", async () => {
+  let captured = null;
+  const srv = await openaiSseServer((req, body) => { captured = JSON.parse(body); });
+  try {
+    const engine = createUpstreamEngine({ baseUrl: urlOf(srv), env: { MSLXDFF_UPSTREAM_ENGINE: "sdk" } });
+    const res = await engine.chat({ model: "big-pickle", messages: [{ role: "user", content: "hi" }], stream: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-mslxdff-upstream-engine"), "sdk");
+    const names = (captured.tools || []).map((t) => t.function?.name || t.name);
+    for (const n of ["bash", "edit", "glob", "grep", "read"]) assert.ok(names.includes(n), `缺核心工具 ${n}`);
+    await engine.close();
+  } finally { await closeSrv(srv); }
+});
