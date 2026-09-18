@@ -1197,7 +1197,9 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |
 | `MSLXDFF_FREE_ANON_DELAY_MS` | `1000` | 匿名重试间隔 |
 | `MSLXDFF_FREE_ANON_LOG` | `<cwd>/free-anon-extra.txt` | 匿名命中日志路径 |
-| `MSLXDFF_OPENCODE_UA` | `opencode/1.17.20` | opencode 上游身份 `User-Agent`（zen 免费层门禁要求 `opencode/<semver>`，缺版本即 403；配了就以配置为准，用于跟随官方版本升级） |
+| `MSLXDFF_OPENCODE_UA` | `opencode/1.18.31` | opencode 上游身份 `User-Agent`（zen 免费层门禁要求 `opencode/<semver>`，缺版本即 403；2026-09-18 起还要求 ≥ `1.18.0`，低版本 `426 UpgradeRequired`；配了就以配置为准，用于跟随官方版本升级） |
+| `MSLXDFF_FREE_LANE` | `1` | 免费层 agent 形状注入（ADR-0020）：zen 免费模型自动补 `stream:true` + 核心五工具（bash/edit/glob/grep/read），非流式调用聚合回 JSON；`0`/关闭词=完全不动（上游撤门禁时的逃生阀） |
+| `MSLXDFF_FREE_LANE_DEBUG` | — | `1` 时 `daemon.log` 打 `[free-lane]` 发送/响应摘要（模型/URL/stream/tools 数/UA/状态），排障 403/426 用 |
 | `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；仅预热 opencode 的连接池与模型缓存，其他供应商按需首次请求自拉）；clinebot free 自检独立于此开关（daemon 启动时对比快照报增删，写 `daemon.log` + 更新 `logDir/cline-free.json`） |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_TIMEOUT` | `30000` | opencode 上游 keepAlive 超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_MAX_TIMEOUT` | `60000` | keepAlive 最大超时 |
