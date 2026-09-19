@@ -5,6 +5,8 @@ Usage:
   mslxdff                          start as a background daemon and exit (status + help if one is already running)
   mslxdff -d                       start as a background daemon
   mslxdff -status                  show current status (daemon/health/port/config, upstream providers, models + metrics/体检表, autostart/plugins, groups/peers, recent calls with ttfb/tps, last error)
+  mslxdff -stats [--hours N] [--json] [--model <id>]  per-model token usage + speed over the last N hours (default 24; success requests only, from the local usage JSONL)
+
   mslxdff -log [N]                 show last N events (default 10, e.g. -log 100)
   mslxdff -models                interactive picker: ↑/↓ select a model, Enter sets it as the default (non-TTY: plain list)
   mslxdff -model list            list the free models this proxy serves (cached)
