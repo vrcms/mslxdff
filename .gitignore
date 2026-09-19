@@ -27,6 +27,13 @@ docs/
 .claude/
 .planning/
 .codegraph/
+openspec/
+
+# OpenSpec 为其它 AI 工具生成的镜像（本地技能副本，不入库）
+.codebuddy/
+.devin/
+.gemini/
+.pi/
 con
 x.id*
 check_*.mjs
