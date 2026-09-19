@@ -2,6 +2,7 @@ import { runHook } from "../../plugins.js";
 import { recordModelStats } from "../../state.js";
 import { normalizeFullId } from "../../providers/model-id.js";
 import { computeMetrics } from "../../metrics.js";
+import { recordChatUsage } from "../../usage/record.js"; // 窗口报表唯一写入点（canonical 名单记防双计）— 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -134,6 +135,15 @@ export function createRelayPipeline({
       }
       _evt("slow-model", { reqId, model: actual, elapsedMs: out.totalMs ?? (Date.now() - curStartedAt), threshold: C.STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null });
       try { _logCall(actual, 200); } catch {}
+      // interrupted 的 200 也是真实消耗（最贵的长生成）——照常落 usage 标 interrupted:1，口径与 5c 一致 — 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
+      if (out.status === 200) {
+        try {
+          const u = out.detail?.usage || null;
+          const t1 = Number.isFinite(out.totalMs) && out.totalMs > 0 ? out.totalMs : (Date.now() - curStartedAt);
+          const t0 = Number.isFinite(out.ttfMs) && out.ttfMs > 0 ? out.ttfMs : null;
+          recordChatUsage({ model: normalizeFullId(actual), via, usage: u, interrupted: 1, ttfbMs: t0, totalMs: t1, tps: null }).catch(() => {});
+        } catch {}
+      }
       _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null, fallback, requested, actual });
       _evt("client-response", { requested, actual, via, fallback, status: out.status, reqId, interrupted: true });
       if (plugins?.length) runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body?.stream), durationMs: Date.now() - curStartedAt, via, status: out.status, actual, interrupted: true, fallback }).catch(() => {});
@@ -183,6 +193,9 @@ export function createRelayPipeline({
         const fullId = normalizeFullId(actual);
         recordModelStats(fullId, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
         if (fullId !== actual) recordModelStats(actual, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
+        // 窗口报表：逐请求落 usage（行形状由 usage/record.js 拥有，含 prompt/total ——
+        // state 的 modelStats 只存 completion 的 EMA）。只按 canonical 名记一次，避免双计。
+        recordChatUsage({ model: fullId, via, usage, ttfbMs: ttfb, totalMs: total, tps: m.tps }).catch(() => {});
       } catch {}
     }
 

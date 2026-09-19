@@ -243,25 +243,20 @@ export async function printStatus(VERSION) {
   }
 
   const { recentCalls, lastError } = await import("../logs.js");
-  console.log("\nrecent calls: (gateway 持久化，最近5条，含首字/tok/s)");
+  console.log("\nrecent calls: (gateway 持久化，最近5条；token/速度看 mslxdff -stats)");
   const calls = recentCalls(5);
   if (calls.length) {
-    let sumDur = 0, sumTps = 0, tpsN = 0;
+    let sumDur = 0;
     for (const c of calls) {
       if (Number.isFinite(c.durationMs)) sumDur += c.durationMs;
       else if (Number.isFinite(c.totalMs)) sumDur += c.totalMs;
-      if (Number.isFinite(c.tps)) { sumTps += c.tps; tpsN++; } else if (Number.isFinite(c.charsPerSec)) { sumTps += c.charsPerSec; tpsN++; }
     }
     const avgDur = calls.length ? Math.round(sumDur / calls.length) : null;
-    const avgTps = tpsN ? Math.round(sumTps / tpsN) : null;
-    console.log(`  avg ${avgDur ? avgDur + "ms" : "—"}${avgTps ? ` · ${avgTps} tok/s` : ""}  —  mslxdff -log 20 查看详情`);
+    console.log(`  avg ${avgDur ? avgDur + "ms" : "—"}  —  mslxdff -log 20 查看详情`);
     for (const c of calls) {
       const dur = c.totalMs ?? c.durationMs;
-      const ttfb = c.ttfbMs != null ? ` 首字${c.ttfbMs}ms` : "";
-      const tps = c.tps != null ? ` ${c.tps}tok/s` : (c.charsPerSec ? ` ${c.charsPerSec}ch/s` : "");
-      const tok = c.usage?.completion_tokens != null ? ` tok${c.usage.completion_tokens}` : (c.chars ? ` ch${c.chars}` : "");
       const tm = fmtTs(c.ts);
-      console.log(`  ${tm}  ${(c.model || "-").padEnd(28)}  ${String(c.status || "-").padEnd(4)}  ${dur ? dur + "ms" : ""}${ttfb}${tps}${tok}${c.auto ? "  auto" : ""}`);
+      console.log(`  ${tm}  ${(c.model || "-").padEnd(28)}  ${String(c.status || "-").padEnd(4)}  ${dur ? dur + "ms" : ""}${c.stream ? "  stream" : ""}${c.auto ? "  auto" : ""}`);
     }
   } else {
     console.log("  (none yet — 发一次请求后出现，mslxdff -chat hi)");

@@ -202,12 +202,23 @@
   - `joined groups`：每个已加入群组的 `name`、`leaderUrl`、成员列表（同前）
   - `failover targets`：`peers.all()` 列表（同前），空时提示 `failover: (none — 加组后自动出现)`
   - `groups on this node`：本节点作为 leader 创建的组名
-  - `recent calls:`：`(gateway 持久化，最近5条，含首字/tok/s)` 头 + avg + 每行 `ts/model/status/dur+ttfb+tps/tok`（来自 `recentCalls(5)` 的 `ttfbMs/tps/usage`，v0.1.59 起记录）
+  - `recent calls:`：`(gateway 持久化，最近5条；token/速度看 mslxdff -stats)` 头 + avg + 每行 `ts/model/status/dur[stream][auto]`（来自 `recentCalls(5)`，只打印 calls.log 真实存在的字段——token/首字/速度不进 calls.log）
   - `last error`：`lastError()` 的 `ts/model/status/message`（无则 `none — 暂无错误`）
   - 额外：`auth token: use mslxdff -showtoken` + `health: http://127.0.0.1:<port>/health` 或 `not running — start with: mslxdff -d` + `hints: mslxdff -providers list · mslxdff -model status ...`
   - 体验：空状态有明确提示（如 `models: not cached yet`、`recent calls: (none yet — 发一次请求后出现)`、`plugins: (none) — 放 *.mjs ...`），`health` 探测失败有 `health fail (…)`，测试桩 `workbuddy k-new` 标 `disabled (测试桩…)`
 - **实现**：`createGroupsService` + `loadGroupsJoined`，成员通过 `refreshGroupMembers`（1.5s 超时）拉取。
 - **示例**：`mslxdff -status`
+
+### `-stats` / `--stats`（模型用量报表）
+
+- **语法**：`mslxdff -stats [--hours N] [--json] [--model <id>]`
+- **作用**：打印近 `N` 小时（默认 24，上限 168）每模型的 token 消耗与速度。每行 `模型 / 请求 / prompt / 输出 / 合计 / 首字 / 总耗时 / 速度`，末行 `合计`；`reasoning` 累计 > 0 时额外出 `其中思考 tokens`。
+- **口径**：速度 = 输出 tokens ÷ 生成耗时（总耗时 − 首字），**按窗口加权**（`Σ输出 ÷ Σ生成耗时`），不是每请求速度的算术平均（短回答会把算术均值拉飞）；只统计成功请求（status 200）。
+- **数据来源**：`<logDir>/usage/YYYY-MM-DD.jsonl` 逐请求 JSONL（写 `src/usage/record.js`，聚合 `src/usage/report.js`）。**与 `state.json` 的 `modelStats` 终生 EMA 是两套数据**——EMA 服务排序与 `-status`/`-model stats`，本报表服务时间窗口。
+- **保留期**：默认 2 天（覆盖 24h 窗口 + 跨天边界），按日删旧文件；`MSLXDFF_USAGE_KEEP_DAYS=N` 调整。
+- **开关**：`MSLXDFF_USAGE_LOG=0` 完全关闭采集（此时 `-stats` 只打印关闭提示）。
+- **不含**：`-chat` 直连 `mimo-v2.5-free`/`big-pickle` 不经 8989 网关，不计入；失败请求（非 200）无 usage 也不计入，所以"请求数"是成功请求数。
+- **示例**：`mslxdff -stats` · `mslxdff -stats --hours 1` · `mslxdff -stats --json`（脚本用）· `mslxdff -stats --model opencode/big-pickle`
 
 ### `-log [N]` / `--log [N]` / `-logs [N]` / `--logs [N]`
 

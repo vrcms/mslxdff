@@ -23,6 +23,8 @@ export async function run(args = process.argv.slice(2)) {
   if (await handlePlugins(args)) return;
   if (await handleChat(args)) return;
   if (await handleStatus(args, VERSION)) return;
+  const { handleStats } = await import("./commands/stats.js");
+  if (await handleStats(args)) return;
 
   const { handleModel } = await import("./commands/model.js");
   if (await handleModel(args)) return;
