@@ -59,12 +59,14 @@ describe("codearts dpop", () => {
     assert.throws(() => dpopPrivateKey({ kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }), /invalid DPoP private JWK/);
   });
 
-  test("ES256 签名可用 node:crypto 独立验签（ieee-p1363）", () => {
+  test("ES256 签名可用标准验签方独立验签（WebCrypto 仲裁 + node:crypto 对称）", async () => {
     const jwk = newDpopPrivateJwk();
     const proof = signDpopProof(jwk, "https://x/y");
     const [h, p, s] = proof.split(".");
-    const digest = crypto.createHash("sha256").update(`${h}.${p}`, "utf8").digest();
     const pub = crypto.createPublicKey({ key: { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, format: "jwk" });
-    assert.equal(crypto.verify(null, digest, { key: pub, dsaEncoding: "ieee-p1363" }, Buffer.from(s, "base64url")), true);
+    assert.equal(crypto.verify("SHA256", Buffer.from(`${h}.${p}`, "utf8"), { key: pub, dsaEncoding: "ieee-p1363" }, Buffer.from(s, "base64url")), true);
+    // WebCrypto 独立仲裁：华为 STS 侧是标准 JWS 验签（真机 400 STS5.1804 前车：sign(null, digest) 自验能过、标准方拒签）
+    const key = await crypto.webcrypto.subtle.importKey("jwk", { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    assert.equal(await crypto.webcrypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, Buffer.from(s, "base64url"), Buffer.from(`${h}.${p}`, "utf8")), true);
   });
 });

@@ -62,9 +62,10 @@ export function signDpopProof(privateJwk, htu) {
     jti: crypto.randomBytes(32).toString("hex"),
   };
   const input = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
-  const digest = crypto.createHash("sha256").update(input, "utf8").digest();
-  // 注意：digest 已是最终摘要，algorithm 必须传 null（否则 OpenSSL 会再哈希一次）。
-  const sig = normalizeLowS(crypto.sign(null, digest, { key, dsaEncoding: "ieee-p1363" }));
+  // 标准 JWS/ES256：对 ASCII(input) 做 SHA256+ECDSA（crypto.sign("SHA256", input)）。
+  // 注意：千万别用 sign(null, sha256(input))——OpenSSL 的 noneWithECDSA 把 digest 当整数标量，
+  // 签出来自验能过、但任何标准验签方（含 WebCrypto/华为 STS）都拒签（真机 400 STS5.1804 实锤）。
+  const sig = normalizeLowS(crypto.sign("SHA256", Buffer.from(input, "utf8"), { key, dsaEncoding: "ieee-p1363" }));
   return `${input}.${b64url(sig)}`;
 }
 
@@ -77,12 +78,12 @@ export function verifyDpopProof(proof) {
     const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
     const sig = Buffer.from(parts[2], "base64url");
     const pub = crypto.createPublicKey({ key: { kty: "EC", crv: "P-256", x: header.jwk.x, y: header.jwk.y }, format: "jwk" });
-    const digest = crypto.createHash("sha256").update(`${parts[0]}.${parts[1]}`, "utf8").digest();
+    const input = Buffer.from(`${parts[0]}.${parts[1]}`, "utf8");
     const s = BigInt("0x" + sig.subarray(32, 64).toString("hex"));
-    // node 的 ECDSA verify 默认期望 DER，必须显式 ieee-p1363（与签名端一致）。
+    // 标准 JWS/ES256 验签（与签名端对称；dsaEncoding 必须显式 ieee-p1363，node 默认 DER）。
     const vopts = { dsaEncoding: "ieee-p1363" };
-    const ok = crypto.verify(null, digest, { key: pub, ...vopts }, sig)
-      || (s > P256_N >> 1n && crypto.verify(null, digest, { key: pub, ...vopts }, (() => {
+    const ok = crypto.verify("SHA256", input, { key: pub, ...vopts }, sig)
+      || (s > P256_N >> 1n && crypto.verify("SHA256", input, { key: pub, ...vopts }, (() => {
         const alt = Buffer.from(sig);
         Buffer.from((P256_N - s).toString(16).padStart(64, "0"), "hex").copy(alt, 32);
         return alt;
