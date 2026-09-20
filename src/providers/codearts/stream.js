@@ -1,6 +1,6 @@
 // 非流式聚合、chat_id 派生。解析纯函数见 ./sse.js。
 import crypto from "node:crypto";
-import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish, UpstreamEventError } from "./sse.js";
+import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish, isValidStructuredQA, UpstreamEventError } from "./sse.js";
 
 // chat.js 从这里拿错误类（保持单一导入面）。
 export { UpstreamEventError };
@@ -70,6 +70,28 @@ export function newChatId(body, opts) {
   return crypto.createHash("sha256").update(raw || crypto.randomUUID(), "utf8").digest("hex").slice(0, 32);
 }
 
+// 解包：模型把整段 QA JSON（或 ```json/```markdown 包裹）当正文时只取 answer（对齐 codearts2api unwrapQAContent）。
+export function unwrapQAContent(s) {
+  const text = String(s || "");
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+  const direct = parseQaAnswer(trimmed);
+  if (direct !== null) return direct;
+  if (!trimmed.startsWith("```")) return text;
+  const lines = trimmed.split("\n");
+  if (lines.length < 3 || lines[lines.length - 1].trim() !== "```") return text;
+  const inner = lines.slice(1, -1).join("\n");
+  const ans = parseQaAnswer(inner.trim());
+  return ans !== null ? ans : inner;
+}
+
+function parseQaAnswer(s) {
+  try {
+    const obj = JSON.parse(s);
+    return isValidStructuredQA(obj) ? obj.answer : null;
+  } catch { return null; }
+}
+
 const chunkLine = (id, model, delta, finish) => {
   const choice = { index: 0, delta };
   if (finish) choice.finish_reason = finish;
@@ -105,6 +127,7 @@ export function sseToOpenAIResponse(resp, { model, id }) {
               return;
             }
             const beforeC = state.content.length, beforeR = state.reason.length;
+            state.forward = null; // 每帧重置：仅本帧 delta 路径产生 forward，防重复转发
             applyEvent(state, ev.event, ev.data);
             if (state.error) {
               emit(`event: error\ndata: ${JSON.stringify({ error: { message: `${state.error.code} ${state.error.msg}`.trim(), type: "upstream_error", code: "CODEARTS_STREAM_ERROR" } })}\n\n`);
@@ -113,9 +136,13 @@ export function sseToOpenAIResponse(resp, { model, id }) {
               return;
             }
             const delta = {};
+            const fwd = state.forward || {};
+            if (fwd.role) delta.role = fwd.role;
+            if (fwd.toolCalls) delta.tool_calls = fwd.toolCalls; // 工具调用分片原样转发（缺它=回合空停）
             if (state.reason.length > beforeR) delta.reasoning_content = state.reason.slice(beforeR);
             if (state.content.length > beforeC) delta.content = state.content.slice(beforeC);
             if (Object.keys(delta).length) emit(chunkLine(id, model, delta, ""));
+            if (fwd.finish) finishChunk(); // 上游 finish_reason 出现即发（含 tool_calls；空 calls 自动降 stop）
             if (state.done) {
               finishChunk();
               emit("data: [DONE]\n\n");
@@ -161,7 +188,7 @@ export async function aggregateToCompletion(resp, { model, id }) {
     const status = embeddedErrorFromData(JSON.stringify({ error_code: state.error.code, error_msg: state.error.msg }))?.status || 502;
     throw new UpstreamEventError(`${state.error.code} ${state.error.msg}`.trim(), { status, code: state.error.code });
   }
-  const message = { role: "assistant", content: state.content };
+  const message = { role: "assistant", content: unwrapQAContent(state.content) };
   if (state.reason) message.reasoning_content = state.reason;
   const calls = sortedToolCalls(state);
   if (calls.length) {
