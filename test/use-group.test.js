@@ -106,7 +106,7 @@ describe("use-group 开关", () => {
     assert.equal(shouldUseGroupForModel("muse-spark-1.3-contributor-free", { file: tmp.file }), false);
     assert.equal(shouldUseGroupForModel("opencode/big-pickle", { file: tmp.file }), false);
     assert.equal(shouldUseGroupForModel("workbuddy/hy3", { file: tmp.file }), false);
-    assert.equal(shouldUseGroupForModel("clinebot/deepseek/deepseek-v4-flash", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("cline/deepseek/deepseek-v4-flash", { file: tmp.file }), false);
     assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), false);
   });
 
@@ -234,7 +234,7 @@ describe("use-group 开关", () => {
     const { shouldUseGroupForModel } = await import("../src/state/schemas/use-group.js");
     assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), true);
     assert.equal(shouldUseGroupForModel("ocgo/mimo-v2.5", { file: tmp.file }), true);
-    assert.equal(shouldUseGroupForModel("clinebot/z-ai/glm-5.3-flash", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("cline/z-ai/glm-5.3-flash", { file: tmp.file }), false);
     assert.equal(shouldUseGroupForModel("workbuddy/hy3", { file: tmp.file }), false);
   });
 });

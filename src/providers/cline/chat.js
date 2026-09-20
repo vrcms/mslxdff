@@ -1,20 +1,20 @@
 import { joinUrl, sleep } from "../base.js";
 import { clineHeaders } from "./headers.js";
 import { createTransport } from "../../transport/index.js";
+import { normalizeProviderId } from "../model-id.js";
 import { createSdkDispatch } from "../../upstream-engine/sdk/dispatch.js";
 
 function genSessionId() { return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 
-// stripProviderPrefix 去掉本地供应商前缀，发上游用裸模型 id。
-// 上游（对标 cline2api-workers MODELS）只认裸 id："deepseek/deepseek-v4-flash"、
-// "poolside/laguna-s-2.1:free"；本地 "clinebot/deepseek/..." 需取后两段。
-// 两段及以内视为已是裸 id，原样透传。
-function stripProviderPrefix(id) {
-  const parts = String(id || "").split("/").filter(Boolean);
-  if (parts.length > 2) return parts.slice(1).join("/");
-  return String(id || "");
+// stripProviderPrefix 只剥「本供应商」前缀（cline/<裸 id> → 裸 id），非本前缀（含上游自带多段 id
+// 如 meta/vendor/x）原样透传，不误削首段（旧实现按段数剥曾是潜在 bug）。
+function stripProviderPrefix(model, providerId) {
+  const s = String(model || "");
+  const i = s.indexOf("/");
+  if (i <= 0) return s;
+  const low = (v) => normalizeProviderId(String(v || "").toLowerCase());
+  return low(s.slice(0, i)) === low(providerId) ? s.slice(i + 1) : s;
 }
-
 function unwrapData(obj) {
   if (obj && obj.data && typeof obj.data === "object") {
     const d = obj.data;
@@ -169,7 +169,7 @@ export function createChatService({
     const model = body?.model || "deepseek/deepseek-v4-flash";
     const sessionId = genSessionId();
     const isStream = body?.stream === true;
-    const upstreamModel = stripProviderPrefix(model);
+    const upstreamModel = stripProviderPrefix(model, id);
     // token 口径双写：对标官方 withMaxCompletionTokensForReasoningModels——
     // cline 上游默认 reasoning_effort high，推理模型认 max_completion_tokens，
     // 只发 max_tokens 会被部分通道拒；双写兼容最稳。
@@ -182,7 +182,10 @@ export function createChatService({
       reasoning_effort: body?.reasoning_effort || body?.reasoningEffort || "high",
       messages: body?.messages || [],
     };
-    const forceStream = !isStream && String(upstreamModel).startsWith("deepseek/");
+    // 部分免费通道（deepseek 家族，含 cline-free/deepseek-*）原生非流式不可靠
+    //（500 empty response）：这类模型在内部走 stream+聚合成 JSON，对外仍按请求方
+    // stream 标志返回（true 直透，false 聚合）。其它模型完全尊重请求方，不强制。
+    const forceStream = !isStream && String(upstreamModel).toLowerCase().includes("deepseek");
     if (isStream || forceStream) upstreamBody.stream = true;
     for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
       if (body[k] !== undefined) upstreamBody[k] = body[k];

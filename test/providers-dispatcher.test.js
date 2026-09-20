@@ -169,7 +169,7 @@ test("dispatcher preheat calls only the default provider (opencode)", async () =
     listModels: async () => [],
     chat: async () => new Response(""),
   });
-  const d = createProviderDispatcher([mk("opencode"), mk("workbuddy"), mk("clinebot"), mk("aihubmix")]);
+  const d = createProviderDispatcher([mk("opencode"), mk("workbuddy"), mk("cline"), mk("aihubmix")]);
   const r = await d.preheat();
   assert.deepEqual(calls, ["opencode"], "only the default provider may be preheated");
   assert.equal(r.ok, true);
@@ -184,7 +184,7 @@ test("dispatcher preheat degrades safely when default provider missing", async (
     listModels: async () => [],
     chat: async () => new Response(""),
   });
-  const d = createProviderDispatcher([mk("workbuddy"), mk("clinebot")]);
+  const d = createProviderDispatcher([mk("workbuddy"), mk("cline")]);
   const r = await d.preheat();
   assert.deepEqual(calls, [], "non-default providers must not be preheated");
   assert.equal(r.skipped, true);

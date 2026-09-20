@@ -1,9 +1,12 @@
 import { join } from "node:path";
 import { defaultStateFile } from "../../../state.js";
 import { logDir } from "../../../logs.js";
+import { normalizeProviderId } from "../../../providers/model-id.js";
 
 export async function handleProviderModels(id, sub, args, rest) {
   if (!(sub === "models" || sub === "show-models" || sub === "list-models" || sub === "ls")) return false;
+  // 供应商 id 归一（clinebot/cline-bot → cline）：老脚本 `-provider clinebot models` 仍走 cline 直查
+  id = normalizeProviderId(id);
   const { loadProviderConfig, loadProviderKeys, isModelAllowed } = await import("../../../state.js");
   const wantsJson = args.includes("--json") || args.includes("-json");
   const cfg = loadProviderConfig(id);
@@ -34,7 +37,7 @@ export async function handleProviderModels(id, sub, args, rest) {
     let provider;
     if (id === "workbuddy") {
       provider = createWorkbuddyProvider({ baseUrl, apiKeys: keys, auths, file: defaultStateFile() });
-    } else if (id === "cline" || id === "clinebot") {
+    } else if (id === "cline") {
       // 与聚合目录同源：recommended-models 的 free（generic 的 /api/v1/models 是全量目录，含大量不可用条目）
       const { createClineProvider } = await import("../../../providers/cline.js");
       provider = createClineProvider({ id, baseUrl: baseUrl || undefined, apiKeys: keys, file: defaultStateFile() });

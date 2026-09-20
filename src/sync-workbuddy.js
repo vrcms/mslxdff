@@ -119,7 +119,7 @@ export async function syncToWorkbuddy({ id, token, port, file, keep } = {}) {
     if (arr[idx].useCustomProtocol === undefined) arr[idx].useCustomProtocol = false;
     action = "updated";
   } else {
-    // 检查归一化 id 是否与已有条目冲突（如已存在 clinebot-z-ai-glm-5.3-flash 但不是本地 URL）
+    // 检查归一化 id 是否与已有条目冲突（如已存在 cline-z-ai-glm-5.3-flash 但不是本地 URL）
     const conflict = arr.findIndex((m) => m && m.id === wbId);
     if (conflict >= 0) {
       // 已有同名条目且非我们写的，跳过不覆盖

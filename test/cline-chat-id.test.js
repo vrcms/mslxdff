@@ -25,31 +25,42 @@ function captureChat() {
 
 test("cline: provider-prefixed deepseek id is stripped before upstream", async () => {
   const { fetchImpl, seen } = captureChat();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
-  const resp = await p.chat({ model: "clinebot/deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  const resp = await p.chat({ model: "cline/deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
   assert.equal(resp.status, 200);
   assert.equal(seen[0].model, "deepseek/deepseek-v4-flash", "upstream must receive bare id");
 });
 
 test("cline: stripped deepseek id triggers forceStream aggregation", async () => {
   const { fetchImpl, seen } = captureChat();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
-  await p.chat({ model: "clinebot/deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  await p.chat({ model: "cline/deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
   assert.equal(seen[0].stream, true, "deepseek must be forced to stream=true upstream");
 });
 
 test("cline: z-ai prefixed id is stripped, stream not forced", async () => {
   const { fetchImpl, seen } = captureChat();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
-  await p.chat({ model: "clinebot/z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: false });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  await p.chat({ model: "cline/z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: false });
   assert.equal(seen[0].model, "z-ai/glm-5.3-flash", "upstream must receive bare id");
   assert.ok(!seen[0].stream, "non-deepseek must not force stream");
 });
 
 test("cline: bare id passes through untouched", async () => {
   const { fetchImpl, seen } = captureChat();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
   await p.chat({ model: "deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
   assert.equal(seen[0].model, "deepseek/deepseek-v4-flash");
   assert.equal(seen[0].stream, true);
+});
+
+test("cline: cline-free/deepseek id 也触发 forceStream 聚合（原生非流式 500）", async () => {
+  const { fetchImpl, seen } = captureChat();
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  const resp = await p.chat({ model: "cline/cline-free/deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }], stream: false });
+  assert.equal(resp.status, 200);
+  assert.equal(seen[0].model, "cline-free/deepseek-v4.1-flash", "upstream must receive bare id");
+  assert.equal(seen[0].stream, true, "cline-free/deepseek 非流式必须内部走 stream+聚合");
+  const j = JSON.parse(await resp.text());
+  assert.equal(j.choices[0].message.content, "hi", "对外仍按请求方 stream=false 返回 JSON");
 });

@@ -120,7 +120,7 @@ export async function handleVia({ providerId, opts, fetchImpl, loadConfigs, load
       for (const k of Object.keys(raw.providerConfigs || {})) if (!targetIds.includes(k) && (loadAllowed(k) || []).length) targetIds.push(k);
       for (const k of Object.keys(raw.providerKeys || {})) if (!targetIds.includes(k) && (loadAllowed(k) || []).length) targetIds.push(k);
     } catch {}
-    if (!targetIds.length) targetIds = ["openrouter", "workbuddy", "clinebot"].filter((p) => (loadAllowed(p) || []).length);
+    if (!targetIds.length) targetIds = ["openrouter", "workbuddy", "cline"].filter((p) => (loadAllowed(p) || []).length);
     // opencode 默认 allowAny 但 allowlist 常空：有裸 picks 且确认包含 opencode 时纳入
     if (includeOpencode && !targetIds.includes("opencode") && picks.some((p) => !String(p).includes("/") || String(p).toLowerCase().startsWith("opencode/"))) {
       targetIds.push("opencode");

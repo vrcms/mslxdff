@@ -19,6 +19,15 @@ import { errMsg } from "../cli/util.js";
  * 无参（读 env/state 自身），返回 ctx 由门面接力 server-lifecycle。
  */
 export async function setupProviders() {
+  // 供应商 id 统一（旧 cline id → cline）：必须在实例化任何 provider 之前跑；幂等，失败不阻断启动
+  try {
+    const { runStateMigrations } = await import("../state/migrations.js");
+    const mig = await runStateMigrations({ file: defaultStateFile() });
+    if (mig.applied.length) console.log(`state migrations applied: ${mig.applied.join(", ")}`);
+    for (const e of mig.errors) console.log(`state migration failed: ${e.id} — ${e.error}`);
+  } catch (err) {
+    console.log(`state migrations failed: ${errMsg(err)}`);
+  }
   const { token, created } = await loadToken();
   const pkgRoot2 = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const pluginDirs = resolvePluginDirs({ pkgRoot: pkgRoot2 });

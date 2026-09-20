@@ -1,7 +1,8 @@
 import { compatFetch, getUndici, timeoutSignal } from "../../../compat.js";
+import { normalizeProviderId } from "../../../providers/model-id.js";
 export async function handleClineLogin(id, sub) {
   if (sub !== "login" && sub !== "auth" && sub !== "oauth") return false;
-  if (id !== "cline" && id !== "clinebot" && id !== "cline-bot") return false;
+  if (normalizeProviderId(id) !== "cline") return false;
 
   const CLIENT_ID = "client_01K3A541FN8TA3EPPHTD2325AR";
   const WORKOS_DEVICE = "https://api.workos.com/user_management/authorize/device";
@@ -97,7 +98,7 @@ export async function handleClineLogin(id, sub) {
     }
   }
   if (!workos) {
-    console.error("\n❌ 授权超时，请重新运行 mslxdff -provider clinebot login");
+    console.error("\n❌ 授权超时，请重新运行 mslxdff -provider cline login");
     process.exit(1);
   }
   console.log("\n✅ WorkOS 授权成功！\n🔗 用 WorkOS token 在 Cline 注册...");
@@ -117,28 +118,32 @@ export async function handleClineLogin(id, sub) {
   console.log("=".repeat(60));
   console.log(`✅ 登录成功! 账号: ${email}`);
   console.log(`🔑 refreshToken: ${rt.slice(0, 8)}…${rt.slice(-8)} (${rt.length} 字符)`);
-  // 落盘到 state（同时写 cline 与 clinebot 两个 id，兼容）
-  const { loadProviderKeys, saveProviderConfig, loadProviderConfig } = await import("../../../state.js");
-  for (const pid of ["cline", "clinebot"]) {
-    try {
-      const cur = loadProviderKeys(pid);
-      if (cur.includes(rt)) {
-        console.log(`   ℹ️ ${pid} 已存在相同 token，跳过`);
-        continue;
-      }
+  // 落盘到 state（供应商 id 恒为 cline；写盘前先跑一次性迁移，保证老用户不会再写出 clinebot）
+  const { defaultStateFile, loadProviderKeys, saveProviderConfig, loadProviderConfig } = await import("../../../state.js");
+  try {
+    const { runStateMigrations } = await import("../../../state/migrations.js");
+    const mig = await runStateMigrations({ file: defaultStateFile() });
+    if (mig.applied.length) console.log(`   ℹ️ 已合并遗留供应商配置: ${mig.applied.join(", ")}`);
+  } catch {}
+  try {
+    const pid = "cline";
+    const cur = loadProviderKeys(pid);
+    if (cur.includes(rt)) {
+      console.log(`   ℹ️ ${pid} 已存在相同 token，跳过`);
+    } else {
       const cfg = loadProviderConfig(pid) || { baseUrl: "", keys: [] };
       const nextKeys = [...new Set([...(cfg.keys || cur), rt].filter(Boolean))];
       saveProviderConfig(pid, { baseUrl: cfg.baseUrl || "https://api.cline.bot", keys: nextKeys });
       console.log(`   ✅ 已写入 ${pid}（现 ${nextKeys.length} 个账号）`);
-    } catch (e) {
-      console.log(`   ⚠️ 写入 ${pid} 失败: ${e.message}`);
     }
+  } catch (e) {
+    console.log(`   ⚠️ 写入 cline 失败: ${e.message}`);
   }
   console.log("=".repeat(60));
   console.log("\n下一步：");
   console.log("  mslxdff -restart                         重启网关使新账号生效");
-  console.log("  mslxdff -provider clinebot bench --json  测速 deepseek 是否 200");
+  console.log("  mslxdff -provider cline bench --json     测速 deepseek 是否 200");
   console.log("  mslxdff -chat                             直接对话，模型选 deepseek/deepseek-v4-flash");
-  console.log("\n多账号：重复 `mslxdff -provider clinebot login` 追加，二号自动做后备");
+  console.log("\n多账号：重复 `mslxdff -provider cline login` 追加，二号自动做后备");
   process.exit(0);
 }

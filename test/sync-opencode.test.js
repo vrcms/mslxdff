@@ -24,7 +24,7 @@ describe("sync-opencode raw/dash + slash->dash alias", () => {
     const { toStorageKey } = await import("../src/sync-opencode.js");
     assert.equal(toStorageKey("deepseek-v4-flash-free"), "deepseek-v4-flash-free");
     assert.equal(toStorageKey("bai/deepseek-v4-flash"), "bai-deepseek-v4-flash");
-    assert.equal(toStorageKey("clinebot/z-ai/glm-5.3-flash"), "clinebot-z-ai-glm-5.3-flash");
+    assert.equal(toStorageKey("cline/z-ai/glm-5.3-flash"), "cline-z-ai-glm-5.3-flash");
     assert.equal(toStorageKey("mslxdff-deepseek"), "deepseek", "legacy prefix stripped then raw");
   });
 

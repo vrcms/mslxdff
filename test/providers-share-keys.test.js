@@ -22,14 +22,14 @@ test("share-keys: 默认借出 —— 有 key 即可共享，无开关（ADR-001
   } finally { cleanup(file); }
 });
 
-test("share-keys: 刷新型凭据（cline/clinebot）硬排除", () => {
+test("share-keys: 刷新型凭据（cline/cline）硬排除", () => {
   const file = stateFile();
   try {
-    saveProviderKeys("clinebot", ["rt-1"], { file });
+    saveProviderKeys("cline", ["rt-1"], { file });
     saveProviderKeys("cline", ["rt-2"], { file });
     saveProviderKeys("openrouter", ["sk-a"], { file });
     const ids = shareableProviderIds({ file });
-    assert.ok(!ids.includes("clinebot"));
+    assert.ok(!ids.includes("cline"));
     assert.ok(!ids.includes("cline"));
     assert.ok(ids.includes("openrouter"));
   } finally { cleanup(file); }

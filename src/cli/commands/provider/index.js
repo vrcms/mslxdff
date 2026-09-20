@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { normalizeProviderId } from "../../../providers/model-id.js";
 import { defaultStateFile } from "../../../state.js";
 
 export async function handleProviders(args) {
@@ -74,6 +75,27 @@ export async function handleProvider(args) {
   if (await handleProviderModels(id, sub, args, rest)) return true;
   const { handleProviderBench } = await import("./bench.js");
   if (await handleProviderBench(id, sub, rest, args)) return true;
+  const { handleClineFree } = await import("./cline-free.js");
+  if (await handleClineFree(id, sub, rest, args)) return true;
+  if (normalizeProviderId(id) === "cline" && sub === "migrate") {
+    const { runStateMigrations } = await import("../../../state/migrations.js");
+    const dryRun = args.includes("--dry-run") || args.includes("--dryrun");
+    const r = await runStateMigrations({ dryRun });
+    const d = r.details["cline-unify"] || {};
+    if (r.errors.length) console.error(`❌ 迁移失败: ${r.errors.map((e) => `${e.id}: ${e.error}`).join("; ")}`);
+    if (dryRun) {
+      console.log(d.changed
+        ? `cline migrate 干跑：将合并遗留 cline id 配置（keys ${d.before.keys} → ${d.after.keys} / allowlist ${d.before.allowedModels} → ${d.after.allowedModels}），未写入`
+        : "cline migrate 干跑：无需迁移（未发现 providerConfigs.clinebot / cline-bot）");
+    } else if (d.applied) {
+      console.log(`✅ cline migrate 完成：keys ${d.before.keys} → ${d.after.keys} / allowlist ${d.before.allowedModels} → ${d.after.allowedModels}`);
+      if (d.backup) console.log(`   备份：${d.backup}`);
+      console.log("   生效：mslxdff -restart");
+    } else {
+      console.log("cline migrate：无需迁移（未发现 providerConfigs.clinebot / cline-bot）");
+    }
+    process.exit(r.errors.length ? 1 : 0);
+  }
   const { handleProviderKeys } = await import("./keys.js");
   await handleProviderKeys(id, sub, rest, args);
   return true;

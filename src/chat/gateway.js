@@ -138,7 +138,7 @@ export function createGatewayClient({
         }
         if (provider === "opencode" && rawModel.includes("/")) {
           const maybe = rawModel.split("/")[0];
-          if (["workbuddy", "clinebot", "sensenova", "openrouter", "generic"].includes(maybe)) provider = maybe;
+          if (["workbuddy", "cline", "sensenova", "openrouter", "generic"].includes(maybe)) provider = maybe;
         }
       } catch {}
       if (TRACE) {

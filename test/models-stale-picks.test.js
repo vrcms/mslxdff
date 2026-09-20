@@ -8,10 +8,10 @@ import { buildProviderRows } from "../src/cli/provider-row.js";
 import { filterStalePicks } from "../src/providers/model-id.js";
 
 // 实测 state 快照：providerConfigs keys 无 amddev/laguna，picks 23 个含 4 孤儿
-const KNOWN = ["workbuddy", "sensenova", "bai", "aihubmix", "clinebot", "deepseek"];
+const KNOWN = ["workbuddy", "sensenova", "bai", "aihubmix", "cline", "deepseek"];
 const LIVE = ["big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free"];
-const ALLOWED = ["workbuddy/glm-5.3-flash", "clinebot/z-ai/glm-5.3-flash"];
-const ALIAS = { "clinebot-z-ai-glm-5.3-flash": "clinebot/z-ai/glm-5.3-flash" };
+const ALLOWED = ["workbuddy/glm-5.3-flash", "cline/z-ai/glm-5.3-flash"];
+const ALIAS = { "cline-z-ai-glm-5.3-flash": "cline/z-ai/glm-5.3-flash" };
 const OPTS = { knownProviders: KNOWN, liveIds: LIVE, allowedIds: ALLOWED, resolveAlias: (x) => ALIAS[x] || null };
 
 describe("filterStalePicks", () => {
@@ -45,10 +45,10 @@ describe("filterStalePicks", () => {
 
   it("大小写不敏感 + dash 别名经 resolveAlias 还原后保留", () => {
     const out = filterStalePicks(
-      ["AMDDEV/DeepSeek-V4-Flash", "clinebot-z-ai-glm-5.3-flash"],
+      ["AMDDEV/DeepSeek-V4-Flash", "cline-z-ai-glm-5.3-flash"],
       OPTS,
     );
-    assert.deepEqual(out, ["clinebot-z-ai-glm-5.3-flash"]);
+    assert.deepEqual(out, ["cline-z-ai-glm-5.3-flash"]);
   });
 
   it("上游列表为空时 bare 一律保留（无法判定则放行）", () => {

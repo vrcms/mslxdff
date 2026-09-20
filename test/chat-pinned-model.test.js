@@ -86,7 +86,7 @@ test("handleSlash /model：非 free 模型拒绝", () => {
 });
 
 test("handleSlash /model：带供应商前缀一律拒绝（-chat 只支持 opencode 上游）", () => {
-  for (const id of ["deepseek/chat-free", "workbuddy/hy3", "clinebot/deepseek/X"]) {
+  for (const id of ["deepseek/chat-free", "workbuddy/hy3", "cline/deepseek/X"]) {
     const out = [];
     const orig = console.log;
     console.log = (l) => out.push(String(l));
