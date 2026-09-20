@@ -123,7 +123,7 @@ test("sdk 模式：非流式请求委派 legacy（JSON 透传不被 SSE 化）",
   } finally { await closeSrv(srv); }
 });
 
-test("sdk 模式：SDK 装载失败（Node16/未安装）自动回退 legacy 且只告警一次", async () => {
+test("sdk 模式：SDK 装载失败（未安装）自动回退 legacy 且只告警一次", async () => {
   let captured = null;
   const srv = await openaiSseServer((req) => { captured = { url: req.url, headers: req.headers }; });
   try {

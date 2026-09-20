@@ -69,7 +69,8 @@ export async function handleProviderAdd(id, sub, rest) {
     try {
       const { writeFileSync, mkdirSync } = await import("node:fs");
       const { join } = await import("node:path");
-      const dir = process.env.WORKBUDDY_AUTH_DIR || join(process.cwd(), "auths");
+      const { resolveAuthDir } = await import("../../providers/workbuddy/account-store.js");
+      const dir = resolveAuthDir();
       mkdirSync(dir, { recursive: true });
       const fp = join(dir, `workbuddy-${uid}.json`);
       const doc = { account: { uid, enterpriseId: "", nickname: "" }, auth: { accessToken: token, refreshToken: "", expiresAt: Math.floor(Date.now()/1000)+3600, domain: "www.codebuddy.cn" } };

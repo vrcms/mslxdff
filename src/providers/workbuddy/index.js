@@ -1,11 +1,9 @@
 import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderBaseUrl, WORKBUDDY_DEFAULT_BASE_URL, loadProviderModelsPath, loadProviderChatPath } from "../../state.js";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { compatFetch } from "../../compat.js";
-import { join } from "node:path";
 import { envInt, joinUrl, getUndici, createAgent } from "../base.js";
 import { createAuthService, isAuthError, isInsufficientStatus, decodeJwtExp } from "./auth.js";
-import { applyTokenRefresh, resolveAuthDir } from "./account-store.js";
+import { applyTokenRefresh, listAccountDocs } from "./account-store.js";
 import { createChatService } from "./chat.js";
 import { createModelsService } from "./models.js";
 import { createBalanceCache, getCachedBalance as defaultGetCached, setCachedBalance as defaultSetCached } from "./balance.js";
@@ -61,24 +59,16 @@ export function createWorkbuddyProvider({
   let authList = Array.isArray(auths) && auths.length ? auths : authsFromState;
 
   if (!authList.length && !keys.length) {
+    // 账号目录读取统一走 listAccountDocs：主位置（跟 state 走）优先，旧 cwd/auths 只读兜底
     try {
-      const authDir = resolveAuthDir();
-      if (existsSync(authDir)) {
-        const files = readdirSync(authDir).filter((f) => f.startsWith("workbuddy-") && f.endsWith(".json"));
-        for (const f of files) {
-          try {
-            const j = JSON.parse(readFileSync(join(authDir, f), "utf8"));
-            if (j?.auth?.accessToken && j?.account?.uid) {
-              if (!keys.includes(j.auth.accessToken)) keys.push(j.auth.accessToken);
-              authList.push({
-                uid: j.account.uid,
-                domain: j.auth.domain || "www.codebuddy.cn",
-                enterpriseId: j.account.enterpriseId || "",
-                refreshToken: j.auth.refreshToken || "",
-              });
-            }
-          } catch {}
-        }
+      for (const { uid, doc } of listAccountDocs()) {
+        if (!keys.includes(doc.auth.accessToken)) keys.push(doc.auth.accessToken);
+        authList.push({
+          uid,
+          domain: doc.auth.domain || "www.codebuddy.cn",
+          enterpriseId: doc.account.enterpriseId || "",
+          refreshToken: doc.auth.refreshToken || "",
+        });
       }
     } catch {}
   }

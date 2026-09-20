@@ -1,17 +1,83 @@
 // WorkBuddy 账号落盘单一源：auths/workbuddy-<uid>.json（0600 tmp+rename）+ state.json keys/auths 按 uid 去重。
 // token-auto / device-login / 刷新（服务端 saveFn 与 CLI 定时任务）共用同一实现，安全细节只维护一份。
 // Note: 刷新落盘只走 applyTokenRefresh，别再各自内联一套 — 见 .agents/notes/implemented/architecture/2026-09-17-workbuddy-persist-single-seam.md
-import { writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
+// Note: 凭据目录别再用 cwd 兜底 — 见 .agents/notes/implemented/architecture/2026-09-20-workbuddy-authdir-follows-state.md
+import { writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { isTestEnv } from "../../state/store.js";
+import { isTestEnv, defaultStateFile } from "../../state/store.js";
+
+// 凭据目录单一真相：跟着「账本」（state 文件）走 —— 默认 ~/.config/mslxdff/auths。
+// 旧实现末尾兜底 `join(process.cwd(), "auths")`：在任意目录里起服务就把企业长效
+// refreshToken 写进那个目录，而 .gitignore 只管自己所在的仓库 → 凭据落到不受保护的目录
+// （本机实测：两个真实账号因此分居 `~/.config/mslxdff/auths` 与 `项目根/auths` 两处）。已修。
+// 纯策略：写入目录的唯一目标（explicit > 测试隔离 > 「跟账本走」＝ state 文件同目录/auths）。
+// 抽成纯函数是为了可测 —— `node --test` 下 isTestEnv() 恒真，环境态没法在测试里翻面。
+export function authDirFor({ explicit = "", testEnv = false, stateFile } = {}) {
+  if (explicit) return explicit;
+  if (testEnv) return join(tmpdir(), "mslxdff-test-auths");
+  return join(dirname(stateFile), "auths");
+}
 
 export function resolveAuthDir() {
-  if (process.env.WORKBUDDY_AUTH_DIR) return process.env.WORKBUDDY_AUTH_DIR;
-  const sf = process.env.MSLXDFF_STATE_FILE || "";
-  if (sf.includes("mslxdff-test") || isTestEnv()) return join(tmpdir(), "mslxdff-test-auths");
-  if (sf && sf.includes("mslxdff-")) return join(dirname(sf), "auths");
-  return join(process.cwd(), "auths");
+  return authDirFor({
+    explicit: process.env.WORKBUDDY_AUTH_DIR || "",
+    testEnv: isTestEnv(),
+    stateFile: defaultStateFile(),
+  });
+}
+
+// 纯策略：算出读取候选目录（主位置优先，历史 cwd/auths 只读兜底，相同则去重）。
+// 抽成纯函数是为了可测 —— `node --test` 下 isTestEnv() 恒真，环境态没法在测试里翻面。
+export function authDirCandidates({ primary, explicit = "", testEnv = false, cwdDir = "" } = {}) {
+  const dirs = [primary];
+  if (!explicit && !testEnv && cwdDir && cwdDir !== primary) dirs.push(cwdDir);
+  return dirs;
+}
+
+// 读取候选（迁移期兼容）：主位置优先，历史 `cwd()/auths` 只读兜底。
+// 显式 WORKBUDDY_AUTH_DIR 或测试环境不兜底：既避免测试扫到真实目录，也避免重新引入 cwd 依赖。
+export function resolveAuthDirs() {
+  return authDirCandidates({
+    primary: resolveAuthDir(),
+    explicit: process.env.WORKBUDDY_AUTH_DIR || "",
+    testEnv: isTestEnv(),
+    cwdDir: join(process.cwd(), "auths"),
+  });
+}
+
+// 按 uid 定位账号文件（主位置优先，旧位置兜底）；找不到返回 null。
+export function findAccountFile(uid) {
+  for (const dir of resolveAuthDirs()) {
+    const fp = join(dir, `workbuddy-${uid}.json`);
+    if (existsSync(fp)) return fp;
+  }
+  return null;
+}
+
+// 扫描账号文件（主位置先扫，同 uid 以主位置为准），返回已校验的凭证行。
+// 读取侧单一真相：provider 构造、CLI 账号加载、token-auto 都走这里，别再各自 readdir 一套。
+export function listAccountDocs({ dirs } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const dir of dirs || resolveAuthDirs()) {
+    let files = [];
+    try {
+      if (!existsSync(dir)) continue;
+      files = readdirSync(dir).filter((f) => f.startsWith("workbuddy-") && f.endsWith(".json"));
+    } catch { continue; }
+    for (const f of files) {
+      try {
+        const doc = JSON.parse(readFileSync(join(dir, f), "utf8"));
+        const uid = doc?.account?.uid;
+        if (!uid || !doc?.auth?.accessToken) continue;
+        if (seen.has(String(uid))) continue;
+        seen.add(String(uid));
+        out.push({ uid: String(uid), file: join(dir, f), dir, doc });
+      } catch {}
+    }
+  }
+  return out;
 }
 
 function jwtExp(token) {

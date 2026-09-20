@@ -1,4 +1,4 @@
-// 上游引擎选择（ADR-0017）：sdk=AI SDK wire 层（缺省），legacy=原实现（显式/Node16 回退）。
+// 上游引擎选择（ADR-0017）：sdk=AI SDK wire 层（缺省），legacy=原实现（显式指定或 SDK 装载失败回退）。
 // Note: 缺省即 sdk；chat 类走 /chat/completions（@ai-sdk/openai-compatible），
 // responses 类（muse-spark*）走 /responses（@ai-sdk/openai）；非流式与 anon 重试委派 legacy，
 // SDK 不可用自动回退并告警一次 — 见 .scratch/ai-sdk-upstream/{SPEC.md,SPEC-p4-turnon.md,SPEC-p3-responses.md} 与 docs/adr/0017

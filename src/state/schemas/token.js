@@ -1,13 +1,17 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { defaultStateFile, tokenFile, generateToken, readState, writeStateImmediate, getEntry } from "../store.js";
 import { fmtShanghaiYMDHMS } from "../../time.js";
 
+// 主 Bearer token 镜像落盘：0600 + 显式 chmod。
+// 注意 writeFileSync 的 mode 只在“新建文件”时生效，已存在的文件权限不会被它改；
+// 升级前生成的老文件会永远停在 0644（同机其他用户可读），所以必须再 chmod 一次兜住。
 function syncTokenFile(token, file) {
   try {
     const tf = tokenFile(file);
     mkdirSync(dirname(tf), { recursive: true });
-    writeFileSync(tf, String(token || "").trim() + "\n", "utf8");
+    writeFileSync(tf, String(token || "").trim() + "\n", { encoding: "utf8", mode: 0o600 });
+    try { chmodSync(tf, 0o600); } catch {}
   } catch {}
 }
 
