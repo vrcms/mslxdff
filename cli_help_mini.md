@@ -49,13 +49,15 @@
 | Cline 免费目录 | `-provider cline free [--json]` | 上游免费目录只读（`recommended-models` 的 `free`，5 个）：列目录 + 与当前 allowlist 的差异，不写 state |
 | Cline 免费同步 | `-provider cline free sync [--yes] [--json] [--keep-extra]` | 把免费目录同步为 `cline` 的 allowlist（写裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览，`--yes` 才落盘**；`--keep-extra` 只增不删 |
 | Cline 迁移 | `-provider cline migrate [--dry-run]` | 旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔 `sk_`、allowlist 求并）后删旧键，幂等、改前备份；**cline 恒 local-only**（不走组员、不借 key、只走本地直连，历史别名同样硬排除） |
+| CodeArts 登录 | `-provider codearts login` | 华为云 CodeArts Agent（盘古助手）PKCE 浏览器授权：凭证 blob（refreshToken/codeVerifier/dpopJwk）落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转，默认 `allowAnyModels=true`）；此后 `codearts/<modelId>` 前缀（恒 `stream:true`，STS 临期自动刷新 + refresh_token 轮换原位写回，死号提示重登）；**恒 local-only** 不借 key（ADR-0027） |
+| CodeArts 模型 | `-provider codearts models [--json]` | 三路发现（builtin 归一 + 代理型 + 福利网关），benefit 模型自动 claim（幂等 `0000`），对外带 `tags:["free:benefit"]` |
 | DeepSeek 登录 | `-provider deepseek login --token <userToken>` 或 `login <email\|mobile> <password>` | DeepSeek 官网免费对话接入（ADR-0014）：userToken 在 chat.deepseek.com F12→Local Storage；无参数打印图文引导；落盘后 `allowAny on` + `-restart`；模型 `deepseek/{chat,reasoner,chat-search,reasoner-search}`；单账号 1 路并发，多号轮换 |
 | DeepSeek 探活 | `-provider deepseek health [--json]` | 逐账号体检（防禁言）：检测禁言（自动冷却 5min）/限频前兆/凭据坏；网络失败不误伤；禁言解封后再探自动恢复 |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
-| 供应商共享 | key 随转发自动借出（ADR-0019，无开关无白名单） | 借道时自动附带；opencode/workbuddy/cline 硬排除 |
+| 供应商共享 | key 随转发自动借出（ADR-0019，无开关无白名单） | 借道时自动附带；opencode/workbuddy/cline/codearts 硬排除 |
 | 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=阻塞除非 `allowAny on`，非空仅名单内可用（防昂贵模型） |
 | 空名单开关 | `-provider <id> allowAny on\|off` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |

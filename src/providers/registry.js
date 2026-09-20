@@ -15,6 +15,11 @@ export const customProviders = [
     match: (id, baseUrl) => id === "cline" || String(baseUrl).includes("cline.bot"),
     load: () => import("./cline.js").then((m) => m.createClineProvider),
   },
+  {
+    id: "codearts",
+    match: (id, baseUrl) => id === "codearts" || String(baseUrl).includes("myhuaweicloud.com"),
+    load: () => import("./codearts.js").then((m) => m.createCodeartsProvider),
+  },
 ];
 
 // 供 bench/probe 等需要定制化解析模型列表的场景
