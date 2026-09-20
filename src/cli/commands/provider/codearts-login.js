@@ -17,10 +17,14 @@ export async function handleCodeartsLogin(id, sub, rest = [], deps = {}) {
   try {
     const { account, state } = await runCodeartsLogin({ fetchImpl, log });
     const blob = accountToBlob(account, { codeVerifier: state.codeVerifier, dpopJwk: state.dpopJwk, clientId: state.clientId });
-    // 同一账号重复登录：替换旧 blob；新账号：追加（多账号 keyring 轮转）
+    // 同一账号重复登录：替换旧 blob；新账号：追加（多账号 keyring 轮转）。
+    // 去重键：userId 非空才可信；双方任一为空时退化为 refreshToken 比较
+    // （空 userId==空 userId 的误判会把第二个不同账号当同一账号替换，真机实测恒剩 1 key）
     const cur = loadProviderKeys("codearts", { file }).filter((k) => {
       const parsed = accountFromBlob(k);
-      return parsed && parsed.userId !== account.userId;
+      if (!parsed) return false;
+      if (parsed.userId && account.userId) return parsed.userId !== account.userId;
+      return parsed.refreshToken !== account.refreshToken;
     });
     const baseUrl = loadProviderBaseUrl("codearts", { file }) || SNAP_BASE;
     saveProviderConfig("codearts", { baseUrl, keys: [...cur, blob] }, { file });
