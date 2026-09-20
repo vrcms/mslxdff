@@ -1,8 +1,8 @@
 // codearts SSE 解析测试：全文快照替换语义 / delta / tool_calls / [DONE] / 内嵌错误映射 / OpenAI 转换。
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish } from "../src/providers/codearts/sse.js";
-import { sseToOpenAIResponse, aggregateToCompletion, preflightResponse, newChatId } from "../src/providers/codearts/stream.js";
+import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish, isValidStructuredQA } from "../src/providers/codearts/sse.js";
+import { sseToOpenAIResponse, aggregateToCompletion, preflightResponse, newChatId, unwrapQAContent } from "../src/providers/codearts/stream.js";
 
 function feed(lines) {
   const st = createSseState();
@@ -157,5 +157,58 @@ describe("codearts sse 解析", () => {
     // 有真实 calls 时必须原样透传（工具链不断）
     const st = feed(["data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"f\"}}]}}]}", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"]);
     assert.equal(effectiveFinish(st), "tool_calls");
+  });
+});
+
+describe("codearts 流式字段透传（真机帧形状回归）", () => {
+  const frame = (delta, finish) => JSON.stringify({ object: "chat.completion.chunk", choices: [{ index: 0, delta, ...(finish ? { finish_reason: finish } : {}) }] });
+
+  test("role/tool_calls 原样转发 + finish=tool_calls + [DONE]", async () => {
+    const resp = sseResponse([
+      frame({ role: "assistant", content: "", tool_calls: [{ index: 0, id: "call_84ae", type: "function", function: { name: "read_file", arguments: "" } }] }),
+      frame({ role: "assistant", content: "", tool_calls: [{ index: 0, id: "", type: "function", function: { arguments: '{"path": "package.json"}' } }] }),
+      frame({ role: "assistant", content: "" }, "tool_calls"),
+      JSON.stringify({ text: "[DONE]", error_code: "0" }),
+    ]);
+    const out = await sseToOpenAIResponse(resp, { model: "deepseek-v4-flash-0731", id: "chatcmpl-t" }).text();
+    const chunks = out.split("\n").filter((l) => l.startsWith("data: ") && l !== "data: [DONE]").map((l) => JSON.parse(l.slice(6)));
+    const tcChunks = chunks.filter((c) => c.choices?.[0]?.delta?.tool_calls);
+    assert.equal(tcChunks.length, 2);
+    assert.equal(tcChunks[0].choices[0].delta.role, "assistant");
+    assert.equal(tcChunks[0].choices[0].delta.tool_calls[0].id, "call_84ae");
+    assert.equal(tcChunks[0].choices[0].delta.tool_calls[0].function.name, "read_file");
+    assert.equal(tcChunks[1].choices[0].delta.tool_calls[0].function.arguments, '{"path": "package.json"}');
+    const fin = chunks.find((c) => c.choices?.[0]?.finish_reason);
+    assert.equal(fin.choices[0].finish_reason, "tool_calls");
+    assert.ok(out.trimEnd().endsWith("data: [DONE]"));
+  });
+
+  test("空 tool_calls（无 calls 无文本）→ 流式 finish 降级 stop", async () => {
+    const resp = sseResponse([
+      JSON.stringify({ id: 1, type: "answer" }),
+      frame({}, "tool_calls"),
+      JSON.stringify({ text: "[DONE]", error_code: "0" }),
+    ]);
+    const out = await sseToOpenAIResponse(resp, { model: "glm-5.3-flash", id: "chatcmpl-w" }).text();
+    const chunks = out.split("\n").filter((l) => l.startsWith("data: ") && l !== "data: [DONE]").map((l) => JSON.parse(l.slice(6)));
+    const fin = chunks.find((c) => c.choices?.[0]?.finish_reason);
+    assert.equal(fin.choices[0].finish_reason, "stop");
+  });
+});
+
+describe("codearts structured QA 收紧与解包", () => {
+  test("isValidStructuredQA：双字段/长度/代码关键词/options 数目", () => {
+    assert.equal(isValidStructuredQA({ question: "几点了", answer: "三点", options: ["a", "b"] }), true);
+    assert.equal(isValidStructuredQA({ answer: "缺 question" }), false);
+    assert.equal(isValidStructuredQA({ question: "q", answer: "import os" }), false);
+    assert.equal(isValidStructuredQA({ question: "q", answer: "a", options: ["only-one"] }), false);
+    assert.equal(isValidStructuredQA({ question: "q", answer: "x".repeat(101) }), false);
+  });
+
+  test("unwrapQAContent：裸 QA JSON / 围栏包裹取 answer；普通文本原样", () => {
+    const qa = { question: "q", answer: "42" };
+    assert.equal(unwrapQAContent(JSON.stringify(qa)), "42");
+    assert.equal(unwrapQAContent(["```json", JSON.stringify(qa), "```"].join("\n")), "42");
+    assert.equal(unwrapQAContent("普通回答"), "普通回答");
   });
 });

@@ -7,7 +7,7 @@
 // 结束 {"text":"[DONE]","error_code":"0"}；错误 {"error_code":"…","error_msg":"…"}。
 
 export function createSseState() {
-  return { pendingEvent: "", content: "", reason: "", finish: "", usage: null, error: null, done: false, calls: new Map() };
+  return { pendingEvent: "", content: "", reason: "", finish: "", usage: null, error: null, done: false, calls: new Map(), forward: null };
 }
 
 // 降级：finish_reason=tool_calls 但 calls 为空（上游偶发空 tool_calls 帧 + 零文本，
@@ -83,9 +83,26 @@ function markUsage(st, payload) {
   }
 }
 
+// 结构化问答帧判定（对齐 codearts2api isValidStructuredQA）：question+answer 必须同时为字符串、
+// 长度受控、answer 不似代码；options 若在场须为 2-10 项数组。防止把整段 JSON 当正文。
+const CODE_HINTS = ["import ", "def ", "class ", "func ", "package ", "module ", "struct ", "interface "];
+export function isValidStructuredQA(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  const { question, answer, options } = obj;
+  if (typeof question !== "string" || typeof answer !== "string") return false;
+  if (!question.length || question.length > 500) return false;
+  if (!answer.length || answer.length > 100) return false;
+  const low = answer.toLowerCase();
+  if (CODE_HINTS.some((h) => low.includes(h))) return false;
+  if (options !== undefined) {
+    if (!Array.isArray(options) || options.length < 2 || options.length > 10) return false;
+  }
+  return true;
+}
+
 function tryStructuredAnswer(st, payload) {
-  if (st.content || typeof payload?.answer !== "string" || !payload.answer) return;
-  if (payload.question !== undefined || payload.options !== undefined) st.content = payload.answer;
+  if (st.content || !isValidStructuredQA(payload)) return;
+  st.content = payload.answer;
 }
 
 // 单事件应用到聚合状态（对齐 Go applyEvent 的替换/追加语义）。
@@ -108,6 +125,13 @@ export function applyEvent(st, event, data) {
     if (checkError()) return true;
     const { delta, finishReason } = deltaFromChunk(payload);
     if (finishReason) st.finish = finishReason;
+    // 本帧原生 OpenAI 字段（role/tool_calls/finish）→ 流式层原样转发。
+    // 少转 tool_calls 会让客户端收到 finish_reason=tool_calls 却无工具可执行 → 回合空停（真机复现）。
+    st.forward = {
+      role: delta && typeof delta.role === "string" ? delta.role : "",
+      toolCalls: delta && Array.isArray(delta.tool_calls) && delta.tool_calls.length ? delta.tool_calls : null,
+      finish: finishReason || "",
+    };
     if (delta) {
       applyToolCallDeltas(st, delta);
       if (typeof delta.content === "string" && delta.content) st.content += delta.content;
