@@ -10,12 +10,23 @@ export async function handleProviderKeys(id, sub, rest, args) {
     else console.log(`provider: ${id}${id === "openrouter" ? " (built-in baseUrl: https://openrouter.ai/api/v1)" : ""}`);
     if (keys.length) {
       console.log(`  keys: ${keys.length} key${keys.length > 1 ? "s" : ""}`);
-      keys.forEach((k, i) => console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
+      if (id === "codearts") {
+        const { accountFromBlob } = await import("../../../providers/codearts/auth-pool.js");
+        for (const [i, k] of keys.entries()) {
+          const a = accountFromBlob(k);
+          if (a) console.log(`  [${i + 1}]  user=${a.userName || "(未识别)"} uid=${a.userId ? `${a.userId.slice(0, 8)}…` : "(空，请删了重登回填)"} domain=${a.domainId ? a.domainId.slice(0, 8) + "…" : "(空)"} (${k.length} chars)`);
+          else console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`);
+        }
+      } else keys.forEach((k, i) => console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
       console.log(`  remove by: mslxdff -provider ${id} remove <seq> [seq...] | <key-value>`);
     } else {
       console.log(`  keys: (no keys configured)`);
     }
-    console.log(`  share keys to peers:   借出（默认，key 随转发自动附带，ADR-0019）`);
+    try {
+      const { shareableProviderIds } = await import("../../../providers/share-keys.js");
+      const shared = shareableProviderIds().includes(id);
+      console.log(`  share keys to peers:   ${shared ? "借出（随转发自动附带，ADR-0019）" : "不借出（local-only / 硬排除，codearts/cline 恒不借，ADR-0019/0015）"}`);
+    } catch { console.log(`  share keys to peers:   借出（默认，key 随转发自动附带，ADR-0019）`); }
     console.log(`  allowAnyModels: ${allowAny ? "ON (empty allowlist = allow all)" : "OFF (empty allowlist = BLOCK ALL)"}  (mslxdff -provider ${id} allowAny on|off)`);
     if (allowed.length) console.log(`  allowedModels: ${allowed.length} (${allowed.join(", ")})  — only these can be used`);
     else console.log(`  allowedModels: (none — ${allowAny ? "allow all" : "BLOCK ALL"})  (mslxdff -provider ${id} allowlist set <model...>  or  allowAny on)`);

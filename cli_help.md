@@ -536,9 +536,9 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 
 - **语义**：借道 = 用你的 key。转发（peer 接力 / via-route）时，命中本机**有 key** 的供应商即自动把 key 列表放私有头 `x-mslxdff-share-keys: provider=k1,k2` 附带；组员侧 `parseShareKeysHeader` 解析后 `dispatcher.chat(body, {shareKeys})` → `provider.chatWithKeys` 用临时 `keyring` 调上游，**用完即弃，不落盘**。
 - **组内互信是前提**：不再有 `share on|off` 开关（`providerShareKeys` state / `MSLXDFF_<ID>_SHARE_KEYS` 均已删除）；旧字段变为惰性数据。
-- **硬排除**：`opencode`（无 key 恒排除）、`workbuddy`（local-only 本就不走组员）、`cline`（key 是 refresh-token，借出后对端刷新会轮换，与本机互踢下线）。
+- **硬排除**：`opencode`（无 key 恒排除）、`workbuddy`（local-only 本就不走组员）、`cline` 与 `codearts`（key 是 refresh-token 型，借出后对端刷新会轮换，与本机互踢下线；`share-keys.js` NEVER_SHARE_IDS + 凭据形状双层兜底）。
 - **无开关、无白名单**（组内互信是前提）：旧 `MSLXDFF_SHARE_PROVIDERS` 白名单已删除。
-- **示例**：`mslxdff -provider openrouter list` 输出中固定显示 `share keys to peers: 借出（默认，key 随转发自动附带，ADR-0019）`；`-status` 供应商表 `共享 借出`（opencode 行显示 `无法共享`）。
+- **示例**：`mslxdff -provider openrouter list` 输出显示 `share keys to peers: 借出（随转发自动附带，ADR-0019）`；**硬排除供应商（`codearts`/`cline`/`workbuddy` 等 local-only）则显示 `不借出（local-only / 硬排除…）`**（`codearts` 每条 key 还会展示 `user/uid/domain` 账号摘要）；`-status` 供应商表 `共享 借出`（opencode 行显示 `无法共享`）。
 
 #### `mslxdff -provider add <id> <baseUrl> <key>`（通用 OpenAI 兼容供应商一键添加，支持异形路径）
 
