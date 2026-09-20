@@ -1,6 +1,7 @@
 import { json, errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { isModelAllowed } from "../state.js";
+import { mergeModelsList } from "../model-capabilities/merge.js";
 import { globalCapabilities } from "../model-capabilities/index.js";
 
 // Codex 自定义 provider 拉目录要顶层 `models` 数组（codex-rs endpoint/models.rs 解 ModelsResponse{models}），
@@ -14,12 +15,21 @@ export function isCodexModelsCaller(req) {
   return /(^|&)client_version=/.test(q);
 }
 
-export async function modelsHandler({ req, res, models, plugins }) {
+export async function modelsHandler({ req, res, models, plugins, capabilities, wbSource }) {
   if (!models) return json(res, 501, { error: "Models service not configured" });
   const codex = isCodexModelsCaller(req);
   const withCodex = (out) => (codex && out && typeof out === "object" ? { ...out, models: [] } : out);
   try {
     let data = await models.get();
+    // ADR-0022：默认把能力富化进每条条目（capabilities 子对象）；?raw=1 逃生门回原始形状，
+    // codex 调用者保持原始 + 顶层空 models:[]（富化白做）。best-effort，失败原样返回。
+    const qs = String(req?.url || "").split("?")[1] || "";
+    const rawMode = /(^|&)raw=1(&|$)/.test(qs);
+    if (!codex && !rawMode) {
+      try {
+        data = await mergeModelsList(data, { capsSvc: capabilities, wbSource });
+      } catch { /* 富化失败不阻塞 /models */ }
+    }
     // 插件 hook：models:list — 返回数组可替换对外模型列表（{object:"list",data:[...]} 或纯 id 数组）
     if (plugins?.length) {
       const ml = await runHook(plugins, "models:list", { data });

@@ -1,10 +1,10 @@
 // ADR-0015：供应商路由分类三态 + EMA 纯函数（零依赖，防循环 import）
-// local-only：本机账号绑定（workbuddy），组员转发无效
+// local-only：本机账号绑定（workbuddy/cline 系），组员转发无效
 // quota-pool：图额度不图速度（opencode free），直连先行、429 后组员兜底
 // latency-compare：key/token 类，direct vs link+remote 比延迟
 export function classifyProvider(id) {
   const s = String(id || "").trim().toLowerCase();
-  if (s === "workbuddy") return "local-only";
+  if (s === "workbuddy" || s === "cline" || s === "clinebot") return "local-only";
   if (s === "opencode") return "quota-pool";
   return "latency-compare";
 }

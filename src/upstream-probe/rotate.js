@@ -7,7 +7,7 @@ import { errMsg } from "../cli/util.js";
 
 export const PROBE_DELAY_MS = Number(process.env.MSLXDFF_BENCH_DELAY_MS || 120) || 0;
 
-// 从 providerConfigs 收集探针目标：local-only(workbuddy)/quota-pool(opencode) 排除，无 baseUrl 跳过
+// 从 providerConfigs 收集探针目标：local-only(workbuddy/cline系)/quota-pool(opencode) 排除，无 baseUrl 跳过
 export function probeTargetsFromState({ loadProviderConfigs, loadProviderKeys, loadProviderBaseUrl } = {}) {
   const out = [];
   const ids = new Set(Object.keys(loadProviderConfigs?.() || {}));

@@ -61,14 +61,19 @@ function withGateway({ upstream, peers, groups, model, stream = false, headers =
 describe("use-group 开关", () => {
   let tmp;
   let origEnv;
+  let origKeysEnv;
   beforeEach(() => {
     origEnv = process.env.MSLXDFF_USE_GROUP;
+    origKeysEnv = process.env.MSLXDFF_USE_GROUP_KEYS;
     delete process.env.MSLXDFF_USE_GROUP;
+    delete process.env.MSLXDFF_USE_GROUP_KEYS;
     tmp = tmpState();
   });
   afterEach(() => {
     if (origEnv === undefined) delete process.env.MSLXDFF_USE_GROUP;
     else process.env.MSLXDFF_USE_GROUP = origEnv;
+    if (origKeysEnv === undefined) delete process.env.MSLXDFF_USE_GROUP_KEYS;
+    else process.env.MSLXDFF_USE_GROUP_KEYS = origKeysEnv;
     try { rmSync(tmp.dir, { recursive: true, force: true }); } catch {}
     delete process.env.MSLXDFF_STATE_FILE;
     // reset to default true
@@ -92,7 +97,7 @@ describe("use-group 开关", () => {
     // We can instead test shouldUseGroupForModel directly and the serial-trial gating via integration with real peers mock
     const { shouldUseGroupForModel } = await import("../src/state/schemas/use-group.js");
     assert.equal(shouldUseGroupForModel("muse-spark-1.3-contributor-free", { file: tmp.file }), true);
-    assert.equal(shouldUseGroupForModel("opencode/muse-spark-1.3-contributor-free", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("opencode/big-pickle", { file: tmp.file }), true);
   });
 
   it("off 时所有供应商都不走 peer（全局开关）", async () => {
@@ -154,16 +159,14 @@ describe("use-group 开关", () => {
   it("workbuddy 硬禁组员（ADR-0015 local-only）：全局 on 也只走本机", async () => {
     saveUseGroup(true, { file: tmp.file });
     const { shouldUseGroupForModel, isHardLocalOnly } = await import("../src/state/schemas/use-group.js");
-    // canonical 与 dash 两种形态都禁
+    // canonical 与 dash 两种形态都禁（dash 经别名表还原取 head）
     assert.equal(shouldUseGroupForModel("workbuddy/hy3", { file: tmp.file }), false);
-    assert.equal(shouldUseGroupForModel("workbuddy-glm-5.3-flash", { file: tmp.file }), false);
     assert.equal(shouldUseGroupForModel("WORKBUDDY/HY3", { file: tmp.file }), false);
     assert.equal(isHardLocalOnly("workbuddy/hy3"), true);
-    assert.equal(isHardLocalOnly("workbuddy-glm-5.3-flash"), true);
-    // 其他供应商不受影响
+    // 其他供应商：opencode 沿用全局开关（true），key 供应商默认直连（ADR-0023）
     assert.equal(shouldUseGroupForModel("muse-spark-1.3-contributor-free", { file: tmp.file }), true);
     assert.equal(shouldUseGroupForModel("opencode/big-pickle", { file: tmp.file }), true);
-    assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), false);
     assert.equal(isHardLocalOnly("bai/glm-5.3-flash"), false);
     assert.equal(isHardLocalOnly("big-pickle"), false);
   });
@@ -186,5 +189,52 @@ describe("use-group 开关", () => {
     const r = await withGateway({ upstream, peers, groups, model: "workbuddy/hy3" });
     assert.ok(r.status === 500 || r.status === 502, `expected 500/502 got ${r.status} ${r.text}`);
     assert.equal(peerAttempted, false, "workbuddy 不应尝试 peer（硬禁组员）");
+  });
+
+  it("key 供应商默认直连（ADR-0023）：bai/ocgo 全局 on 也不走 peer", async () => {
+    saveUseGroup(true, { file: tmp.file });
+    const { shouldUseGroupForModel, isKeyProviderDirectOnly, providerHeadOf } = await import("../src/state/schemas/use-group.js");
+    assert.equal(providerHeadOf("bai/glm-5.3-flash"), "bai");
+    assert.equal(providerHeadOf("ocgo/mimo-v2.5"), "ocgo");
+    assert.equal(providerHeadOf("oc/big-pickle"), "opencode");
+    assert.equal(isKeyProviderDirectOnly("bai/glm-5.3-flash"), true);
+    assert.equal(isKeyProviderDirectOnly("ocgo/mimo-v2.5"), true);
+    assert.equal(isKeyProviderDirectOnly("big-pickle"), false);
+    assert.equal(isKeyProviderDirectOnly("opencode/big-pickle"), false);
+    assert.equal(isKeyProviderDirectOnly("oc/big-pickle"), false);
+    assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("ocgo/mimo-v2.5", { file: tmp.file }), false);
+    // opencode 仍沿用全局开关
+    assert.equal(shouldUseGroupForModel("big-pickle", { file: tmp.file }), true);
+  });
+
+  it("key 供应商上游 500 且全局 on 时不走 peer（仅本机直连）", async () => {
+    saveUseGroup(true, { file: tmp.file });
+    const upstream = {
+      chat: async () => new Response(JSON.stringify({ error: "upstream down" }), { status: 500, headers: { "content-type": "application/json" } }),
+    };
+    let peerAttempted = false;
+    const peers = {
+      ordered: () => {
+        peerAttempted = true;
+        return [{ url: "http://peer1" }];
+      },
+      orderedByLastError: () => [],
+      recordResult: async () => {},
+    };
+    const groups = { get: () => null };
+    const r = await withGateway({ upstream, peers, groups, model: "bai/glm-5.3-flash" });
+    assert.ok(r.status === 500 || r.status === 502, `expected 500/502 got ${r.status} ${r.text}`);
+    assert.equal(peerAttempted, false, "key 供应商默认不应尝试 peer");
+  });
+
+  it("MSLXDFF_USE_GROUP_KEYS=1 可把 key 供应商开回组员（cline 系仍硬禁）", async () => {
+    saveUseGroup(true, { file: tmp.file });
+    process.env.MSLXDFF_USE_GROUP_KEYS = "1";
+    const { shouldUseGroupForModel } = await import("../src/state/schemas/use-group.js");
+    assert.equal(shouldUseGroupForModel("bai/glm-5.3-flash", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("ocgo/mimo-v2.5", { file: tmp.file }), true);
+    assert.equal(shouldUseGroupForModel("clinebot/z-ai/glm-5.3-flash", { file: tmp.file }), false);
+    assert.equal(shouldUseGroupForModel("workbuddy/hy3", { file: tmp.file }), false);
   });
 });

@@ -10,7 +10,7 @@ export const SHARE_KEYS_HEADER = "x-mslxdff-share-keys";
 const NEVER_SHARE_IDS = new Set(["cline", "clinebot"]);
 
 // 本节点应 cast key 到出站转发的供应商 id 集合 = 所有「本机有 key」的供应商，
-// 减去：opencode（无 key 且恒排除）、local-only（workbuddy，本就不走组员）、刷新型凭据。
+// 减去：opencode（无 key 且恒排除）、local-only（workbuddy/cline系，本就不走组员）、刷新型凭据。
 export function shareableProviderIds({ file } = {}) {
   const ids = [];
   for (const id of listProviderIdsWithKeys({ file })) {
