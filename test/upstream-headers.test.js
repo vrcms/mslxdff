@@ -115,11 +115,14 @@ test("id 12 位 hex 前缀与 opencode Identifier 同构（timestamp*4096+counte
     const after=Date.now();
     const value=BigInt("0x"+seen["x-opencode-session"].slice(4,16));
     const MASK=(1n<<48n)-1n;
-    const ok=[before,after].some((t)=>{
+    // 基点按毫秒枚举 before-1..after：id 生成若跨 1ms 边界（首跑冷启动 ~40ms 常见），
+    // 只对 before/after 两点验会误判 diff=4097（实现 opencodeIdTail 无错，窗口算法此前的漏判）
+    let ok=false;
+    for(let t=before-1;t<=after && !ok;t++){
       const base=BigInt(t)*0x1000n&MASK;
       const diff=value>=base?value-base:value+(1n<<48n)-base;
-      return diff<4096n;
-    });
+      ok=diff<4096n;
+    }
     assert.ok(ok,"12 位 hex 必须可解出 timestamp*4096+counter");
   } finally{ await closeSrv(srv); }
 });

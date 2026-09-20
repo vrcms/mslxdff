@@ -4,7 +4,7 @@
 // latency-compare：key/token 类，direct vs link+remote 比延迟
 export function classifyProvider(id) {
   const s = String(id || "").trim().toLowerCase();
-  if (s === "workbuddy" || s === "cline") return "local-only";
+  if (s === "workbuddy" || s === "cline" || s === "codearts") return "local-only";
   if (s === "opencode") return "quota-pool";
   return "latency-compare";
 }

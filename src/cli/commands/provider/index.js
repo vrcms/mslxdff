@@ -41,6 +41,7 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx gpt-4  add with allowlist");
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models --chat-path /v1/chat/completions");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
+    console.error("            mslxdff -provider codearts login          华为云 CodeArts PKCE 授权（浏览器登录 → 凭证 blob 落盘，ADR-0027）");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
@@ -67,6 +68,8 @@ export async function handleProvider(args) {
   if (await handleClineLogin(id, sub)) return true;
   const { handleWorkbuddyLogin } = await import("./workbuddy-login.js");
   if (await handleWorkbuddyLogin(id, sub, rest)) return true;
+  const { handleCodeartsLogin } = await import("./codearts-login.js");
+  if (await handleCodeartsLogin(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");

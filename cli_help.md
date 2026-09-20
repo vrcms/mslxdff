@@ -70,6 +70,7 @@
 | `mslxdff -provider cline free [--json]` | `--provider` | **只读**：直查上游免费模型目录（`GET /api/v1/ai/cline/recommended-models` 的 `free` 数组，当前 5 个）并列出与当前 `allowlist` 的差异，不写任何 state；`--json` 输出 JSON 供脚本 | 否 | 否 |
 | `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删 | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
+| `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -695,6 +696,25 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -restart                            # 重启后只剩一个 cline 实例
   ```
 
+#### `mslxdff -provider codearts login` / `-provider codearts models [--json]`（华为云 CodeArts Agent 盘古助手免费福利模型）
+
+- **语法**：
+  ```bash
+  mslxdff -provider codearts login              # 浏览器 PKCE 授权 → 凭证 blob 落盘
+  mslxdff -provider codearts login --no-allow-any  # 接入后保持 allowAny OFF（默认 ON）
+  mslxdff -provider codearts models [--json]    # 三路发现列模型（benefit 自动 claim）
+  ```
+- **作用**：华为云 CodeArts Agent（盘古助手）免费福利模型接入。`login` 走 PKCE 浏览器授权（本地回调 server 收 code + ticket 轮询双通道），成功后把 `refreshToken/codeVerifier/dpopJwk/AK/SK/securityToken` 组成**一账号一 blob JSON** 落盘 `providerConfigs.codearts.keys`（多账号重复 login 追加 = keyring 轮转；默认 `allowAnyModels=true`，`--no-allow-any` 关）。此后对话走 `codearts/<modelId>` 前缀：恒 `stream:true` 直连上游 v2 SSE（`text` 全文快照→流式 delta / 非流式聚合 `chat.completion`）；SDK-HMAC-SHA256 签名 + DPoP ES256；STS 临时凭证临期（提前 30min）单飞刷新、refresh_token 单次轮换**原位写回**（`invalid_grant` 终态死号 → 提示重跑 login）；HTTP 200 内嵌错误码映射 429/400/502。
+- **恒 local-only（硬约束）**：不经组员转发/via-route、不借出 key（refreshToken+DPoP 绑定型凭据，外借 = 对端刷新轮换互踢下线，同 cline；ADR-0015/0019/0027）。
+- **示例**：
+  ```bash
+  mslxdff -provider codearts login
+  mslxdff -provider codearts models             # 三路发现：builtin 归一 + 代理型 + 福利网关
+  curl http://127.0.0.1:8989/v1/chat/completions -H "Authorization: Bearer <token>" \
+    -d '{"model":"codearts/glm-5.3-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
+  mslxdff -provider codearts login              # 再跑一次 = 追加第二个华为账号
+  ```
+
 #### `mslxdff -provider <id> set-url <baseUrl>` / `set-models-path` / `set-chat-path`（改供应商端点）
 
 - **语法**：
@@ -1267,6 +1287,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_DEBUG` | — | `1` 时前台打印详细事件与 free-anon 日志 |
 | `MSLXDFF_LOGS_SYNC` | — | `1` 时日志同步写 |
 | `MSLXDFF_AUTO_UPDATE` / `MSLXDFF_AUTO_UPDATE_MS` | 默认每小时 | 自动更新：`0/off/false` 关闭，`1/true/on` 每小时，数值则为毫秒间隔 |
+| `MSLXDFF_CODEARTS_TIMEOUT_MS` / `_COOLDOWN_MS` | `30000 / 30000` | codearts 上游请求超时 / key 冷却（多账号轮转间隔） |
+| `MSLXDFF_CODEARTS_REFRESH_SKEW_MS` | `1800000` | STS 临时凭证提前刷新窗口（默认提前 30min） |
+| `MSLXDFF_CODEARTS_AUTO_CLAIM` | `1` | 福利模型自动领取（`benefit claim`，幂等；`0` 关） |
+| `MSLXDFF_CODEARTS_BASE_URL` | — | codearts 上游地址覆盖（state `providerConfigs.codearts.baseUrl` 优先） |
 
 > 注：`-port`/`-provider` 等 CLI 写入的 state 优先级高于同名 env（如 `MSLXDFF_PORT`），但 `MSLXDFF_<ID>_KEY` 单值 env 优先于 state 的多 key（便于容器/CI 临时覆盖）。
 
