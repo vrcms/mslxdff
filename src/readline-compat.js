@@ -1,8 +1,9 @@
-// readline 兼容层：`node:readline/promises` 需要 Node 17+，老 Node（如 VPS 的 16）
-// 会 `ERR_UNKNOWN_BUILTIN_MODULE` 直接崩在 import 期，连人话报错都来不及打。
-// 这里只用回调版 `node:readline`（Node 12+ 全有），把 `question` 包成 Promise；
-// `prompt()/close()/for await` 回调版原生即有，对我们用到的部分行为一致。
+// readline 统一走回调版 `node:readline`（question 包成 Promise），
+// 顺带给 -chat 一个人话版本门（项目要求 Node >=18，ADR-0024）。
+// 保留理由：回调版在 18+ 行为一致且无 import 期风险（`node:readline/promises`
+// 若被误用于旧运行时会直接 ERR_UNKNOWN_BUILTIN_MODULE，连报错都来不及打）。
 import readline from "node:readline";
+import { MIN_NODE_MAJOR, nodeMajor } from "./compat.js";
 
 export function createInterface(opts) {
   const rl = readline.createInterface(opts);
@@ -11,13 +12,11 @@ export function createInterface(opts) {
   return rl;
 }
 
-export function nodeMajor() {
-  return Number(String(process.versions?.node || "0").split(".")[0]) || 0;
-}
+export { nodeMajor };
 
-// -chat 依赖 fetch（<18 由 src/compat.js 用 undici polyfill），低于 engines 下限
-// 直接给一句人话。返回 true=通过，false=已打印升级指引。
-export function assertChatNode({ min = 16 } = {}) {
+// -chat 版本门：项目要求 Node >=18（ADR-0024），不满足直接给人话 + 升级指引。
+// 返回 true=通过，false=已打印升级指引。
+export function assertChatNode({ min = MIN_NODE_MAJOR } = {}) {
   const major = nodeMajor();
   if (major >= min) return true;
   console.error(`Node 版本过旧（当前 v${process.versions.node}），-chat 需要 Node ${min}+（推荐 20+）。`);

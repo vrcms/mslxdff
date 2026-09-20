@@ -9,8 +9,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { compatFetch } from "./src/compat.js";
+import { resolveAuthDir, listAccountDocs } from "./src/providers/workbuddy/account-store.js";
 
-const AUTH_DIR = process.env.WORKBUDDY_AUTH_DIR || path.join(process.cwd(), "auths");
+// 写入口径唯一：跟着 state 文件（账本）走 —— 默认 ~/.config/mslxdff/auths。
+// 旧实现的 cwd 兜底会把企业长效 refreshToken 写进「你当时所在的那个目录」。见 ADR-0025/security 记录。
+const AUTH_DIR = resolveAuthDir();
 const PORT = Number(process.env.WHISTLE_PORT) || 8899;
 function findCodebuddyBin() {
   if (process.env.CODEBUDDY_BIN) {
@@ -145,13 +148,14 @@ async function main() {
   }
   await startWhistle();
   const forceMitm = process.argv.some((a) => ["--force", "--new", "--mitm", "-f"].includes(String(a).toLowerCase()));
-  // 若已有 auths 且未过期，直接刷新即可（无需 MITM）；加新号时用 --force 跳过本段直抓包
-  const existing = fs.existsSync(AUTH_DIR) ? fs.readdirSync(AUTH_DIR).filter(f => f.startsWith("workbuddy-") && f.endsWith(".json")) : [];
+  // 若已有账号文件且未过期，直接刷新即可（无需 MITM）；加新号时用 --force 跳过本段直抓包
+  const existingDocs = listAccountDocs();   // 主位置（跟 state 走）优先，旧 cwd/auths 只读兜底
+  const existing = existingDocs.map((e) => path.basename(e.file));
   if (!forceMitm) log(`[flow] 提示：追加新账号请加 --force（否则只 refresh 旧号）`);
-  if (existing.length && !forceMitm) {
+  if (existingDocs.length && !forceMitm) {
     log(`[flow] 检测到已有 ${existing.join(", ")}，尝试直接 refresh...`);
     try {
-      const j = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, existing[0]), "utf8"));
+      const j = existingDocs[0].doc;
       const at = j.auth.accessToken, rt = j.auth.refreshToken, uid = j.account.uid;
       const res = await compatFetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
         method: "POST",

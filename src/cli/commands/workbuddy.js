@@ -126,12 +126,15 @@ export async function handleWorkbuddy(args) {
     auths.splice(rmIdx,1); keys.splice(rmIdx,1);
     saveProviderConfig("workbuddy", { baseUrl: cfg.baseUrl||"https://copilot.tencent.com", keys, auths });
     if (!keep) {
+      // 旧实现只删 cwd/auths 那一份，留下的旧副本会被读取兜底"复活"账号 → 扫所有候选目录
       try {
         const { existsSync, unlinkSync } = await import("node:fs");
         const { join } = await import("node:path");
-        const dir = process.env.WORKBUDDY_AUTH_DIR || join(process.cwd(), "auths");
-        const fp = join(dir, `workbuddy-${uid}.json`);
-        if (existsSync(fp)) { unlinkSync(fp); console.log(`removed file ${fp}`); }
+        const { resolveAuthDirs } = await import("../../providers/workbuddy/account-store.js");
+        for (const dir of resolveAuthDirs()) {
+          const fp = join(dir, `workbuddy-${uid}.json`);
+          if (existsSync(fp)) { unlinkSync(fp); console.log(`removed file ${fp}`); }
+        }
       } catch {}
     }
     try { const { getBalanceCache } = await import("../../providers/workbuddy-balance.js"); getBalanceCache().delete(uid); } catch {}
@@ -155,24 +158,14 @@ async function loadWorkbuddyAccounts() {
   })).filter((it) => it.uid && it.key);
   if (items.length) return items;
   try {
-    const { readdirSync, readFileSync, existsSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { resolveAuthDir } = await import("../../providers/workbuddy/account-store.js");
-    const dir = resolveAuthDir();
-    if (existsSync(dir)) {
-      for (const f of readdirSync(dir).filter((x) => x.startsWith("workbuddy-") && x.endsWith(".json"))) {
-        try {
-          const j = JSON.parse(readFileSync(join(dir, f), "utf8"));
-          if (j?.account?.uid && j?.auth?.accessToken) {
-            const domain = j.auth.domain || "www.codebuddy.cn";
-            items.push({
-              uid: j.account.uid, domain, enterpriseId: j.account.enterpriseId || "",
-              key: j.auth.accessToken,
-              auth: { uid: j.account.uid, domain, enterpriseId: j.account.enterpriseId || "", refreshToken: j.auth.refreshToken || "" },
-            });
-          }
-        } catch {}
-      }
+    const { listAccountDocs } = await import("../../providers/workbuddy/account-store.js");
+    for (const { uid, doc } of listAccountDocs()) {
+      const domain = doc.auth.domain || "www.codebuddy.cn";
+      items.push({
+        uid, domain, enterpriseId: doc.account.enterpriseId || "",
+        key: doc.auth.accessToken,
+        auth: { uid, domain, enterpriseId: doc.account.enterpriseId || "", refreshToken: doc.auth.refreshToken || "" },
+      });
     }
   } catch {}
   return items;

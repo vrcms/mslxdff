@@ -761,7 +761,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -workbuddy list                                 # 列出账号（uid/domain/enterpriseId）
   mslxdff -workbuddy remove <uid> [--keep-file]           # 按 uid 摘除（删 keys/auths 与 auths/workbuddy-<uid>.json）
   ```
-- **存储**：`state.json providerConfigs.workbuddy={ baseUrl:"https://copilot.tencent.com", keys:["k1",...], auths:[{uid,domain,enterpriseId,refreshToken}], allowedModels:["hy3",...] }`，`auths` 与 `keys` 一一对应（多号同索引），由 `node workbuddy-token-auto.js` 自动落盘（`auths/workbuddy-<uid>.json` + `state.json`，`0600`）或 `-provider add workbuddy` 解析 JWT `uid` 自动追加。`baseUrl` 默认 `https://copilot.tencent.com`（`MSLXDFF_WORKBUDDY_BASE_URL` 可覆盖）。
+- **存储**：`state.json providerConfigs.workbuddy={ baseUrl:"https://copilot.tencent.com", keys:["k1",...], auths:[{uid,domain,enterpriseId,refreshToken}], allowedModels:["hy3",...] }`，`auths` 与 `keys` 一一对应（多号同索引），由 `node workbuddy-token-auto.js` 自动落盘（`workbuddy-<uid>.json` + `state.json`，`0600`）或 `-provider add workbuddy` 解析 JWT `uid` 自动追加。**凭据目录跟随 state 文件**（`<state 目录>/auths`，默认 `~/.config/mslxdff/auths`；旧 cwd 兜底 `./auths` 仅作只读兜底，ADR-0025）。`baseUrl` 默认 `https://copilot.tencent.com`（`MSLXDFF_WORKBUDDY_BASE_URL` 可覆盖）。
 - **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。**SDK 通道**：底层缺省改走 `@ai-sdk/openai-compatible`（官方 SDK 栈；局部 `MSLXDFF_WORKBUDDY_SDK` 或未设置时继承的全局 `MSLXDFF_UPSTREAM_ENGINE` 设 `legacy`/关闭词即回退原生 transport，不可用自动回退并告警一次，上层逻辑不变）。
 - **白名单**：同通用供应商（空=不限，非空仅名单内可用，`403 + x-mslxdff-allowlist:1` 直通，`/v1/models` 过滤）。
 - **共享**：`workbuddy` local-only（ADR-0015）恒不走组员，不参与 key 借出（ADR-0019 硬排除）；`opencode` 同理恒排除。
@@ -1167,7 +1167,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_WORKBUDDY_SDK` | 继承 `MSLXDFF_UPSTREAM_ENGINE`（缺省 sdk） | WorkBuddy SDK 通道：缺省底层走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18；不可用自动回退原生并告警一次）；设 `legacy`/关闭词回退原生 transport；未设置则继承全局 `MSLXDFF_UPSTREAM_ENGINE`（全局 `legacy` 即一键熔断）；上层轮换/刷新/reshape 全链复用 |
 | `MSLXDFF_WORKBUDDY_CHECKIN` | `1` | daemon 每日自动签到开关（`0` 关；开则每天本地时 `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 全号签到+过期 token 续期，code 10001 幂等，落盘 `workbuddyCheckin {date}` 防重复，启动时过期补签） |
 | `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` | `9` | 自动签到小时（0~23 本地时，非法回退 9） |
-| `WORKBUDDY_AUTH_DIR` | `./auths` | WorkBuddy 落盘目录（`workbuddy-*.json`，`0600`） |
+| `WORKBUDDY_AUTH_DIR` | `<state 目录>/auths`（默认 `~/.config/mslxdff/auths`） | WorkBuddy token 落盘目录（`workbuddy-*.json`，`0600`）。**跟随 state 文件走，不再用 cwd 兜底**；旧 `./auths` 降级为只读兜底（ADR-0025） |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |

@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertMinNode } from "../compat.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VERSION = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8")).version;
 
 // deep CLI entry — single inlet: run(args) — hides all command branching inside
 export async function run(args = process.argv.slice(2)) {
+  // 运行环境门（强制）：项目要求 Node >=18（ADR-0024），不满足则人话退出
+  if (!assertMinNode()) process.exit(1);
   const { handleHelp, handleUpdate, handleRefreshToken, handleShowToken, handleUninstall, handleLog, handlePlugins, handleChat, handleStatus, handleFree, handleAutostart } = await import("./commands/system.js");
   if (await handleHelp(args, VERSION)) return;
   if (await handleUpdate(args, VERSION)) return;

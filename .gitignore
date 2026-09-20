@@ -12,6 +12,10 @@ free-anon-extra.txt
 **/*key*.json
 *.mslxdff-state.json
 
+# 主 Bearer token 镜像（tokenFile() 落在 state 文件同目录；state 在项目内时会落进项目树）：绝不可入库
+token
+**/token
+
 # WorkBuddy 账号凭据目录：含明文 accessToken/refreshToken，绝不入库
 auths/
 **/auths/

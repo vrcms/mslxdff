@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.136",
+  "version": "0.1.137",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
     "docs:check": "node scripts/docs-check.js"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   },
   "files": [
     "bin/",
