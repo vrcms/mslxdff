@@ -10,7 +10,14 @@ export function createSseState() {
   return { pendingEvent: "", content: "", reason: "", finish: "", usage: null, error: null, done: false, calls: new Map() };
 }
 
-// event: → 暂存不触发；data: → 立即触发并清空暂存；空行只清暂存；: 注释；其余忽略。
+// 降级：finish_reason=tool_calls 但 calls 为空（上游偶发空 tool_calls 帧 + 零文本，
+// 真机 glm-5.3-flash 实测）→ 降 stop，否则 OpenAI 客户端判"无输出结束回合"报错。
+// 注意：有真实 tool_calls 时必须原样透传，否则工具链断裂。
+export function effectiveFinish(st) {
+  if (st?.finish === "tool_calls" && !(st?.calls?.size > 0)) return "stop";
+  return st?.finish || "stop";
+}
+
 export function scanLine(line, state) {
   const raw = String(line || "").replace(/\r?\n$/, "");
   if (raw.startsWith("event:")) { state.pendingEvent = raw.slice(6).trim(); return null; }

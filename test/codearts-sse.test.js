@@ -1,7 +1,7 @@
 // codearts SSE 解析测试：全文快照替换语义 / delta / tool_calls / [DONE] / 内嵌错误映射 / OpenAI 转换。
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData } from "../src/providers/codearts/sse.js";
+import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish } from "../src/providers/codearts/sse.js";
 import { sseToOpenAIResponse, aggregateToCompletion, preflightResponse, newChatId } from "../src/providers/codearts/stream.js";
 
 function feed(lines) {
@@ -144,5 +144,18 @@ describe("codearts sse 解析", () => {
     assert.equal(newChatId({ conversation_id: "sess-abc" }, { sessionId: "s" }), newChatId({ conversation_id: "sess-abc" }, { sessionId: "s" }));
     assert.match(newChatId({}), /^[0-9a-f]{32}$/);
     assert.match(newChatId({ chat_id: "not-hex!" }), /^[0-9a-f]{32}$/);
+  });
+  test("空 tool_calls 降级：finish=tool_calls 但无 calls 无文本 → stop（真机 glm-5.3-flash 空回）", async () => {
+    // 真机日志：receivedChunks=2/bytes=194/chars=0/finish=tool_calls → 客户端"无输出结束回合"
+    const resp = sseResponse([
+      "{\"id\":1,\"model\":\"glm-5.3-flash\",\"type\":\"answer\",\"chat_id\":\"c\"}",
+      "{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+      "{\"text\":\"[DONE]\",\"error_code\":\"0\"}",
+    ]);
+    const out = await aggregateToCompletion(resp, { model: "glm-5.3-flash", id: "chatcmpl-z" });
+    assert.equal(out.choices[0].finish_reason, "stop");
+    // 有真实 calls 时必须原样透传（工具链不断）
+    const st = feed(["data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"f\"}}]}}]}", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"]);
+    assert.equal(effectiveFinish(st), "tool_calls");
   });
 });

@@ -1,6 +1,6 @@
 // 非流式聚合、chat_id 派生。解析纯函数见 ./sse.js。
 import crypto from "node:crypto";
-import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, UpstreamEventError } from "./sse.js";
+import { createSseState, scanLine, applyEvent, sortedToolCalls, embeddedErrorFromData, effectiveFinish, UpstreamEventError } from "./sse.js";
 
 // chat.js 从这里拿错误类（保持单一导入面）。
 export { UpstreamEventError };
@@ -87,7 +87,7 @@ export function sseToOpenAIResponse(resp, { model, id }) {
   const stream = new ReadableStream({
     async pull(controller) {
       const emit = (text) => controller.enqueue(enc.encode(text));
-      const finishChunk = () => { if (!finishSent) { emit(chunkLine(id, model, {}, state.finish || "stop")); finishSent = true; } };
+      const finishChunk = () => { if (!finishSent) { emit(chunkLine(id, model, {}, effectiveFinish(state))); finishSent = true; } };
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -176,7 +176,7 @@ export async function aggregateToCompletion(resp, { model, id }) {
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message, finish_reason: state.finish || "stop", logprobs: null }],
+    choices: [{ index: 0, message, finish_reason: effectiveFinish(state), logprobs: null }],
     usage,
   };
 }
