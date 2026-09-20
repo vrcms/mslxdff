@@ -1,4 +1,4 @@
-import { loadUseGroup, saveUseGroup, getEffectiveUseGroup, getUseGroupEnv } from "../../state/schemas/use-group.js";
+import { loadUseGroup, saveUseGroup, getEffectiveUseGroup, getUseGroupEnv, getUseGroupKeysEnv } from "../../state/schemas/use-group.js";
 import { argValue } from "../policy.js";
 
 function parseInput(v) {
@@ -26,15 +26,18 @@ export async function handleUseGroup(args) {
   const envVal = getUseGroupEnv();
   const effective = getEffectiveUseGroup();
   const stored = loadUseGroup();
+  const keysEnv = getUseGroupKeysEnv();
 
   if (raw === null || raw === undefined || raw === "") {
     // 查询模式
-    console.log(`use-group: ${effective ? "on" : "off"} (effective)`);
+    console.log(`use-group: ${effective ? "on" : "off"} (effective, 仅 opencode 免费池)`);
     console.log(`  stored: ${stored ? "on" : "off"} (state.json useGroup)`);
     if (envVal !== null) console.log(`  env MSLXDFF_USE_GROUP=${envVal ? "on" : "off"} (overrides stored)`);
+    console.log(`  keys: ${keysEnv ? "on" : "off"} (env MSLXDFF_USE_GROUP_KEYS, 默认 off: 带 key 上游恒直连)`);
     console.log(`  default: on`);
-    console.log(`  usage: mslxdff -use-group on|off  (本机失败时是否走组员网络，默认 on)`);
+    console.log(`  usage: mslxdff -use-group on|off  (opencode 失败时是否走组员网络，默认 on)`);
     console.log(`  env:   MSLXDFF_USE_GROUP=0|1  (优先级高于 state)`);
+    console.log(`  env:   MSLXDFF_USE_GROUP_KEYS=1  (把 key 供应商开回组员，cline/workbuddy 仍硬禁)`);
     process.exit(0);
   }
 
@@ -50,7 +53,8 @@ export async function handleUseGroup(args) {
 
   saveUseGroup(parsed);
   console.log(`use-group set to ${parsed ? "on" : "off"} (stored in state.json)`);
-  console.log(`  ${parsed ? "允许" : "不再允许"}走组员网络（via-route/hedge/peer/broadband，全部供应商）`);
+  console.log(`  ${parsed ? "允许 opencode" : "opencode 也不再"}走组员网络（via-route/hedge/peer/broadband）`);
+  console.log(`  带 key 上游默认恒直连（不受本开关影响，MSLXDFF_USE_GROUP_KEYS=1 可开回，cline/workbuddy 仍硬禁）`);
   if (!parsed) console.log(`  提示：所有请求将仅在本机重试，不再走组员中继`);
   process.exit(0);
 }

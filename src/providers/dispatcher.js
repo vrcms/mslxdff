@@ -50,7 +50,7 @@ export function createProviderDispatcher(providers = [], opts = {}) {
     // ADR-0008：本请求携带瞬时共享 key（shareKeys 由组员侧按 header 解析后传入）。
     const sharedKeys = opts?.shareKeys?.[provider.id];
     if (sharedKeys && sharedKeys.length && typeof provider.chatWithKeys === "function") {
-      return provider.chatWithKeys(forwarded, sharedKeys);
+      return provider.chatWithKeys(forwarded, sharedKeys, opts);
     }
     if (provider.id === "workbuddy" && workbuddyUid) {
       return provider.chat(forwarded, { ...opts, workbuddyUid });

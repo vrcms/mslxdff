@@ -100,7 +100,7 @@
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |
 | `mslxdff -resetban [ip]` | `--resetban` | 清除加群失败封禁（全清或按 ip） | 是（`bans`） | 否 |
-| `mslxdff -use-group [on\|off]` | `--use-group` | 本机失败时是否走组员网络（默认 on；`off` 则所有供应商仅本机，不走 via-route/hedge/peer/broadband 组员中继；`MSLXDFF_USE_GROUP` 环境变量可覆盖；`workbuddy` 恒禁组员仅本机直连，不受开关影响） | 是（`useGroup`） | 热重载（下次请求生效） |
+| `mslxdff -use-group [on\|off]` | `--use-group` | opencode 失败时是否走组员网络（默认 on；`off` 则所有供应商仅本机，不走 via-route/hedge/peer/broadband 组员中继；带 key 上游默认恒直连（ADR-0023，仅 opencode 走组员；`MSLXDFF_USE_GROUP_KEYS=1` 可开回，cline/workbuddy 仍硬禁）；`MSLXDFF_USE_GROUP` 环境变量可覆盖） | 是（`useGroup`） | 热重载（下次请求生效） |
 | `mslxdff -chat ["prompt"]` | `--chat` | 对话终端：`mimo-v2.5-free → big-pickle → 本地网关 auto:8989` 三级兜底（前两者直连 `https://opencode.ai/zen/v1/chat/completions`，失败自动切本地 `http://127.0.0.1:8989/v1/chat/completions` 的 `auto` 择优，含多供应商/hedge/peer），模糊匹配由模型完成，历史持久化超长压缩，仅拦 -uninstall，daemon 重启不影响 | 是（`chat-history.json`） | 否（独立进程） |
 | `mslxdff -help` | `--help`, `-h` | 打印帮助 | 否 | 否 |
 
@@ -1077,10 +1077,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 ### `-use-group [on|off]` / `--use-group [on|off]`
 
 - **语法**：`mslxdff -use-group`（查询）或 `mslxdff -use-group on|off`（设置）/ `--use-group=off`
-- **作用**：控制本机上游失败时是否走组员网络（via-route/peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**所有供应商**在本机失败时都不再尝试组员，仅本机直连。**例外**：`workbuddy` 恒禁组员（ADR-0015 local-only：本机账号绑定，组员无该账号转过去也用不了，且本地直连最快）——无论开关一律仅本机直连。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
+- **作用**：控制 opencode 免费池失败时是否走组员网络（via-route/peer/broadband/hedge）。默认 `on`（允许组员中继，分散限流）；设 `off` 后，**所有供应商**都不再尝试组员，仅本机直连。**带 key 上游默认恒直连**（ADR-0023：bai/sensenova/aihubmix/ocgo/internapi/tokenrouter 等失败直接返回上游错误，不走 peer 竞速——peer 嵌套 502 反压曾把可直连成功的请求拖成整单 502；`MSLXDFF_USE_GROUP_KEYS=1` 可开回组员）。**硬禁**：`workbuddy`/cline 系（local-only：本机账号绑定，组员无该账号转过去也用不了）——无论开关一律仅本机直连。状态持久化到 `state.json: useGroup`（`true/false`），热重载（下次请求即生效，无需重启）。环境变量 `MSLXDFF_USE_GROUP=0|1` 可临时覆盖（优先级高于 state）。
 - **输出**：
-  - 查询：`use-group: on (effective) / stored: on / env ...`
-  - 设置：`use-group set to off (stored in state.json) / 不再允许走组员网络请求上游`
+  - 查询：`use-group: on (effective, 仅 opencode 免费池) / stored: on / keys: off / env ...`
+  - 设置：`use-group set to off (stored in state.json) / opencode 也不再走组员网络 / 带 key 上游默认恒直连 ...`
 - **示例**：
   ```bash
   mslxdff -use-group          # 查询当前
@@ -1191,7 +1191,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_PEER_CONNECT_TIMEOUT_MS` | `3000` | 组员转发连接级超时（DNS+TCP/TLS 握手）；黑洞节点快速失败，不再占用 30s 响应超时 |
 | `MSLXDFF_BAN_WINDOW_MS` | `172800000` (48h) | 加群失败封禁窗口 |
 | `MSLXDFF_BAN_THRESHOLD` | `5` | 封禁阈值（窗口内失败次数） |
-| `MSLXDFF_USE_GROUP` | `1` (on) | 组员中继总开关（`0/off` 关闭后所有供应商仅本机，不走 via-route/hedge/peer/broadband；可被 `-use-group` state 覆盖，env 优先级更高） |
+| `MSLXDFF_USE_GROUP` | `1` (on) | 组员中继总开关（`0/off` 关闭后所有供应商仅本机；on 时也仅 opencode 走组员，key 供应商默认直连） |
+| `MSLXDFF_USE_GROUP_KEYS` | `0` (off) | key 供应商组员开关（ADR-0023：`1` 则 key 供应商失败也可走组员；cline/workbuddy 仍硬禁；受 `MSLXDFF_USE_GROUP`/off 约束） |
 | `MSLXDFF_HEDGE_DELAY_MS` | `1000` | 首块对冲等待（`0/off` 关闭，显式锁模型按 `via-routes.json` 单路径择路，不经 hedge） |
 | `MSLXDFF_VIA_ROUTES_FILE` | `~/.config/mslxdff/via-routes.json` | via-routes 落盘路径（随 `MSLXDFF_STATE_FILE` 派生） |
 | `MSLXDFF_VIA_ROUTE_TTL_MS` | `0` | via-routes 条目 TTL（`0`=不过期，手动 `bench --via --apply` 重跑即更新） |

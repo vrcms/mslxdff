@@ -117,8 +117,22 @@ export function createCapabilitiesService({
   function providers() {
     return [...capsIndex.keys()].sort();
   }
-
-  return { ready, get, list, providers, npmIndex: () => new Map(npmIndex) };
+  // readyWarm：仅用内存/磁盘缓存热身，绝不网络请求。/models 富化用它避免冷启动阻塞；
+  // 冷缓存时后台拉新（不 await），下次请求即富化。
+  async function readyWarm() {
+    const t = now();
+    if (raw && t - loadedAt < ttl) return true;
+    const disk = readCache();
+    if (disk) {
+      raw = disk;
+      capsIndex = buildIndex(disk);
+      loadedAt = t;
+      return true;
+    }
+    ready().catch(() => {}); // 后台拉新，失败静默（/models 原样降级）
+    return false;
+  }
+  return { ready, readyWarm, get, list, providers, npmIndex: () => new Map(npmIndex) };
 }
 
 // 模块级单例：HTTP handler 懒加载，测试 _reset 后注入
@@ -128,7 +142,6 @@ export function globalCapabilities() {
   return _global;
 }
 export function _resetGlobalCapabilities() { _global = null; }
-
 // 缓存落盘位置：MSLXDFF_MODELS_DEV_CACHE 覆盖 > ~/.config/mslxdff/models-dev.json（与 state 同目录）
 function defaultCacheFile() {
   const override = process.env.MSLXDFF_MODELS_DEV_CACHE;
