@@ -7,6 +7,7 @@ import http from "node:http";
 import { SNAP_BASE, STS_HOST, PORTAL_HOST, SNAP_MANAGER_PATH, EP_LOGIN_TICKET, CLIENT_ID, PLUGIN_NAME, PLUGIN_VERSION } from "./const.js";
 import { exchangeAuthorizationCode, normalizeTokenResponse } from "./sts.js";
 import { newDpopPrivateJwk } from "./dpop.js";
+import { signRequest } from "./sign.js";
 import { compatFetch } from "../../compat.js";
 
 const hex = (n) => crypto.randomBytes(n).toString("hex");
@@ -85,6 +86,42 @@ export async function pollTicket({ state, snapBase = SNAP_BASE, fetchImpl, timeo
 }
 
 /**
+ * 身份回填：生产 exchange 响应 user_id 常为空（portal 只回 code），空身份会让
+ * 登录去重把不同账号当同一账号替换。对齐 codearts2api lookupIdentity（先 STS
+ * caller-identity，再 snap current/user，最后 refresh_token JWT sub 兜底）。
+ * @returns {{userId, userName, domainId}|null}
+ */
+export async function lookupIdentity({ account, stsHost = STS_HOST, snapBase = SNAP_BASE, fetchImpl, log = () => {} } = {}) {
+  const doFetch = fetchImpl || compatFetch;
+  const cred = { accessKeyId: account?.accessKeyId, secretAccessKey: account?.secretAccessKey, securityToken: account?.securityToken };
+  async function signedGet(url) {
+    const { headers } = signRequest({ method: "GET", url, headers: { "content-type": "application/json", "x-language": "zh-cn" }, body: "", cred });
+    const res = await doFetch(url, { method: "GET", headers });
+    const raw = await res.text().catch(() => "");
+    if (res.status >= 400) throw new Error(`identity http ${res.status}: ${String(raw).slice(0, 120)}`);
+    return JSON.parse(raw);
+  }
+  // 1) STS caller-identity：{account_id, principal_id, principal_urn}（name 取 urn ":user:" 尾段）
+  try {
+    const j = await signedGet(`${stsHost}/v5/caller-identity`);
+    const urn = String(j.principal_urn || "");
+    const tail = urn.includes(":user:") ? urn.slice(urn.lastIndexOf(":user:") + 6) : "";
+    if (j.principal_id || tail) return { userId: String(j.principal_id || ""), userName: tail, domainId: String(j.account_id || "") };
+  } catch (err) { log(`身份查询（caller-identity）失败，换备用接口：${String(err?.message || err).slice(0, 120)}`); }
+  // 2) snap current/user：{user_id, user_name, domain_id}
+  try {
+    const j = await signedGet(`${snapBase}/v1/current/user`);
+    if (j.user_id || j.user_name) return { userId: String(j.user_id || ""), userName: String(j.user_name || ""), domainId: String(j.domain_id || "") };
+  } catch (err) { log(`身份查询（current/user）失败：${String(err?.message || err).slice(0, 120)}`); }
+  // 3) refresh_token JWT sub 兜底
+  try {
+    const payload = JSON.parse(Buffer.from(String(account?.refreshToken || "").split(".")[1] || "", "base64url").toString("utf8"));
+    if (payload?.sub) return { userId: String(payload.sub), userName: "", domainId: "" };
+  } catch {}
+  return null;
+}
+
+/**
  * 跑完整登录流程。
  * @param {object} [opts] { clientId, snapBase, stsHost, fetchImpl, timeoutMs, log, openBrowser }
  * @returns {{account, redirectUri}} 成功返回账号（含 refreshToken/AK/SK/dpopJwk 等）
@@ -126,6 +163,17 @@ export async function runCodeartsLogin({
           fetchImpl,
           stsHost,
         });
+        // portal 回调只回 code 不带身份（生产 exchange 响应 user_id 常为空）：
+        // 空身份会导致登录去重把不同账号当同一账号替换，必须落盘前补调身份接口
+        if (!account.userId || !account.userName) {
+          log("正在查询账号身份…");
+          const id = await lookupIdentity({ account, fetchImpl, log }).catch(() => null);
+          if (id) {
+            if (id.userId) account.userId = id.userId;
+            if (id.userName) account.userName = id.userName;
+            if (id.domainId) account.domainId = id.domainId;
+          }
+        }
         ticketAbort.abort(); // 回调已赢，停掉后台 ticket 轮询
         return { account, state, redirectUri };
       }

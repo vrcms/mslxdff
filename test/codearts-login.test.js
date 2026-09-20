@@ -75,5 +75,58 @@ describe("codearts login 双通道", () => {
     } finally {
       await srv.close();
     }
+  });
+
+  test("exchange 无身份时 lookupIdentity 补调 caller-identity（空身份回归）", async () => {
+    const srv = await stub();
+    const { lookupIdentity } = await import("../src/providers/codearts/login.js");
+    try {
+      srv.set((req, res) => {
+        if (req.method === "GET" && req.url === "/v5/caller-identity") {
+          assert.ok(req.headers.authorization?.startsWith("SDK-HMAC-SHA256"), "身份接口走 AK/SK 签名");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ account_id: "d9", principal_id: "u9", principal_urn: "iam::domain:d9:user:zhangsan" }));
+          return;
+        }
+        res.writeHead(404); res.end("{}");
+      });
+      const id = await lookupIdentity({
+        account: { accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST", refreshToken: "rt" },
+        stsHost: srv.url, snapBase: srv.url,
+      });
+      assert.deepEqual(id, { userId: "u9", userName: "zhangsan", domainId: "d9" });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  test("caller-identity 失败时回退 current/user，再失败用 refresh JWT sub 兜底", async () => {
+    const srv = await stub();
+    const { lookupIdentity } = await import("../src/providers/codearts/login.js");
+    try {
+      srv.set((req, res) => {
+        if (req.method === "GET" && req.url === "/v1/current/user") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ user_id: "u8", user_name: "lisi", domain_id: "d8" }));
+          return;
+        }
+        res.writeHead(500); res.end("{}"); // caller-identity 挂掉
+      });
+      const id = await lookupIdentity({
+        account: { accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST", refreshToken: "rt" },
+        stsHost: srv.url, snapBase: srv.url, log: () => {},
+      });
+      assert.deepEqual(id, { userId: "u8", userName: "lisi", domainId: "d8" });
+      // 两接口全挂 → JWT sub 兜底
+      srv.set((req, res) => { res.writeHead(500); res.end("{}"); });
+      const jwt = `e.${Buffer.from(JSON.stringify({ sub: "u7" })).toString("base64url")}.s`;
+      const id2 = await lookupIdentity({
+        account: { accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST", refreshToken: jwt },
+        stsHost: srv.url, snapBase: srv.url, log: () => {},
+      });
+      assert.deepEqual(id2, { userId: "u7", userName: "", domainId: "" });
+    } finally {
+      await srv.close();
+    }
   }, 30_000);
 });
