@@ -62,11 +62,11 @@ function startCallbackServer() {
 }
 
 // 兜底通道：无浏览器机器上，任意设备完成授权后凭 ticket_id+secret 轮询拿凭证。
-export async function pollTicket({ state, snapBase = SNAP_BASE, fetchImpl, timeoutMs = 5 * 60_000, intervalMs = 2000, log = () => {} }) {
+export async function pollTicket({ state, snapBase = SNAP_BASE, fetchImpl, timeoutMs = 5 * 60_000, intervalMs = 2000, log = () => {}, signal } = {}) {
   const doFetch = fetchImpl || compatFetch;
   const url = `${snapBase}${SNAP_MANAGER_PATH}${EP_LOGIN_TICKET}?ticket_id=${encodeURIComponent(state.ticketId)}&secret=${encodeURIComponent(state.secret)}`;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal?.aborted) {
     try {
       const res = await doFetch(url, { headers: { "plugin-name": PLUGIN_NAME, "plugin-version": PLUGIN_VERSION } });
       const raw = await res.text().catch(() => "");
@@ -75,7 +75,10 @@ export async function pollTicket({ state, snapBase = SNAP_BASE, fetchImpl, timeo
         if (account) return account;
       }
     } catch { /* 未下发/网络抖动：继续轮询 */ }
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise((r) => {
+      const t = setTimeout(r, intervalMs);
+      signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+    });
     log(`等待授权下发…（ticket 轮询中，剩余 ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s）`);
   }
   return null;
@@ -103,15 +106,17 @@ export async function runCodeartsLogin({
   log("");
   log(`  ${authorizeUrl}`);
   log("");
-  log(`本机回调：${redirectUri}（双通道：浏览器回调 + ticket 轮询，任一成功即可）`);
+  log(`本机回调：${redirectUri}（回调通道优先；ticket 轮询后台兜底，谁先到用谁）`);
 
   const deadline = Date.now() + timeoutMs;
+  const ticketAbort = new AbortController();
   let ticketPromise = null;
   try {
     while (Date.now() < deadline) {
       const hit = await server.nextHit(Math.min(3000, deadline - Date.now()));
-      // 通道 1：浏览器回调带 code → 直接换 token
+      // 通道 1：浏览器回调带 code → 直接换 token（谁先到用谁；portal 带 port 参数走这路，ticket 不会下发）
       if (hit?.code) {
+        log("已收到授权码，正在换取 STS 凭证…");
         const account = await exchangeAuthorizationCode({
           code: hit.code,
           verifier: state.codeVerifier,
@@ -121,13 +126,20 @@ export async function runCodeartsLogin({
           fetchImpl,
           stsHost,
         });
+        ticketAbort.abort(); // 回调已赢，停掉后台 ticket 轮询
         return { account, state, redirectUri };
       }
-      // 通道 2：回调带 secret（portal 307 第一跳）或 3 秒无回调 → 起 ticket 轮询
+      // 授权失败（用户拒绝等）：把上游原因说人话抛出
+      if (hit?.error) throw new Error(`codearts authorize failed: ${hit.error}${hit.error_description ? ` — ${hit.error_description}` : ""}`);
+      // 通道 2：首次（portal 307 带 secret 一跳，或 3s 无回调）→ 后台起 ticket 轮询
+      // 关键：绝不 await 阻塞主循环——否则浏览器 code 回调无人消费，永远轮询（真机首登实测死锁）
       if ((hit?.secret || !hit) && !ticketPromise) {
-        ticketPromise = pollTicket({ state, snapBase, fetchImpl, timeoutMs: deadline - Date.now(), log }).catch(() => null);
-        const account = await ticketPromise;
-        if (account) return { account, state, redirectUri };
+        ticketPromise = pollTicket({ state, snapBase, fetchImpl, timeoutMs: deadline - Date.now(), log, signal: ticketAbort.signal }).catch(() => null);
+      }
+      // ticket 后台结果非阻塞查询：未决立即返回 null，主循环继续收回调
+      if (ticketPromise) {
+        const acc = await Promise.race([ticketPromise, Promise.resolve(null)]);
+        if (acc) return { account: acc, state, redirectUri };
       }
     }
   } finally {
