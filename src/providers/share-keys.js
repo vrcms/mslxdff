@@ -3,11 +3,13 @@
 import { splitModelId, DEFAULT_PROVIDER } from "./model-id.js";
 import { classifyProvider } from "./classify.js";
 import { loadProviderKeys, listProviderIdsWithKeys } from "../state.js";
+import { isRefreshToken } from "./cline/headers.js";
 
 export const SHARE_KEYS_HEADER = "x-mslxdff-share-keys";
 
 // 硬排除：refresh-token 型凭据（对端刷新会轮换 token，与本机互相踢下线）——正确性问题。
-const NEVER_SHARE_IDS = new Set(["cline", "clinebot"]);
+// 二层保护：① 按 id 硬排除（cline 恒 local-only）；② 按凭据形状兜底（见 shareableProviderIds）。
+const NEVER_SHARE_IDS = new Set(["cline"]);
 
 // 本节点应 cast key 到出站转发的供应商 id 集合 = 所有「本机有 key」的供应商，
 // 减去：opencode（无 key 且恒排除）、local-only（workbuddy/cline系，本就不走组员）、刷新型凭据。
@@ -17,6 +19,9 @@ export function shareableProviderIds({ file } = {}) {
     if (id === DEFAULT_PROVIDER) continue;
     if (NEVER_SHARE_IDS.has(id)) continue;
     try { if (classifyProvider(id) === "local-only") continue; } catch {}
+    // 形状兜底：id 白名单可能有残留（迁移未跑/回滚/手改 config），只要该供应商现有 key 里
+    // 有一个是 refreshToken 形态，就一律不外借——refreshToken 借出去会被对端刷新轮换，双向踢下线。
+    try { if (loadProviderKeys(id, { file }).some((k) => isRefreshToken(k, id))) continue; } catch {}
     ids.push(id);
   }
   return ids;

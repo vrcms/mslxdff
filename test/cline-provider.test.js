@@ -41,16 +41,16 @@ function mockFetch({ refreshOk = true, chatSse = true } = {}) {
 }
 
 test("cline: refresh token detected, legacy sk_ key not", () => {
-  const p1 = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl: async () => new Response("", { status: 404 }) });
+  const p1 = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl: async () => new Response("", { status: 404 }) });
   assert.ok(p1._authPool, "refresh token must enable auth pool");
   assert.equal(p1._authPool.getAccounts().length, 1);
-  const p2 = createClineProvider({ id: "clinebot", apiKeys: ["sk_test123"], fetchImpl: async () => new Response("", { status: 404 }) });
+  const p2 = createClineProvider({ id: "cline", apiKeys: ["sk_test123"], fetchImpl: async () => new Response("", { status: 404 }) });
   assert.equal(p2._authPool, null, "sk_ key must stay legacy direct mode");
 });
 
 test("cline: chat exchanges refresh for workos token and sends fingerprint headers", async () => {
   const { fetchImpl, calls } = mockFetch();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
   const resp = await p.chat({ model: "deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: true });
   assert.equal(resp.status, 200);
   assert.equal(calls.refresh, 1);
@@ -69,7 +69,7 @@ test("cline: non-stream deepseek forces upstream stream and aggregates", async (
     }
     return orig(url, opts);
   };
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl: wrapped });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl: wrapped });
   const resp = await p.chat({ model: "deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: false });
   assert.equal(resp.status, 200);
   assert.equal(seen[0].stream, true, "deepseek must be forced to stream=true");
@@ -79,10 +79,10 @@ test("cline: non-stream deepseek forces upstream stream and aggregates", async (
 
 test("cline: listModels only returns free array with provider prefix", async () => {
   const { fetchImpl, calls } = mockFetch();
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
   const models = await p.listModels();
   assert.equal(calls.models, 1);
-  assert.deepEqual(models.map((m) => m.id), ["clinebot/deepseek/deepseek-v4-flash", "clinebot/poolside/laguna-s-2.1:free"]);
+  assert.deepEqual(models.map((m) => m.id), ["cline/deepseek/deepseek-v4-flash", "cline/poolside/laguna-s-2.1:free"]);
 });
 
 test("cline: models 401 falls back to bundled free list incl glm-5.3-flash", async () => {
@@ -94,18 +94,18 @@ test("cline: models 401 falls back to bundled free list incl glm-5.3-flash", asy
     }
     return new Response("", { status: 404 });
   }
-  const p = createClineProvider({ id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl });
+  const p = createClineProvider({ id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl });
   const models = await p.listModels();
   assert.ok(seenUrl.endsWith("/api/v1/ai/cline/recommended-models"), `models url must be normalized, got ${seenUrl}`);
   const ids = models.map((m) => m.id);
-  assert.ok(ids.includes("clinebot/z-ai/glm-5.3-flash"), "fallback must include glm-5.3-flash");
+  assert.ok(ids.includes("cline/z-ai/glm-5.3-flash"), "fallback must include glm-5.3-flash");
 });
 
 test("cline: refresh URL not doubled when baseUrl already has /api/v1", async () => {
   const { createAuthPool } = await import("../src/providers/cline/auth.js");
   let seenUrl = "";
   const pool = createAuthPool({
-    id: "clinebot",
+    id: "cline",
     baseUrl: "https://api.cline.bot/api/v1",
     keys: [DUMMY_RT],
     fetchImpl: async (url, opts) => {
@@ -124,7 +124,7 @@ test("cline: version-hint 401 must not mark dead (only invalid_grant kills)", as
   assert.equal(isInvalidGrant(versionMsg, 401), false, "version 401 must not be invalid_grant");
   assert.equal(isInvalidGrant('{"error":"invalid_grant"}', 400), true);
   const pool = createAuthPool({
-    id: "clinebot",
+    id: "cline",
     baseUrl: "https://api.cline.bot/api/v1",
     keys: [DUMMY_RT],
     fetchImpl: async () => new Response(versionMsg, { status: 401 }),
@@ -136,7 +136,7 @@ test("cline: version-hint 401 must not mark dead (only invalid_grant kills)", as
 test("cline: invalid_grant marks account dead, transient failure does not", async () => {
   const { createAuthPool } = await import("../src/providers/cline/auth.js");
   const deadPool = createAuthPool({
-    id: "clinebot",
+    id: "cline",
     keys: [DUMMY_RT],
     fetchImpl: async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
   });
@@ -144,7 +144,7 @@ test("cline: invalid_grant marks account dead, transient failure does not", asyn
   assert.equal(deadPool.getAccounts()[0].dead, true, "invalid_grant must mark dead");
   await assert.rejects(() => deadPool.refreshOne(deadPool.getAccounts()[0]), /invalid_grant/);
   const livePool = createAuthPool({
-    id: "clinebot",
+    id: "cline",
     keys: [DUMMY_RT],
     fetchImpl: async () => new Response("boom", { status: 500 }),
   });
@@ -160,7 +160,7 @@ test("cline: 429 错误体在上层仍可读（SDK 通道 body 一次性需重�
     if (u.includes("/chat/completions")) return new Response(body429, { status: 429, headers: { "Content-Type": "application/json" } });
     return new Response("", { status: 404 });
   }
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
   const res = await p.chat({ model: "z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: true });
   assert.equal(res.status, 429);
   assert.match(await res.text(), /Daily free limit reached/, "上层必须能读到错误体");
@@ -180,22 +180,22 @@ test("cline: refresh failure cools account and retry hits next", async () => {
     }
     return new Response("", { status: 404 });
   }
-  const p = createClineProvider({ id: "clinebot", apiKeys: [DUMMY_RT], fetchImpl });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
   const resp = await p.chat({ model: "poolside/laguna-s-2.1:free", messages: [{ role: "user", content: "hi" }], stream: true });
   assert.equal(resp.status, 200);
   assert.ok(n >= 2, "must retry refresh after first failure");
 });
 
 test("cline: models fallback aligns with upstream free 5 (incl cline-free/*)", async () => {
-  const p = createClineProvider({ id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl: async () => new Response("boom", { status: 500 }) });
+  const p = createClineProvider({ id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl: async () => new Response("boom", { status: 500 }) });
   const models = await p.listModels();
   const ids = models.map((m) => m.id);
   assert.equal(ids.length, 5, "fallback must carry 5 entries");
-  assert.ok(ids.includes("clinebot/cline-free/deepseek-v4.1-flash"), "must include cline-free/deepseek-v4.1-flash");
-  assert.ok(ids.includes("clinebot/cline-free/muse-spark-1.3-contributor"), "must include cline-free/muse-spark-1.3-contributor");
-  assert.ok(ids.includes("clinebot/z-ai/glm-5.3-flash"), "must include z-ai/glm-5.3-flash");
-  assert.ok(ids.includes("clinebot/cline-free/solar-pro4"), "must include cline-free/solar-pro4");
-  assert.ok(ids.includes("clinebot/poolside/laguna-s-2.1:free"), "must include poolside/laguna-s-2.1:free");
+  assert.ok(ids.includes("cline/cline-free/deepseek-v4.1-flash"), "must include cline-free/deepseek-v4.1-flash");
+  assert.ok(ids.includes("cline/cline-free/muse-spark-1.3-contributor"), "must include cline-free/muse-spark-1.3-contributor");
+  assert.ok(ids.includes("cline/z-ai/glm-5.3-flash"), "must include z-ai/glm-5.3-flash");
+  assert.ok(ids.includes("cline/cline-free/solar-pro4"), "must include cline-free/solar-pro4");
+  assert.ok(ids.includes("cline/poolside/laguna-s-2.1:free"), "must include poolside/laguna-s-2.1:free");
   await p.close();
 });
 
@@ -207,7 +207,7 @@ test("cline: preheat creates snapshot, stays silent when unchanged, reports diff
   const origLog = console.log;
   console.log = (...a) => logs.push(a.join(" "));
   const mk = () => createClineProvider({
-    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
     fetchImpl: async () => new Response(JSON.stringify({ free: free.map((id) => ({ id })) }), { status: 200 }),
   });
   try {
@@ -243,7 +243,7 @@ test("cline: checkFreeUpdates is independently callable (startup hook, not dispa
   const dir = mkdtempSync(join(tmpdir(), "cline-free-"));
   const snap = join(dir, "snap.json");
   const p = createClineProvider({
-    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
     fetchImpl: async () => new Response(JSON.stringify({ free: [{ id: "z-ai/glm-5.3-flash" }] }), { status: 200 }),
   });
   assert.equal(typeof p.checkFreeUpdates, "function", "provider must expose checkFreeUpdates for the startup hook");
@@ -260,7 +260,7 @@ test("cline: preheat failure leaves snapshot untouched", async () => {
   const snap = join(dir, "snap.json");
   writeFileSync(snap, JSON.stringify({ free: ["z-ai/glm-5.3-flash"] }), "utf8");
   const p = createClineProvider({
-    id: "clinebot", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
+    id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], snapshotPath: snap,
     fetchImpl: async () => new Response("bad", { status: 500 }),
   });
   const r = await p.preheat();

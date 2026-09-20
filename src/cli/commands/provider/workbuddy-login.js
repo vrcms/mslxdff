@@ -1,5 +1,5 @@
 import { compatFetch, timeoutSignal } from "../../../compat.js";
-// mslxdff -provider workbuddy login — WorkBuddy 官方设备授权流（对标 clinebot login）。
+// mslxdff -provider workbuddy login — WorkBuddy 官方设备授权流（对标 cline login）。
 // 学自 Sliverkiss/workbuddy2api（cmd/login）：POST /v2/plugin/auth/state 拿 state+authUrl →
 // 浏览器登录 → GET /v2/plugin/auth/token?state= 轮询 → GET /v2/plugin/login/account?state= 拿 uid。
 // 不走 whistle/MITM，不依赖 codebuddy CLI，自然支持多账号追加。

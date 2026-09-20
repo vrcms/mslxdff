@@ -12,7 +12,7 @@ export const customProviders = [
   },
   {
     id: "cline",
-    match: (id, baseUrl) => id === "cline" || id === "clinebot" || String(baseUrl).includes("cline.bot"),
+    match: (id, baseUrl) => id === "cline" || String(baseUrl).includes("cline.bot"),
     load: () => import("./cline.js").then((m) => m.createClineProvider),
   },
 ];

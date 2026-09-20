@@ -8,7 +8,7 @@ export async function renderOtherProviders({ pickedIds, ids, fullAliases }) {
   try { _la2(); } catch {}
   const configs = loadProviderConfigs();
   const otherIds = Object.keys(configs).filter((k) => String(k).toLowerCase() !== "opencode");
-  const order2 = ["workbuddy", "clinebot", "openrouter", "bai"];
+  const order2 = ["workbuddy", "cline", "openrouter", "bai"];
   otherIds.sort((a, b) => {
     const ia = order2.indexOf(a), ib = order2.indexOf(b);
     if (ia !== -1 || ib !== -1) {

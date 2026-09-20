@@ -45,8 +45,8 @@ export function getUseGroupKeysEnv() {
   return parseBool(raw) === true;
 }
 
-// 取模型对应的供应商 head：兼容 canonical（workbuddy/xxx、clinebot/xxx）、
-// dash 别名（clinebot-xxx → 还原后取 head）、裸 id（归 opencode）。
+// 取模型对应的供应商 head：兼容 canonical（workbuddy/xxx、cline/xxx）、
+// dash 别名（cline-xxx → 还原后取 head）、裸 id（归 opencode）。
 // oc/ 别名归一到 opencode（与 splitModelId 一致：别名表小写 key，先小写再归一）。
 export function providerHeadOf(model) {
   let s = String(model || "").trim();
@@ -70,14 +70,14 @@ export function providerHeadOf(model) {
 // 全局开关：off 则所有供应商都不走组员网络（via-route/hedge/peer/broadband 全禁），仅本机直连
 // workbuddy/cline 系硬禁组员（ADR-0015 local-only）：本机账号绑定（workbuddy auths/*.json + uid / cline refreshToken），
 // 组员没有该账号转过去也用不了，且本地直连最快——无论全局开关一律仅本机直连。
-// model 兼容 canonical（workbuddy/xxx、clinebot/xxx）与 dash（workbuddy-xxx、cline-xxx）两种形态。
+// model 兼容 canonical（workbuddy/xxx、cline/xxx）与 dash（workbuddy-xxx、cline-xxx）两种形态。
 export function isHardLocalOnly(model) {
   const head = providerHeadOf(model);
   if (!head) return false;
   try {
     return classifyProvider(head) === "local-only";
   } catch {
-    return head === "workbuddy" || head === "cline" || head === "clinebot";
+    return head === "workbuddy" || head === "cline";
   }
 }
 

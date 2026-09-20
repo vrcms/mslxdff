@@ -120,7 +120,7 @@ export function createAuthPool({
     if (account.dead) throw new Error("invalid_grant");
     if (account.cooldownUntil > now) throw new Error("account_cooldown");
     if (account.accessToken && now < account.expiry) return account.accessToken;
-    // base 可能已含 /api/v1（state 里 clinebot baseUrl 就是 …/api/v1），直接拼会 double 成
+    // base 可能已含 /api/v1（老 clinebot 配置就是 …/api/v1），直接拼会 double 成
     // …/api/v1/api/v1/auth/refresh → 上游回 401 Unauthorized（版本/重认证提示），绝不能当 token 死。
     const baseNoV1 = resolvedBase.replace(/\/api\/v1\/?$/, "");
     const url = joinUrl(baseNoV1, "/api/v1/auth/refresh");

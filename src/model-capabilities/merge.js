@@ -4,7 +4,7 @@
 // 全程 best-effort：目录不可用 → 原样返回，绝不让 /models 因富化失败挂掉。
 import { globalCapabilities } from "./index.js";
 
-// "clinebot/deepseek/deepseek-v4-flash" → { provider: "clinebot", raw: "deepseek/deepseek-v4-flash" }；裸 id 归 opencode
+// "cline/deepseek/deepseek-v4-flash" → { provider: "cline", raw: "deepseek/deepseek-v4-flash" }；裸 id 归 opencode
 export function splitModelId(id) {
   const s = String(id || "").trim();
   const i = s.indexOf("/");
@@ -55,7 +55,7 @@ export function capsPayloadFor(caps, raw) {
   return payload;
 }
 
-// 单条 id 的目录匹配：精确裸 id → 剥 -free 后缀 → 二级厂商前缀（clinebot/deepseek/x → deepseek/x）
+// 单条 id 的目录匹配：精确裸 id → 剥 -free 后缀 → 二级厂商前缀（cline/deepseek/x → deepseek/x）
 function lookupCaps(svc, provider, raw) {
   return (
     svc.get(provider, raw) ||

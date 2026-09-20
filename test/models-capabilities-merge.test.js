@@ -39,8 +39,8 @@ const CAPS = {
 test("splitModelId: 裸 id 归 opencode，前缀小写", () => {
   assert.deepEqual(splitModelId("big-pickle"), { provider: "opencode", raw: "big-pickle" });
   assert.deepEqual(splitModelId("WorkBuddy/hy3"), { provider: "workbuddy", raw: "hy3" });
-  assert.deepEqual(splitModelId("clinebot/deepseek/deepseek-v4-flash"), {
-    provider: "clinebot",
+  assert.deepEqual(splitModelId("cline/deepseek/deepseek-v4-flash"), {
+    provider: "cline",
     raw: "deepseek/deepseek-v4-flash",
   });
 });
@@ -85,8 +85,8 @@ test("mergeModelsList: -free 后缀剥离回退", async () => {
   assert.equal(out.data[0].capabilities.context, 128000);
 });
 
-test("mergeModelsList: 二级厂商前缀回退（clinebot/deepseek/x）", async () => {
-  const data = { object: "list", data: [{ id: "clinebot/deepseek/deepseek-v4-flash", object: "model" }] };
+test("mergeModelsList: 二级厂商前缀回退（cline/deepseek/x）", async () => {
+  const data = { object: "list", data: [{ id: "cline/deepseek/deepseek-v4-flash", object: "model" }] };
   const svc = fakeSvc([["deepseek", "deepseek-v4-flash", CAPS]]);
   const out = await mergeModelsList(data, { capsSvc: svc, wbSource: null });
   assert.equal(out.data[0].capabilities.toolCall, true);

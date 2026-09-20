@@ -41,14 +41,7 @@ export function createClineProvider({
   if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
 
   const rawKeys = collectApiKeysGeneric(id, apiKeys, apiKey, (pid) => loadProviderKeys(pid, file ? { file } : {}));
-  // 同时兼容 cline 与 clinebot 两个 id 的 keys（用户可能配在任一）
-  let extraKeys = [];
-  try {
-    const altId = id === "cline" ? "clinebot" : "cline";
-    const alt = loadProviderKeys(altId, file ? { file } : {});
-    if (alt.length) extraKeys = alt;
-  } catch {}
-  const allKeys = [...new Set([...rawKeys, ...extraKeys].map((k) => String(k).trim()).filter(Boolean))];
+  const allKeys = [...new Set(rawKeys.map((k) => String(k).trim()).filter(Boolean))];
   const hasRefresh = allKeys.some((k) => isRefreshToken(k, id));
   const ring = createKeyRing(allKeys.filter((k) => !isRefreshToken(k, id)), { cooldownMs });
 
@@ -78,14 +71,7 @@ export function createClineProvider({
             // 优先写 providerConfigs，兼容旧路径由 saveProviderConfig 处理
             saveProviderConfig(id, { baseUrl: resolvedBase, keys: next }, file ? { file } : {});
           }
-          // altId 同步
-          const altId = id === "cline" ? "clinebot" : "cline";
-          const cur2 = loadProviderKeys(altId, file ? { file } : {});
-          const idx2 = cur2.indexOf(oldRefreshToken);
-          if (idx2 >= 0) {
-            const next2 = [...cur2]; next2[idx2] = newRefreshToken;
-            saveProviderConfig(altId, { baseUrl: resolvedBase, keys: next2 }, file ? { file } : {});
-          }
+          // 只回写 cline 自己（旧 id 轮换回写已随 id 统一删除，见 .scratch/cline-unify/SPEC.md §4.1）
         } catch {}
       },
     });

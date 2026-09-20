@@ -30,7 +30,7 @@ test("rankModels: slow 的 lastSuccess 在 5min 冷却期内失效", () => {
 
 test("rankModels: Provider 级熔断（连续 3 模型 429）", () => {
   const now = Date.now();
-  const ids = ["workbuddy/hy3", "workbuddy/hy4", "clinebot/deepseek"];
+  const ids = ["workbuddy/hy3", "workbuddy/hy4", "cline/deepseek"];
   const errors = {
     "workbuddy/hy3": { status: "limit", at: now - 1000, slow: false },
     "workbuddy/hy4": { status: "limit", at: now - 2000, slow: false },
@@ -38,8 +38,8 @@ test("rankModels: Provider 级熔断（连续 3 模型 429）", () => {
   };
   // workbuddy 旗下 3 模型均 limit，整 Provider 应视为 cooling（由上层 providerHealth 注入，此处模拟为全部 cooling）
   const ranked = rankModels(ids, errors, { now, cooldownMs: 60000, slowCooldownMs: 300000 });
-  // workbuddy 两个都在冷却，clinebot 不在冷却，应置顶
-  assert.equal(ranked[0], "clinebot/deepseek");
+  // workbuddy 两个都在冷却，cline 不在冷却，应置顶
+  assert.equal(ranked[0], "cline/deepseek");
 });
 
 test("rankModels: 勾选池内按 latency 排序", () => {

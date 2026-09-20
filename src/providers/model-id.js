@@ -12,9 +12,9 @@ import os from "node:os";
 
 export const DEFAULT_PROVIDER = "opencode";
 
-const ALIASES = { oc: "opencode", opencode: "opencode" };
+const ALIASES = { oc: "opencode", opencode: "opencode", clinebot: "cline", "cline-bot": "cline" };
 
-// WorkBuddy 别名映射（alias → canonical）：clinebot-z-ai-glm-5.3-flash → clinebot/z-ai/glm-5.3-flash
+// WorkBuddy 别名映射（alias → canonical）：cline-z-ai-glm-5.3-flash → cline/z-ai/glm-5.3-flash
 const _modelAliases = new Map();
 
 function aliasFile() {
@@ -62,7 +62,7 @@ export function getModelAlias(id) {
   return _modelAliases.get(key) || null;
 }
 
-// 反向查询：canonical id → alias（如 clinebot/z-ai/glm-5.3-flash → clinebot-z-ai-glm-5.3-flash）
+// 反向查询：canonical id → alias（如 cline/z-ai/glm-5.3-flash → cline-z-ai-glm-5.3-flash）
 export function getAliasForModel(canonicalId) {
   const c = String(canonicalId || "").trim();
   if (!_aliasLoaded) { try { loadModelAliases(); } catch {} }
@@ -116,7 +116,7 @@ export function toFullId(provider, raw) {
 export function normalizeFullId(id, knownProviders = []) {
   const s = String(id || "").trim();
   if (!s) return "";
-  // 1. 查别名表（clinebot-z-ai-glm-5.3-flash → clinebot/z-ai/glm-5.3-flash）
+  // 1. 查别名表（cline-z-ai-glm-5.3-flash → cline/z-ai/glm-5.3-flash）
   const aliased = getModelAlias(s);
   if (aliased) return aliased;
   // 2. 已含 /，走原有逻辑

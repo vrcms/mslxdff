@@ -123,10 +123,10 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
       else if (r.ok) console.log(`[preheat] opencode models ok ${r.status} ${r.ms}ms`);
       else console.log(`[preheat] opencode models failed ${r.error || r.status || ""} ${r.ms || 0}ms`);
     }).catch(() => {});
-    // clinebot free 目录自检（独立于 opencode 连接预热：dispatcher.preheat 只做默认供应商）
+    // cline free 目录自检（独立于 opencode 连接预热：dispatcher.preheat 只做默认供应商）
     // 见 .agents/notes/implemented/simplification/2026-09-16-preheat-opencode-only.md
     try {
-      const cline = upstream?.byId?.get?.("clinebot") ?? upstream?.byId?.get?.("cline");
+      const cline = upstream?.byId?.get?.("cline");
       if (cline?.checkFreeUpdates) void cline.checkFreeUpdates().catch(() => {});
     } catch {}
   }, 100).unref?.();

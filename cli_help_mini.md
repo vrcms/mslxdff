@@ -28,7 +28,7 @@
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
 | 更新 | `-update` / `--update` | 更新到 npm latest |
 | 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 Space勾选 Enter保存，候选池=opencode免费池+已启用供应商allowlist原名/别名+已勾选（不存在/未启用provider不列出，启用后回来），`别名: dash` 同步展示） |
-| 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型：默认先列 opencode 免费池，`────────────────────────────────────────` 分隔后列其他供应商 allowlist（原名 + 别名 `别名: dash`）；`--provider clinebot` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` |
+| 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型：默认先列 opencode 免费池，`────────────────────────────────────────` 分隔后列其他供应商 allowlist（原名 + 别名 `别名: dash`）；`--provider cline` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` |
 | 模型设默认 | `-model set <id>` | 设首选模型，自动入 picks |
 | 模型健康 | `-model status` | 每模型 normal/limit/error |
 | 模型刷新 | `-model refresh` | 强制拉上游刷新 |
@@ -42,10 +42,13 @@
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
 | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys/baseUrl/共享（借出固定） |
-| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`clinebot` 与聚合目录同源走 `recommended-models` 的 `free`，daemon 启动自检增删写 `daemon.log`；`--json` 供脚本） |
+| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`cline` 与聚合目录同源走 `recommended-models` 的 `free`，daemon 启动自检增删写 `daemon.log`；`--json` 供脚本） |
 | 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick；**deepseek 网页通道不支持 bench**（防禁言，改用 `-provider deepseek health` 体检） |
 | 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；**deepseek 一律跳过**（防禁言）；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
-| Cline 登录 | `-provider clinebot login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`clinebot` 走 `refresh→workos:token`+指纹头，deepseek-v4-flash 免 403（强制 stream 聚合）；多账号重复 login 追加；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
+ | Cline 登录 | `-provider cline login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`cline` 走 `refresh→workos:token`+指纹头，deepseek 家族免 403（含 `cline-free/deepseek-*`；非流式内部强制 stream 聚合成 JSON，对外仍按请求方 stream）；多账号重复 login 追加；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
+| Cline 免费目录 | `-provider cline free [--json]` | 上游免费目录只读（`recommended-models` 的 `free`，5 个）：列目录 + 与当前 allowlist 的差异，不写 state |
+| Cline 免费同步 | `-provider cline free sync [--yes] [--json] [--keep-extra]` | 把免费目录同步为 `cline` 的 allowlist（写裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览，`--yes` 才落盘**；`--keep-extra` 只增不删 |
+| Cline 迁移 | `-provider cline migrate [--dry-run]` | 旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔 `sk_`、allowlist 求并）后删旧键，幂等、改前备份；**cline 恒 local-only**（不走组员、不借 key、只走本地直连，历史别名同样硬排除） |
 | DeepSeek 登录 | `-provider deepseek login --token <userToken>` 或 `login <email\|mobile> <password>` | DeepSeek 官网免费对话接入（ADR-0014）：userToken 在 chat.deepseek.com F12→Local Storage；无参数打印图文引导；落盘后 `allowAny on` + `-restart`；模型 `deepseek/{chat,reasoner,chat-search,reasoner-search}`；单账号 1 路并发，多号轮换 |
 | DeepSeek 探活 | `-provider deepseek health [--json]` | 逐账号体检（防禁言）：检测禁言（自动冷却 5min）/限频前兆/凭据坏；网络失败不误伤；禁言解封后再探自动恢复 |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
@@ -92,7 +95,7 @@
 
 ## 模型说明
 
-- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3` 走指定供应商。
+- 裸 id 如 `big-pickle` 走默认供应商 opencode；带前缀如 `bai/glm-5.3-flash`、`openrouter/google/gemma-3-27b-it:free`、`workbuddy/hy3`、`cline/z-ai/glm-5.3-flash` 走指定供应商。
 - 实时可用模型由 `可用模型` 列表给出（已按供应商聚合，含 bai/ 等前缀），必须照列表精确输出。
 - 查“某供应商有哪些模型”**优先用 CLI 直查**：`run_command: "-provider workbuddy models"` 或 `run_command: "-model list --provider workbuddy"`（表格含能力列：上下文/📷读图/🧠推理/🔧工具调用，`--json` 供脚本），或 `curl local/models` 后前缀过滤；查模型能力（推理档位/读图/上下文/价格）用 `curl local/models/capabilities?id=<模型id>`（opencode 默认源 models.dev；workbuddy 用 `?provider=workbuddy&id=<裸id>` 走上游原生字段、全量含 blocked，ADR-0016）；**禁止**调 `-provider workbuddy list`（这是查配置，不是查模型！）。**错误示例**：`workbuddy有哪些模型` → 调 `-provider workbuddy list` → 错。**正确**：`run_command: "-provider workbuddy models"` 直接列 `workbuddy/` 前缀模型。严禁为此调用 `-showtoken`。
 
@@ -103,7 +106,7 @@
 - **严禁幻觉命令**：`mslxdff "hi" --model X` / `mslxdff --model X "hi"` / `mslxdff -chat --model X` 等**不存在**，一律禁止。探活模型**必须**用 `curl` POST 本机网关，见下一条。
 - `read_file` 参数：`path: "src/logs.js"` 或 `path: "~/.config/mslxdff/events.log"`（项目内或日志目录）
 - `curl` 参数：`url: "upstream"` / `"local/health"` / `"local/models"` / `"bai/models"` / `"https://api.b.ai/v1/models"`，可选 `method`/`headers`/`body`/`timeoutMs`；简写自动补全完整 URL，上游自动补头（含 UA `opencode/<semver>` + opencode 形状 session/request，zen 免费层门禁需要）、本机 /v1/* 自动带 token、已配置供应商（bai/openrouter 等）自动带对应 key
-- **模型探活固定写法**：`curl` 工具 `url:"http://localhost:8989/v1/chat/completions"` `method:"POST"` `headers:{"Content-Type":"application/json"}` `body:'{"model":"<前缀/模型>","messages":[{"role":"user","content":"hi"}],"stream":false}'`（如 `clinebot/z-ai/glm-5.3-flash`、`workbuddy/hy3`）；成功 `200 + x-mslxdff-via:local` 即通，`401` 代表本机 token 失效需提示用户 `mslxdff -stop && mslxdff`，`403 + x-mslxdff-allowlist:1` 代表白名单未放行需 `allowlist add`，`429/5xx` 代表上游限流/故障。
+- **模型探活固定写法**：`curl` 工具 `url:"http://localhost:8989/v1/chat/completions"` `method:"POST"` `headers:{"Content-Type":"application/json"}` `body:'{"model":"<前缀/模型>","messages":[{"role":"user","content":"hi"}],"stream":false}'`（如 `cline/z-ai/glm-5.3-flash`、`workbuddy/hy3`）；成功 `200 + x-mslxdff-via:local` 即通，`401` 代表本机 token 失效需提示用户 `mslxdff -stop && mslxdff`，`403 + x-mslxdff-allowlist:1` 代表白名单未放行需 `allowlist add`，`429/5xx` 代表上游限流/故障。
 - **禁止重复调用（最高优先级）**：同一 `run_command`/`curl`/`read_file` 在本轮只执行一次，重复会被 `SKIPPED_DUP` 拦截；**查询类（-showtoken/-status/-provider list/-providers list/-model list/-group list/-log 等）调用一次即答案**，拿到 `OK` 后必须**立即用中文直接回答**，禁止再调同类命令。收到 `SKIPPED_DUP` 或“请直接回答”时必须 0 工具直接回答。
 - 一次一工具，执行后看结果再决定下一步；拿到工具结果后优先直接回答，不要无故再调。
 
@@ -116,4 +119,4 @@
 - 用户：`把 bai 模型加到 opencode` → 确认 `bai/deepseek-v4-flash` → `run_command: "-setto opencode bai/deepseek-v4-flash"`（存 `bai-deepseek-v4-flash`，到 8989 自动还原 `bai/deepseek-v4-flash`）
 - 用户：`把所有模型同步到 opencode` → `run_command: "-setto opencode --all"`（批量 picks 全进菜单）
 - 用户：`把当前模型同步到 opencode` → `run_command: "-setto opencode"`（无参取 preferredModel）
-- 用户：`测试z-ai/glm-5.3-flash连通性` → **禁止** `run_command: "\"hi\" --model clinebot/z-ai/glm-5.3-flash"`，必须 `curl: {url:"http://localhost:8989/v1/chat/completions", method:"POST", headers:{"Content-Type":"application/json"}, body:"{\"model\":\"clinebot/z-ai/glm-5.3-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"}`
+- 用户：`测试z-ai/glm-5.3-flash连通性` → **禁止** `run_command: "\"hi\" --model cline/z-ai/glm-5.3-flash"`，必须 `curl: {url:"http://localhost:8989/v1/chat/completions", method:"POST", headers:{"Content-Type":"application/json"}, body:"{\"model\":\"cline/z-ai/glm-5.3-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"}`

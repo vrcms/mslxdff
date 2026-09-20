@@ -3,6 +3,7 @@ import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { fetchFreeCatalog, catalogUrl, FALLBACK_FREE as BUNDLED_FREE } from "./free-catalog.js";
 
 const { UndiciFetch } = getUndici();
 
@@ -18,30 +19,21 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
   let cache = null;
   let fetchedAt = 0;
 
-  // 离线兜底：与上游 recommended-models 的 free 对齐（2026-09-16 实测 5 个）。
-  // 上游挂了/401 时也不返回空数组，保证 -provider clinebot models 与 picks 仍有免费可用。
-  const FALLBACK_FREE = [
-    { id: "cline-free/deepseek-v4.1-flash", name: "deepseek-v4.1-flash" },
-    { id: "cline-free/muse-spark-1.3-contributor", name: "muse-spark-1.3-contributor" },
-    { id: "z-ai/glm-5.3-flash", name: "glm-5.3-flash" },
-    { id: "cline-free/solar-pro4", name: "solar-pro4" },
-    { id: "poolside/laguna-s-2.1:free", name: "laguna-s-2.1:free" },
-  ];
+  // 离线兜底：与上游 recommended-models 的 free 对齐（常量在 free-catalog.js，2026-09-20 实测 5 个）。
+  // 上游挂了/401 时也不返回空数组，保证 -provider cline models 与 picks 仍有免费可用。
 
   function fallbackList() {
-    const out = FALLBACK_FREE.map((m) => ({ ...m, id: joinModelId(id, m.id) }));
+    const out = BUNDLED_FREE.map((m) => ({ ...m, id: joinModelId(id, m.id) }));
     cache = out; fetchedAt = Date.now();
     return out;
   }
 
-  // 端点归一化：官方取 {bareHost}/api/v1/ai/cline/recommended-models。
-  // baseUrl 可能是裸 host（https://api.cline.bot）也可能是带 /api/v1 的，
-  // 统一收敛到 …/api/v1/ai/cline/recommended-models；用户自定义 path 原样尊重。
+  // 端点归一化：官方取 {bareHost}/api/v1/ai/cline/recommended-models（URL 拼装与 CLI 共用 free-catalog.catalogUrl）。
+  // baseUrl 可能是裸 host（https://api.cline.bot）也可能是带 /api/v1 的，统一收敛；用户自定义 path 原样尊重。
   function resolveModelsUrl() {
     const custom = modelsPath && modelsPath !== "/models" && modelsPath !== "/ai/cline/recommended-models";
     if (custom) return joinUrl(resolvedBase, resolvedPath);
-    const bare = resolvedBase.replace(/\/api\/v1\/?$/, "");
-    return joinUrl(bare, "/api/v1/ai/cline/recommended-models");
+    return catalogUrl(resolvedBase);
   }
 
   async function listModels() {
@@ -85,7 +77,7 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     } catch {}
   }
 
-  // Note: clinebot free 目录三处同源（CLI 直查/聚合目录/兜底）+ daemon 启动自检快照（diff 写 daemon.log，不自动改 picks）— 见 .agents/notes/implemented/bug-fix/2026-09-16-clinebot-free-catalog-unify.md
+  // Note: cline free 目录三处同源（CLI 直查/聚合目录/兜底，统一在 free-catalog.js）+ daemon 启动自检快照（diff 写 daemon.log，不自动改 picks）— 见 .agents/notes/implemented/bug-fix/2026-09-16-clinebot-free-catalog-unify.md
   function detectFreeChanges(ids) {
     const prev = readSnapshotFree();
     if (!prev) {
@@ -104,46 +96,31 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     return { added, removed };
   }
 
-  // 启动自检入口：拉 recommended-models → 填缓存 → 对比快照报 free 增删。
+  // 启动自检入口：拉 recommended-models → 填缓存 → 对比快照报 free 增删（拉取与 CLI 共用 free-catalog.fetchFreeCatalog）。
   async function checkFreeUpdates() {
-    const url = resolveModelsUrl();
     const t0 = performance.now();
-    try {
-      const headers = { Accept: "application/json" };
-      const key = (loadKeys ? loadKeys(id)[0] : null) || (ring ? ring.next() : null);
-      if (key && !String(key).includes(".")) headers["Authorization"] = `Bearer ${key}`;
-      const opts = { headers };
-      if (dispatcher) opts.dispatcher = dispatcher;
-      const res = await fetchImpl(url, opts);
-      let freeIds = null;
-      try {
-        const text = await res.text().catch(() => "");
-        if (res.ok && text && isClineBotHost(resolvedBase)) {
-          const json = JSON.parse(text);
-          if (Array.isArray(json.free)) {
-            const valid = json.free.filter((m) => m && typeof m.id === "string");
-            if (valid.length) {
-              cache = valid.map((m) => ({ ...m, id: joinModelId(id, m.id) }));
-              fetchedAt = Date.now();
-              freeIds = valid.map((m) => m.id);
-            }
-          }
-        }
-      } catch {}
-      let change = null;
-      if (freeIds && snapshotPath) { try { change = detectFreeChanges(freeIds); } catch {} }
-      return {
-        ok: res.ok,
-        status: res.status,
-        ms: Math.round(performance.now() - t0),
-        ...(change?.added ? { freeAdded: change.added, freeRemoved: change.removed } : {}),
-      };
-    } catch (err) {
-      return { ok: false, error: String(err?.message || err), ms: Math.round(performance.now() - t0) };
+    const key = (loadKeys ? loadKeys(id)[0] : null) || (ring ? ring.next() : null);
+    const authorization = key && !String(key).includes(".") ? `Bearer ${key}` : undefined;
+    const cat = await fetchFreeCatalog({ baseUrl: resolvedBase, fetchImpl, dispatcher, authorization });
+    const ms = () => Math.round(performance.now() - t0);
+    const httpOk = cat.status >= 200 && cat.status < 300;
+    if (!httpOk || !cat.models.length || !isClineBotHost(resolvedBase)) {
+      return { ok: httpOk, status: cat.status, ...(httpOk ? {} : { error: cat.error }), ms: ms() };
     }
+    const valid = cat.models;
+    cache = valid.map((m) => ({ ...m, id: joinModelId(id, m.id) }));
+    fetchedAt = Date.now();
+    let change = null;
+    if (snapshotPath) { try { change = detectFreeChanges(valid.map((m) => m.id)); } catch {} }
+    return {
+      ok: true,
+      status: cat.status,
+      ms: ms(),
+      ...(change?.added ? { freeAdded: change.added, freeRemoved: change.removed } : {}),
+    };
   }
 
-  // preheat 保留为别名：dispatcher 已不再调 clinebot，手动/测试/未来钩子仍可用，行为与自检一致
+  // preheat 保留为别名：dispatcher 已不再调 cline，手动/测试/未来钩子仍可用，行为与自检一致
   async function preheat() {
     return checkFreeUpdates();
   }

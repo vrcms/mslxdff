@@ -96,7 +96,7 @@ export function handleSlash(line, ctx) {
     const id = arg;
     if (id.includes("/")) {
       console.log(`\x1b[31m[拒绝] ${id} 带供应商前缀 — -chat 只支持 opencode 上游模型（裸 id，直连 opencode.ai 免费池）\x1b[0m`);
-      console.log(`\x1b[90m其他供应商（deepseek/ workbuddy/ clinebot/ 等）请走网关：mslxdff -model set <id> 或 curl 本机 /v1/chat/completions\x1b[0m`);
+      console.log(`\x1b[90m其他供应商（deepseek/ workbuddy/ cline/ 等）请走网关：mslxdff -model set <id> 或 curl 本机 /v1/chat/completions\x1b[0m`);
       return { handled: true };
     }
     if (!isFreeModel(id) || !freePoolNow().includes(id)) {
