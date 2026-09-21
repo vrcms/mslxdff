@@ -10,6 +10,7 @@ import { pickInteractiveMulti } from "../../interactive.js";
 import { buildAliasMap, readFullAliases, renderProviderList, renderFreeList, groupByProvider } from "./list-render.js";
 import { renderOtherProviders } from "./list-providers.js";
 import { filterStalePicks } from "../../../providers/model-id.js";
+import { mergeLiveIds } from "./list-live.js";
 
 /**
  * `-model list` 全流程：参数解析 → 刷新/回退 → provider 分支 → TTY 交互 → 分组渲染。
@@ -159,6 +160,7 @@ export async function handleModelList(args, idx, sub) {
             }
           }
         }
+        await mergeLiveIds({ combinedIds, seen, knownProviders, liveIds: ids });
         staleFilter = { knownProviders, liveIds: ids, allowedIds };
       } catch {}
       // provider 已不存在的 picks 孤儿不进交互列表（数据不动，status --all 仍可审计）。

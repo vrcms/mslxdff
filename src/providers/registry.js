@@ -11,6 +11,11 @@ export const customProviders = [
     load: () => import("./workbuddy.js").then((m) => m.createWorkbuddyProvider),
   },
   {
+    id: "traework",
+    match: (id, baseUrl) => id === "traework" || String(baseUrl).includes("trae"),
+    load: () => import("./traework.js").then((m) => m.createTraeworkProvider),
+  },
+  {
     id: "cline",
     match: (id, baseUrl) => id === "cline" || String(baseUrl).includes("cline.bot"),
     load: () => import("./cline.js").then((m) => m.createClineProvider),
@@ -19,6 +24,11 @@ export const customProviders = [
     id: "codearts",
     match: (id, baseUrl) => id === "codearts" || String(baseUrl).includes("myhuaweicloud.com"),
     load: () => import("./codearts.js").then((m) => m.createCodeartsProvider),
+  },
+  {
+    id: "qoder",
+    match: (id, baseUrl) => id === "qoder" || String(baseUrl).includes("qoder"),
+    load: () => import("./qoder/index.js").then((m) => m.createQoderProvider),
   },
 ];
 

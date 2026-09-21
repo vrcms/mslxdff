@@ -1,0 +1,21 @@
+// traework SOLO 上游技术常量（照抄 traework2api internal/upstream/constants.go，禁止改值）。
+export const AGENT_HOST = "https://trae-api-cn.mchost.guru";
+export const UG_HOST = "https://api.trae.cn";
+export const OAUTH_HOST = "https://api.trae.com.cn";
+export const CONSOLE_HOST = "https://www.trae.cn";
+export const CLIENT_ID = "en1oxy7wnw8j9n";
+export const APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
+export const IDE_VERSION = "0.1.43";
+export const IDE_VERSION_CODE = "20260716";
+export const DEVICE_BRAND = "83DG";
+export const OS_VERSION = "Windows 11 Pro";
+export const FUNCTION = "solo_work_lite";
+export const TRAE_UA = "Trae/0.1.43";
+export const DEFAULT_MODEL = "glm-5.2";
+export const EP_CHAT = "/api/agent/v3/llm_utils_chat";
+export const EP_MODELS = "/api/ide/v1/get_detail_param";
+export const EP_EXCHANGE = "/cloudide/api/v3/trae/oauth/ExchangeToken";
+export const EP_USER_INFO = "/cloudide/api/v3/trae/GetUserInfo";
+export const EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status";
+export const EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim";
+export const EP_ENT_USAGE = "/trae/api/v2/pay/ide_user_ent_usage";

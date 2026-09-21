@@ -42,6 +42,8 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider add myapi https://api.example.com/v1 sk-xxx --models-path /v1/models --chat-path /v1/chat/completions");
     console.error("            mslxdff -provider openrouter                      interactive hidden input (append)");
     console.error("            mslxdff -provider codearts login          华为云 CodeArts PKCE 授权（浏览器登录 → 凭证 blob 落盘，ADR-0027）");
+    console.error("            mslxdff -provider qoder login [--region cn|global]   Qoder 设备授权（国际站默认，国内站 --region cn）");
+    console.error("            mslxdff -provider qoder checkin [--json] [--region cn|global] [--any] [--dry]  每日签到领积分（cn=daily-check-in，global=campaigns）");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
@@ -70,6 +72,13 @@ export async function handleProvider(args) {
   if (await handleWorkbuddyLogin(id, sub, rest)) return true;
   const { handleCodeartsLogin } = await import("./codearts-login.js");
   if (await handleCodeartsLogin(id, sub, rest)) return true;
+  const { handleTraeworkLogin, handleTraeworkCheckin } = await import("./traework-login.js");
+  if (await handleTraeworkLogin(id, sub, rest)) return true;
+  if (await handleTraeworkCheckin(id, sub, rest)) return true;
+const { handleQoderLogin } = await import("./qoder-login.js");
+  if (await handleQoderLogin(id, sub, rest)) return true;
+  const { handleQoderCheckin } = await import("./qoder-checkin.js");
+  if (await handleQoderCheckin(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");

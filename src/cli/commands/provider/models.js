@@ -44,6 +44,12 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "codearts") {
       const { createCodeartsProvider } = await import("../../../providers/codearts.js");
       provider = createCodeartsProvider({ baseUrl: baseUrl || undefined, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "traework") {
+      const { createTraeworkProvider } = await import("../../../providers/traework.js");
+      provider = createTraeworkProvider({ baseUrl: baseUrl || undefined, apiKeys: keys, auths, file: defaultStateFile() });
+    } else if (id === "qoder") {
+      const { createQoderProvider } = await import("../../../providers/qoder/index.js");
+      provider = createQoderProvider({ id, apiKeys: keys, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);
