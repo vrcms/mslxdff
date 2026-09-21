@@ -40,7 +40,7 @@ export function buildProviderRows({ stateFile, env = process.env } = {}) {
     let allowed = [];
     let allowAny = false;
     try { keys = loadProviderKeys(gid, stateFile ? { file: stateFile } : undefined); } catch {}
-    try { baseUrl = loadProviderBaseUrl(gid, stateFile ? { file: stateFile } : undefined) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : ""); } catch { baseUrl = cfg?.baseUrl || ""; }
+    try { baseUrl = loadProviderBaseUrl(gid, stateFile ? { file: stateFile } : undefined) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : gid === "traework" ? "https://trae-api-cn.mchost.guru" : gid === "qoder" ? "qoder://native" : ""); } catch { baseUrl = cfg?.baseUrl || ""; }
     try { allowed = loadProviderAllowedModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     try { allowAny = loadProviderAllowAnyModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     // openrouter 特殊：opencode 例外默认 allowAny true，其余默认 false

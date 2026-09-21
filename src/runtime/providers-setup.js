@@ -14,6 +14,8 @@ import { loadProviderKeys, loadProviderAuths, loadProviderConfigs } from "../sta
 import { refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerLimitCooldownMs, peerHeatMs, banWindowMs, banThreshold } from "../cli/policy.js";
 import { errMsg } from "../cli/util.js";
 
+
+import { shouldEnableCustomProvider, loadAuthDocs } from "./provider-gate.js";
 /**
  * 世界组装 — 插件加载 → providers → models/auto/peers/groups/bans。
  * 无参（读 env/state 自身），返回 ctx 由门面接力 server-lifecycle。
@@ -85,12 +87,16 @@ export async function setupProviders() {
       const { getCustomProviderFactory } = await import("../providers/registry.js");
       const customFactory = await getCustomProviderFactory(gid, base);
       if (customFactory) {
-        if (gid === "workbuddy" && !keys.length) continue;
-        if (gid !== "workbuddy" && (!base || !keys.length)) continue;
+        // auth 号型（workbuddy/traework/qoder）：无 keys 但 auth 目录有号也启用；baseUrl 可空
+        // （端点由各自 constants 决定，如 qoder 的 qoder://native）。
+        const hasAuthDocs = !keys.length && !auths.length ? (await loadAuthDocs(gid)).length > 0 : false;
+        if (!shouldEnableCustomProvider(gid, { keys, auths, hasAuthDocs })) continue;
         try {
           const provider = gid === "workbuddy"
             ? await customFactory({ baseUrl: base || "https://copilot.tencent.com", apiKeys: keys, auths })
-            : await customFactory({ id: gid, baseUrl: base, apiKeys: keys });
+            : gid === "traework"
+              ? await customFactory({ baseUrl: base || "https://trae-api-cn.mchost.guru", apiKeys: keys, auths })
+              : await customFactory({ id: gid, baseUrl: base, apiKeys: keys });
           providers.push(provider);
           console.log(`provider enabled: ${gid} (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base || provider.baseUrl} [custom]`);
           appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base || provider.baseUrl });

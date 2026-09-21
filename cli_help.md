@@ -52,15 +52,15 @@
 | `mslxdff -showtoken` | `--showtoken` | 打印当前 Bearer token | 首次会生成 | 否 |
 | `mslxdff -refresh-token` | `--refresh-token` | 轮换 token 并打印新值 | 是（`token`） | 否 |
 | `mslxdff -update` | `--update` | 查询 npm `latest`，若有新版则 `npm install -g` 并重启 daemon | 否 | 重启若有更新 |
-| `mslxdff -models` | — | 交互式多选（↑↓移动 Space勾选 Enter保存 q取消，候选池=opencode免费池+各供应商allowlist原名/别名+已勾选）：空格勾选常用模型，Enter 保存到 `modelPicks`；非 TTY 则等价 ` -model list` 纯列表（含分隔后 allowlist） | 是（`modelPicks`） | 否 |
+| `mslxdff -models` | — | 交互式多选（↑↓移动 ←→翻页 Space勾选 Enter保存 q取消，候选池=opencode免费池+各供应商allowlist原名/别名+已勾选）：空格勾选常用模型，Enter 保存到 `modelPicks`；非 TTY 则等价 ` -model list` 纯列表（含分隔后 allowlist） | 是（`modelPicks`） | 否 |
 | `mslxdff -model list [--provider <id>] [--json]` | `-models` 同 | 列出免费模型（每次 4s 超时尝试刷新，失败回退缓存）；默认先列 `opencode` 免费池，`────────────────────────────────────────` 分隔后列其他供应商 `allowlist`（原名 + 别名 `别名: dash`，如 `cline/z-ai/glm-5.3-flash (别名: cline-z-ai-glm-5.3-flash)`）；`--provider cline` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` 供脚本 | 否 | 否 |
 | `mslxdff -model set <id>` | — | 设默认模型 `preferredModel`，并自动加入 `modelPicks` | 是 | 热重载 |
 | `mslxdff -model status` | — | 显示每模型健康状态 normal/limit/error + 时间 + HTTP 码 | 否 | 否 |
 | `mslxdff -model refresh` | — | 强制从上游拉取模型列表并更新缓存 | 是（cacheFile） | 否 |
-| `mslxdff -model pick <id>` | — | 勾选一个模型到 `modelPicks` | 是 | — |
-| `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除 | 是 | — |
-| `mslxdff -model picks` | — | 列出当前勾选集 | 否 | — |
-| `mslxdff -model pick clear` | — | 清空勾选集（auto 回退全量） | 是 | — |
+| `mslxdff -model pick <id>` | — | 勾选一个模型到 `modelPicks`（**非空即成为 `GET /v1/models` 对外目录白名单**，ADR-0030） | 是 | 热更新（目录条数随之变） |
+| `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除（该模型随之从 `/v1/models` 消失，`?all=1` 仍可见） | 是 | 热更新 |
+| `mslxdff -model picks` | — | 列出当前勾选集（= 对外目录范围；空集表示目录不裁剪、全量暴露） | 否 | — |
+| `mslxdff -model pick clear` | — | 清空勾选集（`auto` 回退全量候选 **且** `/v1/models` 回退全量目录） | 是 | 热更新 |
 | `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`workbuddy=/console/enterprises/personal/models`；`cline` 内置 `recommended-models`，无需配置） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 29 个、`cline` 5 个等，无需 `curl`；`cline` 与聚合目录同源走 `recommended-models` 的 `free`（不再列全量 443 个内部目录）；表格含能力列：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用，workbuddy 走上游原生字段，无此字段的供应商显示 `—`） | 否 | 否 |
@@ -71,6 +71,9 @@
 | `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删 | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
 | `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
+| `mslxdff -provider traework login` | `--provider` | TRAE SOLO 通道浏览器授权（复刻 traework2api login.sh）：打印 trae.cn 授权链接 → 登录后粘贴 `127.0.0.1` 回调链接 → ExchangeToken → 落盘 `auths/trae-<uid>.json`（0600）+ state 双写，自动签到+查积分；此后 `traework/<modelId>` 前缀路由（恒 `stream:true` SOLO SSE 透传/聚合，模型空/auto→`glm-5.2`，动态表+静态 32 回退；1005 plan 长冷却 12h、401 换号、429 短冷，过期前 24h 预刷新）；**恒 local-only** 不借出 key |
+| `mslxdff -provider qoder login [--region cn\|global]` | `--provider` | Qoder 设备授权（PKCE + poll）：打印 `qoder.com/device/selectAccounts` 兑换链接 → 浏览器登录 → 落盘 `auths/qoder-<uid>.json`（0600）+ state 双写，默认 `allowAnyModels=true`；此后 `qoder/<modelId>` 前缀路由（15 模型，恒上游 `stream:true`，多号 keyring 轮转）；`--region cn` 走国内站 `qoder.com.cn`（`*.qoder.com.cn` 端点镜像）；**恒 local-only** 不借出（ADR-0029） | 是（写 `providerConfigs.qoder`） | 重启生效 |
+| `mslxdff -provider qoder checkin [--json] [--region cn\|global] [--any] [--dry]` | `--provider` | 每日签到领积分：**按每号 `region` 选域名**（cn=`openapi.qoder.com.cn` 走 `daily-check-in/status→claim`，409=今日已领；global=`openapi.qoder.sh` 无该端点（404）→ 回落 `/sash/api/v1/me/campaigns→/{id}/claim`）；默认只领 `CLAIM_BENEFIT`（`--any` 连带 VIEW_DETAILS 促销条目），`--dry` 只查不领，`--json` 输出 `{ok,total,claimed,results[]}`（每号带 region/status/amount/streak/quota，余额取 `/api/v2/quota/usage`）；daemon 每日 09:00 自动（`MSLXDFF_QODER_CHECKIN=0` 关） | 否（只读+领取） | 即时 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -536,7 +539,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 
 - **语义**：借道 = 用你的 key。转发（peer 接力 / via-route）时，命中本机**有 key** 的供应商即自动把 key 列表放私有头 `x-mslxdff-share-keys: provider=k1,k2` 附带；组员侧 `parseShareKeysHeader` 解析后 `dispatcher.chat(body, {shareKeys})` → `provider.chatWithKeys` 用临时 `keyring` 调上游，**用完即弃，不落盘**。
 - **组内互信是前提**：不再有 `share on|off` 开关（`providerShareKeys` state / `MSLXDFF_<ID>_SHARE_KEYS` 均已删除）；旧字段变为惰性数据。
-- **硬排除**：`opencode`（无 key 恒排除）、`workbuddy`（local-only 本就不走组员）、`cline` 与 `codearts`（key 是 refresh-token 型，借出后对端刷新会轮换，与本机互踢下线；`share-keys.js` NEVER_SHARE_IDS + 凭据形状双层兜底）。
+- **硬排除**：`opencode`（无 key 恒排除）、`workbuddy`（local-only 本就不走组员）、`cline` 与 `codearts`（key 是 refresh-token 型，借出后对端刷新会轮换，与本机互踢下线；`share-keys.js` NEVER_SHARE_IDS + 凭据形状双层兜底）、`traework`（TRAE SOLO 本机账号绑定型，与 workbuddy 同类恒不借出）。
 - **无开关、无白名单**（组内互信是前提）：旧 `MSLXDFF_SHARE_PROVIDERS` 白名单已删除。
 - **示例**：`mslxdff -provider openrouter list` 输出显示 `share keys to peers: 借出（随转发自动附带，ADR-0019）`；**硬排除供应商（`codearts`/`cline`/`workbuddy` 等 local-only）则显示 `不借出（local-only / 硬排除…）`**（`codearts` 每条 key 还会展示 `user/uid/domain` 账号摘要）；`-status` 供应商表 `共享 借出`（opencode 行显示 `无法共享`）。
 
@@ -772,6 +775,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   - `allowlist` 为空 + `allowAnyModels=false`（默认，`opencode` 例外为 `true`）→ **阻塞**，`chat` 直接 `403`（`{"error":"model not allowed for provider \"...\" — allowed: (none) (use: mslxdff -provider ... allowlist add <model>)"}` + 头 `x-mslxdff-allowlist:1`），`GET /v1/models` 不暴露任何模型。
   - `allowlist` 为空 + `allowAnyModels=true` → **不限**，全部模型可用（需显式 `mslxdff -provider <id> allowAny on`）。
   - 非空 → **仅名单内可用**，`chat` 时 `rawModel` 不在名单则立即 `403`，不计入冷却、不触发 fallback；`GET /v1/models` 亦仅返回白名单内的模型（按 `raw` 精确匹配，支持 `bai/glm-...` 或 `glm-...` 两种写法，存储时自动归一为 raw）。
+- **勾选集裁剪对外目录（ADR-0030）**：`modelPicks` 非空时 `GET /v1/models` 只返回勾选到的 `id`（精确匹配、含供应商前缀），裁剪点在能力富化（ADR-0022）之后、`models:list` 插件 hook 之前，条目形状不变；**空勾选不裁剪**（否则一次 `-model pick clear` 会让所有下游客户端零模型可用）；`GET /v1/models?all=1` 绕过裁剪取全量（`-models` 交互候选取数即走此口，保证取消勾选的模型仍回到候选列表）。与 `allowlist` 分属两层语义：`allowlist` 是供应商准入安全阀（空即 `403`），`modelPicks` 是用户偏好目录，二者互不改写。
 - **存储**：`state.json providerConfigs.<id>.{allowedModels: string[], allowAnyModels: boolean}`（`saveProviderAllowedModels` 去重、trim、支持逗号分隔的一串如 `m1,m2`）。`providerConfigs.<id>.baseUrl/keys` 为空但 `allowedModels` 非空时仍保留条目（便于先定白名单后补 key）。
 - **生效**：热更新立即生效（`chat` 与 `listModels` 均无需重启；`provider add` 的白名单亦同）；`opencode` 亦支持（`mslxdff -provider opencode allowlist set big-pickle mimo-v2.5-free`）。
 - **示例**：

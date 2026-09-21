@@ -27,7 +27,7 @@
 | token 读 | `-showtoken` / `--showtoken` | 打印 Bearer token |
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
 | 更新 | `-update` / `--update` | 更新到 npm latest |
-| 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 Space勾选 Enter保存，候选池=opencode免费池+已启用供应商allowlist原名/别名+已勾选（不存在/未启用provider不列出，启用后回来），`别名: dash` 同步展示） |
+| 模型交互 | `-models` | TTY 交互多选勾常用模型（↑↓移动 ←→翻页 Space勾选 Enter保存，勾选框在名字前 `❯ [✓] <id>`；候选池=opencode免费池+已启用供应商allowlist原名/别名+已勾选+allowAny空白名单者的网关live模型，不存在/未启用provider不列出，启用后回来）；**勾选集即 `GET /v1/models` 对外目录**（非空只暴露勾选项，空=全量，`?all=1` 绕过取全量） |
 | 模型列表 | `-model list [--provider <id>] [--json]` | 列免费模型：默认先列 opencode 免费池，`────────────────────────────────────────` 分隔后列其他供应商 allowlist（原名 + 别名 `别名: dash`）；`--provider cline` 只看该供应商 allowlist，`--json` 输出 `{"object":"list","data":[...]}` |
 | 模型设默认 | `-model set <id>` | 设首选模型，自动入 picks |
 | 模型健康 | `-model status` | 每模型 normal/limit/error |
@@ -51,13 +51,14 @@
 | Cline 迁移 | `-provider cline migrate [--dry-run]` | 旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔 `sk_`、allowlist 求并）后删旧键，幂等、改前备份；**cline 恒 local-only**（不走组员、不借 key、只走本地直连，历史别名同样硬排除） |
 | CodeArts 登录 | `-provider codearts login` | 华为云 CodeArts Agent（盘古助手）PKCE 浏览器授权：凭证 blob（refreshToken/codeVerifier/dpopJwk）落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转，默认 `allowAnyModels=true`）；此后 `codearts/<modelId>` 前缀（恒 `stream:true`，STS 临期自动刷新 + refresh_token 轮换原位写回，死号提示重登）；**恒 local-only** 不借 key（ADR-0027） |
 | CodeArts 模型 | `-provider codearts models [--json]` | 三路发现（builtin 归一 + 代理型 + 福利网关），benefit 模型自动 claim（幂等 `0000`），对外带 `tags:["free:benefit"]` |
+| TraeWork 登录 | `-provider traework login` | TRAE SOLO 通道浏览器授权（复刻 traework2api login.sh）：打印 trae.cn 授权链接 → 登录后粘贴 `127.0.0.1` 回调链接 → ExchangeToken → 落盘 `auths/trae-<uid>.json`（0600）+state 双写，自动签到+查积分；此后 `traework/<modelId>` 前缀（恒 `stream:true` SOLO SSE 透传/聚合，模型空/auto→`glm-5.2`，动态表+静态 32 回退；1005 plan 长冷却 12h、401 换号、429 短冷，过期前 24h 预刷新）；**恒 local-only** 不借出 key |
 | DeepSeek 登录 | `-provider deepseek login --token <userToken>` 或 `login <email\|mobile> <password>` | DeepSeek 官网免费对话接入（ADR-0014）：userToken 在 chat.deepseek.com F12→Local Storage；无参数打印图文引导；落盘后 `allowAny on` + `-restart`；模型 `deepseek/{chat,reasoner,chat-search,reasoner-search}`；单账号 1 路并发，多号轮换 |
 | DeepSeek 探活 | `-provider deepseek health [--json]` | 逐账号体检（防禁言）：检测禁言（自动冷却 5min）/限频前兆/凭据坏；网络失败不误伤；禁言解封后再探自动恢复 |
 | 供应商改址 | `-provider <id> set-url <baseUrl>` | 改通用供应商地址 |
 | 供应商改模型路径 | `-provider <id> set-models-path <path>` | 改 `models` 路径（如 `/v1/models`、`/console/enterprises/personal/models`） |
 | 供应商改对话路径 | `-provider <id> set-chat-path <path>` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） |
 | 供应商清空 | `-provider <id> clear` | 清空该供应商 keys |
-| 供应商共享 | key 随转发自动借出（ADR-0019，无开关无白名单） | 借道时自动附带；opencode/workbuddy/cline/codearts 硬排除 |
+| 供应商共享 | key 随转发自动借出（ADR-0019，无开关无白名单） | 借道时自动附带；opencode/workbuddy/cline/codearts/traework 硬排除 |
 | 供应商白名单 | `-provider <id> allowlist [list\|set\|add\|remove\|clear]` | 白名单空=阻塞除非 `allowAny on`，非空仅名单内可用（防昂贵模型） |
 | 空名单开关 | `-provider <id> allowAny on\|off` | 空 allowlist 时放行或阻塞（默认 `OFF`，`opencode` 例外 `ON`） |
 | 供应商总览 | `-providers list` / `-provider list` | 列所有已部署供应商及启用状态（含 allowlist 摘要） |
@@ -65,6 +66,8 @@
 | WorkBuddy 桌面导入 | `mslxdff -provider workbuddy import [--file=路径]` | 桌面已登录新号时最快：跨平台自动发现登录态（找不到时 `--file`/env `MSLXDFF_WORKBUDDY_DESKTOP_INFO` 显式指定），无需浏览器/抓包 |
 | WorkBuddy 多号追加（路径A） | `mslxdff -provider workbuddy login` | 用户说“追加/添加 workbuddy 账号/多号/再加一个号”时**必须走路径A**：`run_command: "mslxdff -provider workbuddy login"`（设备授权：打印浏览器链接→用户用新账号登录→自动轮询落盘 `auths/workbuddy-<newUid>.json` + `state.json keys/auths`，不走抓包，桌面端不用退旧号）③ `run_command: "-workbuddy list"` 验证多号 ④ `run_command: "-workbuddy balance"` 看余额；新号次日自动纳入 daemon 每日签到；抓包兜底路径B：`node workbuddy-token-auto.js --force`（需桌面先切新号登录）；**禁止**让用户手贴 JWT（除非用户主动贴 `eyJ` 则走 `-provider add workbuddy` 路径C） |
 | WorkBuddy 签到 | `-workbuddy checkin` / `-wb checkin` | 用户说“签到/每日签到/100积分/领积分”时**调用 run_command**；多号并行3，双域幂等 `code 10001 已签到`视为成功，`--json` 聚合余额；daemon 每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN=0` 关，`_HOUR` 改时间） |
+| Qoder 签到 | `-provider qoder checkin [--json] [--region cn\|global] [--any] [--dry]` | 用户说“qoder 签到/领积分”时**调用 run_command**；**按每号 region 选域名**（cn=`openapi.qoder.com.cn` 走 `daily-check-in`，409=今日已领；global=`openapi.qoder.sh` 无该端点→回落 campaigns），默认只领 `CLAIM_BENEFIT`（`--any` 才含 VIEW_DETAILS 促销），`--dry` 只查不领；daemon 每日 09:00 自动（`MSLXDFF_QODER_CHECKIN=0` 关，`_CHECKIN_HOUR` 改时间） |
+| Qoder 接入 | `-provider qoder login [--region cn\|global]` | Qoder 设备授权（PKCE+poll）：打印兑换链接→浏览器登录→落盘 `auths/qoder-<uid>.json`+state；`--region cn` 走国内站 `qoder.com.cn`（默认国际站）；多号重复 login 追加，`qoder/<modelId>` 前缀路由，恒 local-only 不借出 |
 | WorkBuddy 成长任务 | `-workbuddy growth [--json]` / `-wb growth` | 成长任务全自动（拉列表→参与→触发→领奖，串行 1.2s/1s，已领幂等跳过）；可自动 `chat_5`/`automation_1`/`skill_1`/`Model_chat_GLM5.2`，需客户端任务标 MANUAL 不发包；daemon 每日 09:30 自动（`MSLXDFF_WORKBUDDY_GROWTH=0` 关，`_GROWTH_HOUR`/`_GROWTH_MODEL` 可配） |
 | WorkBuddy 猫猫旅行 | `-workbuddy travel [--json]` / `-wb travel` | 无猫自动同意协议+领养（+300，门槛未达自动补一次对话解锁）；到站领奖 / 空闲派出（location 4）/ 旅行中跳过 |
 | WorkBuddy 余额 | `-workbuddy balance [--json]` / `-wb balance` | 查多号余额（`total/dailyPacks/nextExpire`，TTL 5min） |

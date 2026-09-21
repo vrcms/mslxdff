@@ -15,7 +15,17 @@ export function isCodexModelsCaller(req) {
   return /(^|&)client_version=/.test(q);
 }
 
-export async function modelsHandler({ req, res, models, plugins, capabilities, wbSource }) {
+// 勾选即对外目录：modelPicks 非空时 /v1/models 只暴露勾选的模型（与 -models 交互勾选语义闭环）；
+// 空勾选 = 不过滤（保留旧默认全量目录，防呆：新装/清空勾选不至于对外空目录）。?all=1 逃生门。
+// Note: 空勾选不裁剪 + ?all=1 逃生门是硬边界（缺一即成单向棘轮/下游零模型）— 见 .agents/notes/implemented/architecture/2026-09-21-models-list-scoped-by-picks.md
+export function filterByPicks(data, picks) {
+  if (!picks?.length) return data;
+  const set = new Set(picks.map(String));
+  const list = (Array.isArray(data?.data) ? data.data : []).filter((m) => set.has(String(m?.id || "")));
+  return { ...(data || { object: "list" }), data: list };
+}
+
+export async function modelsHandler({ req, res, models, plugins, capabilities, wbSource, loadPicks } = {}) {
   if (!models) return json(res, 501, { error: "Models service not configured" });
   const codex = isCodexModelsCaller(req);
   const withCodex = (out) => (codex && out && typeof out === "object" ? { ...out, models: [] } : out);
@@ -29,6 +39,14 @@ export async function modelsHandler({ req, res, models, plugins, capabilities, w
       try {
         data = await mergeModelsList(data, { capsSvc: capabilities, wbSource });
       } catch { /* 富化失败不阻塞 /models */ }
+    }
+    // 勾选即对外目录（?all=1 逃生门）：picks 非空只暴露勾选项；空 picks 不过滤
+    if (!/(^|&)all=1(&|$)/.test(qs)) {
+      let picks = [];
+      try {
+        picks = (loadPicks ? await loadPicks() : (await import("../state.js")).loadModelPicks()) || [];
+      } catch { picks = []; }
+      data = filterByPicks(data, picks);
     }
     // 插件 hook：models:list — 返回数组可替换对外模型列表（{object:"list",data:[...]} 或纯 id 数组）
     if (plugins?.length) {
