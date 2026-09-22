@@ -3,13 +3,11 @@ on:
   push:
     tags: ["v*"]
 permissions:
-  id-token: write
   contents: read
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
@@ -17,11 +15,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org/
-      - name: OIDC publish (provenance)
-        continue-on-error: true
-        run: npm publish --access public --provenance
-      - name: Token fallback publish
-        if: ${{ !cancelled() }}
+      # 唯一发布通道 = NPM_TOKEN（OIDC/Trusted Publishing 未在 npmjs.com 绑定本包，
+      # 恒报 E404 "'mslxdff@x.y.z' is not in this registry"，实测 0.1.138/0.1.140 两版
+      # 均由本步发出；若日后在 npm 包设置绑定 Trusted Publisher 可再切回 OIDC + --provenance）
+      - name: Publish (NPM_TOKEN)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
