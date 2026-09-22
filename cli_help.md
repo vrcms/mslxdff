@@ -1241,6 +1241,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |
+| `MSLXDFF_<ID>_RESPONSES_PATH` | `/responses` | 通用供应商 responses 端点路径覆盖（ADR-0032）：responses 类模型（`muse-spark*`，判定=models.dev 模型级 `provider.npm` + 前缀兜底，与 `/v1/models` 的 `capabilities.upstreamApi` 同源）自动改打该路径（缺省 `<baseUrl>/responses`），不再走 `chatPath`（此前固定 `/chat/completions` → 上游 `503 Endpoint is unavailable`）；流式优先 `@ai-sdk/openai` responses 适配器（含加密思考往返），非流式/SDK 不可用走原生 `chatToResponsesBody` 正转换 + 反向整形，出参恒 chat 形状；异形上游可覆盖（如 `MSLXDFF_OCGO_RESPONSES_PATH=/zen/go/v1/responses`） |
 | `MSLXDFF_GENERIC_TIMEOUT_MS` | `30000` | 通用供应商单次 fetch 超时 |
 | `MSLXDFF_GENERIC_COOLDOWN_MS` | `30000` | 通用供应商多 key 冷却 |
 | `MSLXDFF_GENERIC_KEEPALIVE_TIMEOUT` | `30000` | 通用 keepAlive 超时 |
