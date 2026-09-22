@@ -17,12 +17,28 @@ export function chunkToString(c) {
   return String(c);
 }
 
+// content 数组 → 文本（tool_calls 摘要之外的纯文本部分，历史行为）
 function inputTextOf(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content.filter((p) => p && (p.type === "input_text" || p.type === "text")).map((p) => p.text || "").join("");
   }
   return String(content ?? "");
+}
+
+// content 数组里的图片（responses 规范 input_image part）→ chat 规范 image_url part。
+// 此前被 inputTextOf 静默丢掉 → 下游根本拿不到图，模型"看不到"（2026-09-22 实测）。
+function inputImagesOf(content) {
+  if (!Array.isArray(content)) return [];
+  const out = [];
+  for (const p of content) {
+    if (!p || typeof p !== "object") continue;
+    if (p.type === "input_image" || p.type === "image_url") {
+      const url = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
+      if (url) out.push({ type: "image_url", image_url: { url } });
+    }
+  }
+  return out;
 }
 
 // POST /v1/responses body → chat completions body（直接喂现有 pipeline）
@@ -51,7 +67,10 @@ export function responsesToChatBody(req = {}) {
     }
     // responses 规范：message item 的 type 可省（AI SDK/opencode 就不发）→ 有 role 即按 message 处理
     if (it.type === "message" || (!it.type && it.role)) {
+      const imgs = inputImagesOf(it.content);
       const msg = { role: it.role || "user", content: inputTextOf(it.content) };
+      // 有图时 content 用 chat 多模态数组形状（text + image_url），下游 responses 通道才能带图上游
+      if (imgs.length) msg.content = [...(msg.content ? [{ type: "text", text: msg.content }] : []), ...imgs];
       if (pendingReasoning.length && msg.role === "assistant") { msg.reasoning_items = pendingReasoning; pendingReasoning = []; }
       messages.push(msg);
     } else if (it.type === "function_call") {
