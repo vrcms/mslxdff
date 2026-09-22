@@ -40,6 +40,7 @@ export function extractDelta(dataLine) {
 export function errorStatus(err) {
   if (!err) return 500;
   if (err.kind === "content_policy") return 400;
+  if (err.kind === "auth") return [401, 403].includes(err.status) ? err.status : 401;
   if (err.kind === "upstream") return [401, 403, 429].includes(err.status) ? err.status : 502;
   return 502;
 }

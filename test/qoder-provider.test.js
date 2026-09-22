@@ -10,6 +10,10 @@ import { accountFromBlob } from "../src/providers/qoder/account-store.js";
 import { getEndpoints, normalizeRegion } from "../src/providers/qoder/constants.js";
 import { pickCampaign, runCheckin, fetchQuota, checkinHeaders } from "../src/providers/qoder/checkin.js";
 import { handleQoderCheckin } from "../src/cli/commands/provider/qoder-checkin.js";
+import { createChatService } from "../src/providers/qoder/chat.js";
+import { buildUpstreamRequest } from "../src/providers/qoder/request.js";
+import { reshapeQoderStream } from "../src/providers/qoder/stream.js";
+import { aggregateQoderStream, toCompletionJson } from "../src/providers/qoder/aggregate.js";
 
 describe("qoder encode", () => {
   it("roundtrip 中英文与空串", () => {
@@ -252,5 +256,90 @@ describe("qoder checkin", () => {
     const json = JSON.parse(out2[out2.length - 1]);
     assert.equal(json.claimed, 1);
     assert.equal(json.results[0].quota, "0/100 credits（已耗尽）");
+  });
+});
+
+// ---------- 真流式（边收边转，不攒数组）----------
+describe("qoder 真流式", () => {
+  const wrap = (inner) => `data:${JSON.stringify({ statusCodeValue: 200, body: JSON.stringify(inner), headers: {} })}\n`;
+  const sess = { identity: { userType: "personal_standard" } };
+
+  // 上游 body 分两次推帧：首帧 content + keep-open，调用方用受控释放模拟"流未结束"
+  const controlledUpstream = (first, rest) => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const enc = new TextEncoder();
+    const s = new ReadableStream({
+      async start(c) {
+        c.enqueue(enc.encode(first));
+        await gate;
+        for (const chunk of rest) c.enqueue(enc.encode(chunk));
+        c.close();
+      },
+    });
+    return { stream: s, release };
+  };
+
+  const svc = (fetchImpl) => createChatService({ fetchImpl, timeoutMs: 5000 });
+
+  it("stream:true 首帧未等上游结束即已可读（真流式，非回放）", async () => {
+    const first = wrap({ choices: [{ delta: { content: "Hi" } }] });
+    const rest = [wrap({ choices: [{ delta: { content: " there" } }] }), wrap({ usage: { prompt_tokens: 10, completion_tokens: 2 } })];
+    const { stream, release } = controlledUpstream(first, rest);
+    const res = await svc(async () => new Response(stream)).runChat(
+      { model: "qfmodel", messages: [{ role: "user", content: "hi" }], stream: true }, sess, "global");
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/event-stream/);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let text = "", sawHi = false, reads = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        text += dec.decode(value, { stream: !done });
+        if (text.includes('"content":"Hi"')) { sawHi = true; break; }
+      }
+      if (done || ++reads > 50) break;
+    }
+    assert.ok(sawHi, "上游 gate 未释放前首帧已可读");
+    assert.ok(!text.includes("[DONE]"), "未读完前不应收尾");
+    release();
+    let tail = "";
+    for (;;) { const { done, value } = await reader.read(); if (value) tail += dec.decode(value, { stream: !done }); if (done) break; }
+    assert.ok((text + tail).includes("[DONE]"), "读完应收尾");
+    assert.ok((text + tail).includes('"content":" there"'), "后续帧应转发");
+  });
+
+  it("stream:false 聚合 JSON 不变（content+usage）", async () => {
+    const body = wrap({ choices: [{ delta: { content: "A" } }] }) + wrap({ choices: [{ delta: { content: "B" } }] })
+      + wrap({ usage: { prompt_tokens: 7, completion_tokens: 3 } });
+    const res = await svc(async () => new Response(body)).runChat(
+      { model: "qfmodel", messages: [{ role: "user", content: "hi" }], stream: false }, sess, "global");
+    assert.equal(res.status, 200);
+    const j = await res.json();
+    assert.equal(j.choices[0].message.content, "AB");
+    assert.equal(j.usage.prompt_tokens, 7);
+    assert.equal(j.usage.completion_tokens, 3);
+  });
+
+  it("上游 401：流式走流内 error 事件（200）；非流式走 401 JSON", async () => {
+    const s = await svc(async () => new Response("nope", { status: 401 })).runChat(
+      { model: "qfmodel", messages: [], stream: true }, sess, "global");
+    const t = await s.text();
+    assert.equal(s.status, 200);
+    assert.ok(t.includes("event: error") && t.includes("[DONE]"), "流内错误+收尾");
+    const j = await svc(async () => new Response("nope", { status: 401 })).runChat(
+      { model: "qfmodel", messages: [], stream: false }, sess, "global");
+    assert.equal(j.status, 401);
+  });
+
+  it("空流：流式尾部 error 事件；非流式 502", async () => {
+    const s = await svc(async () => new Response("")).runChat(
+      { model: "qfmodel", messages: [], stream: true }, sess, "global");
+    const t = await s.text();
+    assert.ok(t.includes("empty upstream stream"), "空流语义保留");
+    const j = await svc(async () => new Response("")).runChat(
+      { model: "qfmodel", messages: [], stream: false }, sess, "global");
+    assert.equal(j.status, 502);
   });
 });
