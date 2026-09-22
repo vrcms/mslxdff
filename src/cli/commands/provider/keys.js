@@ -17,6 +17,14 @@ export async function handleProviderKeys(id, sub, rest, args) {
           if (a) console.log(`  [${i + 1}]  user=${a.userName || "(未识别)"} uid=${a.userId ? `${a.userId.slice(0, 8)}…` : "(空，请删了重登回填)"} domain=${a.domainId ? a.domainId.slice(0, 8) + "…" : "(空)"} (${k.length} chars)`);
           else console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`);
         }
+      } else if (id === "cline") {
+        const { loadProviderAuths } = await import("../../../state.js");
+        const auths = loadProviderAuths(id) || [];
+        const byRt = new Map(auths.map((a) => [String(a?.refreshToken || ""), String(a?.uid || "")]));
+        keys.forEach((k, i) => {
+          const em = byRt.get(String(k || "")) || "";
+          console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)${em ? `  ${em}` : "  (邮箱未映射，重登一次回填)"}`);
+        });
       } else keys.forEach((k, i) => console.log(`  [${i + 1}]  ${k.slice(0, 4)}…${k.slice(-4)} (${k.length} chars)`));
       console.log(`  remove by: mslxdff -provider ${id} remove <seq> [seq...] | <key-value>`);
     } else {
