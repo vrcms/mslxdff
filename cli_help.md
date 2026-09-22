@@ -647,7 +647,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 
 - **语法**：`mslxdff -provider cline login`（别名 `auth`/`oauth`；`cline` 同）
  - **作用**：`cline` 供应商默认直连 `api.cline.bot` 用 `Bearer sk_xxx` 会遇 `403 only available via Cline product surfaces`（服务端强校验 Cline 客户端指纹）。本命令走 Cline 官方 WorkOS 设备授权流：打印浏览器授权链接 → 你登录一次 → 自动 `POST /api/v1/auth/register` 换 `refreshToken` → **落盘 `providerConfigs.cline.keys`**（供应商 id 统一为 `cline`，不再双写）。此后 `cline` 所有请求自动走：`refreshToken → POST /api/v1/auth/refresh → workos:accessToken` + 完整指纹头（`User-Agent: Cline/3.0.47`、`X-CLIENT-TYPE: cline-sdk`、`X-PLATFORM: terminal`、`X-Task-ID` 等），`deepseek/deepseek-v4-flash` 不再 403；deepseek 家族（含 `cline-free/deepseek-*`）非流式请求内部强制 `stream:true` 并聚合返回（避免 `500 empty response content`），对外仍按请求方 `stream` 标志。
-- **多账号**：重复 `login` 追加；`429 Daily free limit reached`/空响应自动解析冷却（`Try again in Xh Xm`）并切换下一账号，800ms 串行队列防并发空响应。
+  - **多账号**：重复 `login` 追加（同邮箱自动替换不追加：`auths` 存邮箱映射，老账号无映射时用 refresh 反查兜底；`list` 显示邮箱）；`429 Daily free limit reached`/空响应自动解析冷却（`Try again in Xh Xm`）并切换下一账号，800ms 串行队列防并发空响应。
 - **网络**：直连 `api.workos.com` 被墙会报超时（20s）；开代理后重试：`set HTTPS_PROXY=http://127.0.0.1:7890`（`HTTP_PROXY` 同），login 自动经代理。
 - **示例**：
   ```bash

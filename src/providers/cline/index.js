@@ -1,5 +1,5 @@
 import { createKeyRing } from "../keyring.js";
-import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath, saveProviderConfig } from "../../state.js";
+  import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath, saveProviderConfig, loadProviderAuths } from "../../state.js";
 import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createChatRunner } from "../base.js";
 import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
@@ -68,8 +68,14 @@ export function createClineProvider({
           const idx = cur.indexOf(oldRefreshToken);
           if (idx >= 0) {
             const next = [...cur]; next[idx] = newRefreshToken;
-            // 优先写 providerConfigs，兼容旧路径由 saveProviderConfig 处理
-            saveProviderConfig(id, { baseUrl: resolvedBase, keys: next }, file ? { file } : {});
+            // 优先写 providerConfigs，兼容旧路径由 saveProviderConfig 处理；auths 邮箱映射同步新串防漂移
+            let auths;
+            try {
+              const list = loadProviderAuths(id, file ? { file } : {});
+              const ai = list.findIndex((a) => String(a?.refreshToken || "") === String(oldRefreshToken || ""));
+              if (ai >= 0) { auths = [...list]; auths[ai] = { ...auths[ai], refreshToken: newRefreshToken }; }
+            } catch {}
+            saveProviderConfig(id, { baseUrl: resolvedBase, keys: next, ...(auths ? { auths } : {}) }, file ? { file } : {});
           }
           // 只回写 cline 自己（旧 id 轮换回写已随 id 统一删除，见 .scratch/cline-unify/SPEC.md §4.1）
         } catch {}

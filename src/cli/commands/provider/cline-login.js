@@ -119,7 +119,37 @@ export async function handleClineLogin(id, sub) {
   console.log(`✅ 登录成功! 账号: ${email}`);
   console.log(`🔑 refreshToken: ${rt.slice(0, 8)}…${rt.slice(-8)} (${rt.length} 字符)`);
   // 落盘到 state（供应商 id 恒为 cline；写盘前先跑一次性迁移，保证老用户不会再写出 clinebot）
-  const { defaultStateFile, loadProviderKeys, saveProviderConfig, loadProviderConfig } = await import("../../../state.js");
+  // 同邮箱去重：refreshToken 每次 login 都换新串，裸串比对拦不住重复账号，必须按 email 归一。
+  // auths 存 uid=email 索引行（domain=cline.bot），keys 与 auths 双写；老 keys 无映射时用 refresh 反查兜底。
+  const { defaultStateFile, loadProviderKeys, saveProviderConfig, loadProviderConfig, loadProviderAuths } = await import("../../../state.js");
+  function normEmail(v) { return String(v || "").trim().toLowerCase(); }
+  function emailFromJson(j) {
+    try {
+      const d = j?.data && typeof j.data === "object" ? j.data : j;
+      const u = d?.userInfo && typeof d.userInfo === "object" ? d.userInfo : null;
+      const cand = u?.email || d?.email || d?.user?.email || u?.mail || d?.mail || "";
+      if (cand && String(cand).includes("@")) return normEmail(cand);
+      const m = String(JSON.stringify(j || {}).slice(0, 4000)).match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+      return m ? normEmail(m[0]) : "";
+    } catch { return ""; }
+  }
+  async function resolveClineEmail(refreshToken) {
+    try {
+      const baseNoV1 = "https://api.cline.bot";
+      const res = await compatFetch(`${baseNoV1}/api/v1/auth/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken, grantType: "refresh_token" }), ...extraOpts, signal: timeoutSignal(15000) });
+      if (!res.ok) return "";
+      return emailFromJson(await res.json().catch(() => null));
+    } catch { return ""; }
+  }
+  function upsertAuths(list, email, rt) {
+    const norm = normEmail(email);
+    if (!norm || norm === "unknown") return [...(list || [])];
+    const next = [...(list || [])];
+    const i = next.findIndex((a) => normEmail(a?.uid) === norm);
+    if (i >= 0) next[i] = { uid: next[i].uid, domain: "cline.bot", enterpriseId: "", refreshToken: rt };
+    else next.push({ uid: String(email).trim(), domain: "cline.bot", enterpriseId: "", refreshToken: rt });
+    return next;
+  }
   try {
     const { runStateMigrations } = await import("../../../state/migrations.js");
     const mig = await runStateMigrations({ file: defaultStateFile() });
@@ -128,12 +158,51 @@ export async function handleClineLogin(id, sub) {
   try {
     const pid = "cline";
     const cur = loadProviderKeys(pid);
+    const cfg = loadProviderConfig(pid) || { baseUrl: "", keys: [] };
+    const baseUrl = cfg.baseUrl || "https://api.cline.bot";
+    let auths = loadProviderAuths(pid) || [];
+    const norm = normEmail(email);
     if (cur.includes(rt)) {
-      console.log(`   ℹ️ ${pid} 已存在相同 token，跳过`);
+      auths = upsertAuths(auths, email, rt);
+      saveProviderConfig(pid, { baseUrl, keys: cur, auths });
+      console.log(`   ℹ️ ${pid} 已存在相同 token，已补邮箱映射（现 ${cur.length} 个账号）`);
+    } else if (norm && norm !== "unknown") {
+      const ai = auths.findIndex((a) => normEmail(a?.uid) === norm);
+      if (ai >= 0) {
+        const oldRt = String(auths[ai]?.refreshToken || "");
+        const nextKeys = [...cur];
+        const at = oldRt ? nextKeys.indexOf(oldRt) : -1;
+        if (at >= 0) nextKeys[at] = rt;
+        else { const dup = nextKeys.indexOf(rt); if (dup < 0) nextKeys.push(rt); }
+        auths = upsertAuths(auths, email, rt);
+        saveProviderConfig(pid, { baseUrl, keys: [...new Set(nextKeys.filter(Boolean))], auths });
+        console.log(`   ℹ️ ${email} 已存在，token 已替换（仍 ${nextKeys.length} 个账号，未追加）`);
+      } else {
+        let dupIdx = -1;
+        const resolved = [];
+        for (let i = 0; i < cur.length; i++) {
+          const em = await resolveClineEmail(cur[i]);
+          resolved[i] = em;
+          if (em && em === norm) { dupIdx = i; break; }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        if (dupIdx >= 0) {
+          const nextKeys = [...cur]; nextKeys[dupIdx] = rt;
+          for (let i = 0; i < cur.length; i++) if (resolved[i]) auths = upsertAuths(auths, resolved[i], i === dupIdx ? rt : cur[i]);
+          auths = upsertAuths(auths, email, rt);
+          saveProviderConfig(pid, { baseUrl, keys: [...new Set(nextKeys.filter(Boolean))], auths });
+          console.log(`   ℹ️ ${email} 已存在（位置 ${dupIdx + 1}），token 已替换（仍 ${nextKeys.length} 个账号，未追加）`);
+        } else {
+          const nextKeys = [...new Set([...cur, rt].filter(Boolean))];
+          for (let i = 0; i < cur.length; i++) if (resolved[i]) auths = upsertAuths(auths, resolved[i], cur[i]);
+          auths = upsertAuths(auths, email, rt);
+          saveProviderConfig(pid, { baseUrl, keys: nextKeys, auths });
+          console.log(`   ✅ 已写入 ${pid}（现 ${nextKeys.length} 个账号）`);
+        }
+      }
     } else {
-      const cfg = loadProviderConfig(pid) || { baseUrl: "", keys: [] };
       const nextKeys = [...new Set([...(cfg.keys || cur), rt].filter(Boolean))];
-      saveProviderConfig(pid, { baseUrl: cfg.baseUrl || "https://api.cline.bot", keys: nextKeys });
+      saveProviderConfig(pid, { baseUrl, keys: nextKeys, auths });
       console.log(`   ✅ 已写入 ${pid}（现 ${nextKeys.length} 个账号）`);
     }
   } catch (e) {
@@ -144,6 +213,6 @@ export async function handleClineLogin(id, sub) {
   console.log("  mslxdff -restart                         重启网关使新账号生效");
   console.log("  mslxdff -provider cline bench --json     测速 deepseek 是否 200");
   console.log("  mslxdff -chat                             直接对话，模型选 deepseek/deepseek-v4-flash");
-  console.log("\n多账号：重复 `mslxdff -provider cline login` 追加，二号自动做后备");
+  console.log("\n多账号：重复 `mslxdff -provider cline login` 追加（同邮箱自动替换不追加），二号自动做后备");
   process.exit(0);
 }
