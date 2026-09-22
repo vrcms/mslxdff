@@ -4,6 +4,9 @@ import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createC
 import { compatFetch } from "../compat.js";
 import crypto from "node:crypto";
 import { genId, opencodeUa, digestIdTail } from "../opencode-identity.js";
+import { isResponsesModel } from "../upstream-responses.js";
+import { createResponsesChannel, resolveResponsesPath, envSlug } from "./responses-channel.js";
+import { resolveEngineMode } from "../upstream-engine/mode.js";
 
 const { UndiciFetch } = getUndici();
 
@@ -41,6 +44,7 @@ export function createGenericProvider({
   apiKey,
   modelsPath,
   chatPath,
+  responsesPath,
   connectTimeoutMs = Number(process.env.MSLXDFF_GENERIC_TIMEOUT_MS) || 30_000,
   cooldownMs = envInt("MSLXDFF_GENERIC_COOLDOWN_MS", 30_000),
   retry = {
@@ -106,12 +110,29 @@ export function createGenericProvider({
     });
   }
 
+  // responses 类模型（muse-spark* 等）只在 /responses 挂载 → 单独通道，出参恒 chat 形状。
+  const responses = createResponsesChannel({
+    id,
+    url: joinUrl(resolvedBase, resolveResponsesPath(id, responsesPath)),
+    connectTimeoutMs,
+    retry,
+    cooldownMs,
+    // 供应商级 <ID>_SDK 未设置即继承全局总闸（MSLXDFF_UPSTREAM_ENGINE）
+    sdkEnabled: resolveEngineMode(process.env, `MSLXDFF_${envSlug(id)}_SDK`) === "sdk",
+    buildHeaders,
+    fetchImpl,
+    dispatcher,
+  });
+
   async function chat(body, opts) {
+    const sourceKey = `MSLXDFF_${envSlug(id)}_KEY`;
+    if (isResponsesModel(body?.model)) return responses.run(body, ring, sourceKey, opts);
     const { runChat } = scopedRunner(ring, opts);
-    return runChat(body, ring, `MSLXDFF_${id.toUpperCase()}_KEY`);
+    return runChat(body, ring, sourceKey);
   }
   async function chatWithKeys(body, keys, opts) {
     const tmp = createKeyRing(keys, { cooldownMs });
+    if (isResponsesModel(body?.model)) return responses.run(body, tmp, "shared provider keys", opts);
     const { runChat } = scopedRunner(tmp, opts);
     return runChat(body, tmp, "shared provider keys");
   }
@@ -131,5 +152,5 @@ export function createGenericProvider({
     if (agent && typeof agent.close === "function") { try { await agent.close(); } catch {} }
   }
 
-  return { id, chat, chatWithKeys, listModels, preheat, close, agent, keyRing: ring, baseUrl: resolvedBase };
+  return { id, chat, chatWithKeys, listModels, preheat, close, agent, keyRing: ring, baseUrl: resolvedBase, responsesUrl: responses.url };
 }
