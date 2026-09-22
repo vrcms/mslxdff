@@ -130,3 +130,41 @@ test("dropEncrypted：剥掉加密态——留摘要文本、无摘要整条跳�
   const k0 = keep[0].content.find((p) => p.type === "reasoning");
   assert.equal(k0.providerOptions.openai.reasoningEncryptedContent, "ENC1", "默认路径仍带加密态");
 });
+
+test("入站去重：同一 reasoning item id 重复出现 → 保首个丢后续（上游 Duplicate item 400 回归）", () => {
+  const body = responsesToChatBody({
+    model: "ocgo/muse-spark-1.3-contributor",
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "reasoning", id: "rs_6ab263373d8f60ce092f4cdf:rs_01a0c8d3902f75e6ae2a2a8b403270a7", encrypted_content: "ENC-A", summary: [] },
+      { type: "reasoning", id: "rs_6ab263373d8f60ce092f4cdf:rs_01a0c8d3902f75e6ae2a2a8b403270a7", encrypted_content: "ENC-A", summary: [] },
+      { type: "message", role: "assistant", content: "回答" },
+      { type: "reasoning", id: "rs_other", encrypted_content: "ENC-B", summary: [] },
+      { type: "reasoning", id: "rs_other", encrypted_content: "ENC-B", summary: [] },
+      { type: "message", role: "assistant", content: "回答2" },
+    ],
+    stream: true,
+  });
+  const withItems = body.messages.filter((m) => Array.isArray(m.reasoning_items));
+  assert.equal(withItems.length, 2, "两条 assistant 各挂一组");
+  assert.equal(withItems[0].reasoning_items.length, 1, "重复 id 只保留首个");
+  assert.equal(withItems[1].reasoning_items.length, 1, "另一 id 同样只保留首个");
+  assert.equal(withItems[0].reasoning_items[0].id, "rs_6ab263373d8f60ce092f4cdf:rs_01a0c8d3902f75e6ae2a2a8b403270a7");
+});
+
+test("出站去重：toModelPrompt 对跨消息重复的 reasoning item id 跳过后续（最后一道防线）", () => {
+  const dupId = "rs_6ab263373d8f60ce092f4cdf:rs_01a0c8d3902f75e6ae2a2a8b403270a7";
+  const prompt = toModelPrompt([
+    { role: "assistant", content: "a1", reasoning_items: [{ id: dupId, encrypted_content: "ENC-A" }] },
+    { role: "user", content: "u" },
+    { role: "assistant", content: "a2", reasoning_items: [{ id: dupId, encrypted_content: "ENC-A" }] },
+    { role: "user", content: "u2" },
+    { role: "assistant", content: "a3", reasoning_items: [{ id: rsFresh(), encrypted_content: "ENC-B" }] },
+  ]);
+  const reasoningParts = prompt.flatMap((p) => p.content).filter((x) => x.type === "reasoning" && x.providerOptions?.openai?.itemId);
+  const ids = reasoningParts.map((p) => p.providerOptions.openai.itemId);
+  assert.equal(ids.filter((x) => x === dupId).length, 1, "同 id 只透传一次");
+  assert.equal(ids.length, 2, "不同 id 均保留");
+});
+
+function rsFresh() { return `rs_unique_${Math.random().toString(36).slice(2)}`; }

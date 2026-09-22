@@ -41,6 +41,10 @@ function parseToolArgs(raw) {
 
 export function toModelPrompt(messages, { dropEncrypted = false } = {}) {
   const out = [];
+  // 上游按 item id 查重：同一 reasoning item 重复出现 → 400 "Duplicate item found"
+  // （上游报错原文即要求 Remove duplicate items）。这里按 itemId 保首个、丢后续，
+  // 防客户端重放/其他生产者把同一加密 item 组装两次。
+  const seenReasoningIds = new Set();
   for (const m of Array.isArray(messages) ? messages : []) {
     if (!m || typeof m !== "object") continue;
     const role = String(m.role || "");
@@ -61,6 +65,10 @@ export function toModelPrompt(messages, { dropEncrypted = false } = {}) {
       let pushedEncrypted = false;
       for (const r of items) {
         if (!r || typeof r !== "object") continue;
+        // 重复 id 的加密 item 直接跳过：上游按 item id 查重（Duplicate item found 400），
+        // 重复项无合法语义，保首个即可（首个已带全量 encrypted_content）。
+        if (r.id && seenReasoningIds.has(String(r.id))) continue;
+        if (r.id) seenReasoningIds.add(String(r.id));
         const summaryText = Array.isArray(r.summary) ? r.summary.map((s) => s?.text || "").join("\n") : "";
         if (dropEncrypted) {
           if (summaryText) parts.push({ type: "reasoning", text: summaryText });

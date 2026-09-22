@@ -33,12 +33,18 @@ export function responsesToChatBody(req = {}) {
   if (req.instructions) messages.push({ role: "system", content: String(req.instructions) });
   const input = req.input;
   const items = typeof input === "string" ? [{ type: "message", role: "user", content: input }] : Array.isArray(input) ? input : [];
-  // 加密思考往返：input 里的 reasoning item 挂到下一条 assistant 消息（thinking 跨轮必需，不能丢）
+  // 加密思考往返：input 里的 reasoning item 挂到下一条 assistant 消息（thinking 跨轮必需，不能丢）。
+  // 上游按 item id 查重：同一 reasoning item 重复出现 → 400 "Duplicate item found"（2026-09-22 实测，
+  // 客户端重试/重放历史时会把同一 item 存两份），故按 id 保首个、丢后续——重复项无合法语义，删了不吃亏。
   let pendingReasoning = [];
+  const seenReasoningIds = new Set();
   for (const it of items) {
     if (!it || typeof it !== "object") continue;
     if (it.type === "reasoning") {
       if (it.id || it.encrypted_content) {
+        const key = String(it.id || "");
+        if (key && seenReasoningIds.has(key)) continue;
+        if (key) seenReasoningIds.add(key);
         pendingReasoning.push({ id: it.id, encrypted_content: it.encrypted_content, summary: it.summary });
       }
       continue;
