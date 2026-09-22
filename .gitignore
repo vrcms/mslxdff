@@ -44,3 +44,4 @@ check_*.mjs
 test_*.mjs
 *.mjs
 !src/**/*.mjs
+.backup/
