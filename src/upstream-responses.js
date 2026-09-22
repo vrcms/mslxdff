@@ -28,21 +28,46 @@ export function chatToResponsesBody(chatBody) {
   const msgs = Array.isArray(chatBody?.messages) ? chatBody.messages : [];
   const system = msgs.filter((m) => m.role === "system").map((m) => String(m.content || "")).join("\n");
   const nonSystem = msgs.filter((m) => m.role !== "system");
-  const inputParts = nonSystem.map((m) => {
+  // 图片保留：content 数组里的 image_url / input_image 转 responses 规范的 input_image item
+  // （data: base64 原样透传；此前整段拍平成纯文本 → 模型"看不到图"，2026-09-22 实测）。
+  const imagesOf = (m) => Array.isArray(m.content)
+    ? m.content.flatMap((x) => {
+        if (!x || typeof x !== "object") return [];
+        const url = x.type === "image_url" || x.type === "input_image" || x.image_url != null
+          ? (typeof x.image_url === "string" ? x.image_url : x.image_url?.url)
+          : null;
+        return url ? [{ type: "input_image", image_url: url }] : [];
+      })
+    : [];
+  const inputItems = nonSystem.map((m) => {
     const c = m.content;
-    let base;
-    if (typeof c === "string") base = `${m.role}: ${c}`;
-    else if (Array.isArray(c)) base = `${m.role}: ${c.map((x) => x.text || x.content || "").join("")}`;
-    else base = `${m.role}: ${String(c || "")}`;
+    let text;
+    if (typeof c === "string") text = c;
+    else if (Array.isArray(c)) text = c.filter((x) => x && (x.type === "text" || x.type === "input_text")).map((x) => x.text || "").join("");
+    else text = String(c ?? "");
+    let base = `${m.role}: ${text}`;
     // 保留 tool_calls / tool 结果，避免多轮丢失
     if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
       const tcStr = m.tool_calls.map((tc) => `${tc.function?.name || "tool"}(${tc.function?.arguments || ""})`).join("; ");
       base += ` [tool_calls: ${tcStr}]`;
     }
     if (m.role === "tool" && m.tool_call_id) base += ` (call_id=${m.tool_call_id})`;
-    return base;
+    const imgs = imagesOf(m);
+    return { text: base, images: imgs };
   });
-  const input = inputParts.join("\n\n") || "hi";
+  const inputParts = inputItems.map((x) => x.text);
+  const hasText = inputParts.some((t) => t.trim());
+  const allImages = inputItems.flatMap((x) => x.images);
+  // 有图时 input 必须用 item 数组（text + input_image 混排）；纯文本保持串形状（既有行为不变）
+  const input = allImages.length
+    ? inputItems.flatMap((x) => {
+        const items = [];
+        if (x.text.trim()) items.push({ type: "input_text", text: x.text });
+        items.push(...x.images);
+        return items;
+      })
+    : (inputParts.join("\n\n") || "hi");
+  void hasText;
   // 流式意图透传：客户端要 SSE 就向上游要 SSE（reshapeResponsesSse 负责转回 chat SSE）。
   // 写死 stream:false 是历史折衷（当时聚合 JSON 直回），已由完整 SSE 转换取代。
   const out = { model: chatBody.model, input, stream: chatBody?.stream === true };

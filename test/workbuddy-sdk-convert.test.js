@@ -32,6 +32,8 @@ describe("toModelPrompt", () => {
     ]);
     assert.equal(p[0].content.length, 2);
     assert.deepEqual(p[0].content[0], { type: "text", text: "看图" });
+    // AI SDK v3 契约：image 载体是 file part（mediaType image/*）→ responses 适配器转 input_image。
+    // {type:"image"} 会被 SDK 序列化成 null → 400 "did not match any supported type"（2026-09-22 实测）。
     assert.equal(p[0].content[1].type, "file");
     assert.equal(p[0].content[1].mediaType, "image/*");
     assert.equal(String(p[0].content[1].data), "https://example.com/a.png");

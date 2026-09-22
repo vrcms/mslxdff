@@ -16,6 +16,22 @@ function textOf(content) {
   return "";
 }
 
+// 图片 → AI SDK 的 file part（mediaType 为 image/*）。
+// 为什么不是 {type:"image"}：AI SDK v3 的 prompt 校验没有 image part 类型，会被序列化成
+// null 发给上游 → 400 "input[N].content did not match any supported type"（2026-09-22 实测）。
+// file part + image/* 才是 @ai-sdk/openai responses 适配器产出 input_image 的正道
+// （dist/index.mjs：mediaType.startsWith("image/") → {type:"input_image", image_url}）。
+// mediaType 从 data URL 提取真实类型：通配 "image/*" 会被 SDK 强转成 "image/jpeg"。
+function filePartFromImageUrl(url) {
+  const m = /^data:([^;,]*)[^,]*,/.exec(url);
+  const mediaType = m && m[1] ? m[1] : "image/*";
+  try {
+    return { type: "file", mediaType, data: new URL(url) };
+  } catch {
+    return null;
+  }
+}
+
 function userContentParts(content) {
   if (typeof content === "string") return [{ type: "text", text: content }];
   if (!Array.isArray(content)) return [{ type: "text", text: String(content ?? "") }];
@@ -24,10 +40,11 @@ function userContentParts(content) {
     if (!p || typeof p !== "object") continue;
     if (p.type === "text" || p.type === "input_text") {
       parts.push({ type: "text", text: String(p.text ?? "") });
-    } else if (p.type === "image_url") {
+    } else if (p.type === "image_url" || p.type === "input_image" || p.image_url != null) {
       const url = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
       if (!url) continue;
-      try { parts.push({ type: "file", mediaType: "image/*", data: new URL(url) }); } catch {}
+      const fp = filePartFromImageUrl(url);
+      if (fp) parts.push(fp);
     }
   }
   if (!parts.length) parts.push({ type: "text", text: "" });
