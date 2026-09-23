@@ -62,6 +62,9 @@ export function toModelPrompt(messages, { dropEncrypted = false } = {}) {
   // （上游报错原文即要求 Remove duplicate items）。这里按 itemId 保首个、丢后续，
   // 防客户端重放/其他生产者把同一加密 item 组装两次。
   const seenReasoningIds = new Set();
+  // 同 toolCallId 的 tool 结果重复出现 → 上游 400 "Duplicate function_call_output"
+  // （2026-09-23 实测：responses 入站虽已去重，此处仍加防线，防其他生产者直接组装 chat messages 重放）。
+  const seenToolResultIds = new Set();
   for (const m of Array.isArray(messages) ? messages : []) {
     if (!m || typeof m !== "object") continue;
     const role = String(m.role || "");
@@ -112,6 +115,8 @@ export function toModelPrompt(messages, { dropEncrypted = false } = {}) {
       }
       out.push({ role: "assistant", content: parts });
     } else if (role === "tool") {
+      const _tkey = String(m.tool_call_id || "");
+      if (_tkey) { if (seenToolResultIds.has(_tkey)) continue; seenToolResultIds.add(_tkey); }
       out.push({
         role: "tool",
         content: [{

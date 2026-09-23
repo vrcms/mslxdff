@@ -168,3 +168,34 @@ test("出站去重：toModelPrompt 对跨消息重复的 reasoning item id 跳�
 });
 
 function rsFresh() { return `rs_unique_${Math.random().toString(36).slice(2)}`; }
+
+test("入站去重：同 call_id 的 function_call_output 重复出现 → 保首个丢后续（Duplicate function_call_output 400 回归）", () => {
+  const body = responsesToChatBody({
+    model: "ocgo/muse-spark-1.3-contributor",
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "function_call", call_id: "call_01a0ce9217c372de96e20cd38747cd3e", name: "f", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_01a0ce9217c372de96e20cd38747cd3e", output: "ok-1" },
+      { type: "function_call_output", call_id: "call_01a0ce9217c372de96e20cd38747cd3e", output: "ok-1-dup" },
+      { type: "function_call", call_id: "call_other", name: "g", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_other", output: "ok-2" },
+    ],
+    stream: true,
+  });
+  const tools = body.messages.filter((m) => m.role === "tool");
+  assert.equal(tools.length, 2, "同 call_id 只保留首个，不同 call_id 保留");
+  assert.equal(tools[0].tool_call_id, "call_01a0ce9217c372de96e20cd38747cd3e");
+  assert.equal(tools[0].content, "ok-1", "保留的是首个输出");
+});
+
+test("出站去重：toModelPrompt 对同 tool_call_id 的 tool 结果跳过后续（最后一道防线）", () => {
+  const prompt = toModelPrompt([
+    { role: "assistant", content: "", tool_calls: [{ id: "call_dup", function: { name: "f", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "call_dup", content: "r1" },
+    { role: "tool", tool_call_id: "call_dup", content: "r1-dup" },
+    { role: "tool", tool_call_id: "call_fresh", content: "r2" },
+  ]);
+  const results = prompt.flatMap((p) => p.content).filter((x) => x.type === "tool-result");
+  assert.equal(results.length, 2, "同 id 只透传一次，不同 id 保留");
+  assert.equal(results[0].output.value, "r1", "保留首个");
+});
