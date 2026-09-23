@@ -81,20 +81,63 @@ export function createQoderProvider({
     return chatSvc.runChat(stripped, picked.sess, picked.region);
   }
 
-  async function listModels() {
-    const picked = pickSession();
-    if (!picked) return [];
-    try { return await modelsSvc.listModels(picked.sess, picked.region); } catch { return []; }
-  }
-
-  async function preheat() {
-    try {
-      const picked = pickSession();
-      if (!picked) return { ok: false, error: "no account" };
-      await modelsSvc.listModels(picked.sess, picked.region);
-      return { ok: true };
-    } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) }; }
-  }
+   // 全号聚合：双号分属 cn/global 两区，模型表各不同（cn 14 个/global 15 个）；
+   // 只取单号会漏另一区（如轮询到 global 就看不到 cn 独有的 q37fmodel/gm51model）。
+   // 按 id 并集去重，只返回 enable=true 的可调用模型（过滤已下沉到 models.js）。
+   function eachCred() {
+     const out = [];
+     const seen = new Set();
+     const push = (blob, auth) => {
+       if (!blob?.deviceToken || seen.has(blob.deviceToken)) return;
+       seen.add(blob.deviceToken);
+       out.push({ blob, auth: auth || {} });
+     };
+     for (const k of keys) {
+       const blob = accountFromBlob(k);
+       if (!blob?.deviceToken) continue;
+       const auth = authList.find((a) => String(a?.refreshToken || "") === String(blob.refreshToken || "")) || authList[0] || {};
+       push(blob, auth);
+     }
+     if (!out.length) {
+       // keys 为空但 auth 目录有号（如 state 被外部改写）：从落盘 doc 合成凭据，目录不断即可出列表
+       try {
+         for (const { uid, doc } of listAccountDocs()) {
+           const a = doc?.auth || {};
+           if (!a.deviceToken) continue;
+           push({ deviceToken: a.deviceToken, refreshToken: a.refreshToken || "" },
+             { uid, name: doc?.account?.name || "", region: a.region || "global", refreshToken: a.refreshToken || "" });
+         }
+       } catch {}
+     }
+     return out;
+   }
+ 
+   async function listModels() {
+     const creds = eachCred();
+     if (!creds.length) return [];
+     const seen = new Set();
+     const out = [];
+     for (const { blob, auth } of creds) {
+       const region = normalizeRegion(region0 || auth.region || "global");
+       const sess = buildSessionFor({ ...blob, uid: auth.uid, name: auth.name, region });
+       try {
+         const list = await modelsSvc.listModels(sess, region);
+         for (const m of list) {
+           if (!m?.id || seen.has(m.id)) continue;
+           seen.add(m.id);
+           out.push(m);
+         }
+       } catch {}
+     }
+     return out;
+   }
+ 
+   async function preheat() {
+     try {
+       const list = await listModels();
+       return list.length ? { ok: true } : { ok: false, error: "no account" };
+     } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) }; }
+   }
 
   async function close() {}
   async function chatWithKeys(body, keysOverride) {
