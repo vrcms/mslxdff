@@ -114,6 +114,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     downstreamClosed: false,
     usage: null,
     chars: 0,
+    toolCalls: 0,
+    chatShaped: false,
     recoveries: 0,
   };
   let prevChunkAt = t0;
@@ -209,6 +211,12 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (txt.includes("[DONE]")) detail.sawDone = true;
             const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
             if (m) detail.sawFinishReason = m[1];
+            // chat 形状证据：只有看得出是 chat 轮才配判空（非 chat SSE/JSON 透传是正式契约，不得误伤）
+            if (!detail.chatShaped && (txt.includes('"choices"') || txt.includes('"delta"') || txt.includes('"finish_reason"') || txt.includes('"usage"') || txt.includes('"prompt_tokens"') || txt.includes("[DONE]"))) detail.chatShaped = true;
+            // 工具调用计数（空数组不算）：tool_calls 无正文是合法 agent 轮，
+            // 空转闸门必须豁免它，否则所有工具轮都会被误判为空轮——见 relay-pipeline 4b。
+            const tc = txt.match(/"tool_calls"\s*:\s*\[\s*\{/g);
+            if (tc) detail.toolCalls = (detail.toolCalls || 0) + tc.length;
             // 尝试提取 usage（流式末帧）：口径收口到 metrics.js，与未流式分支共用
             if (txt.includes("\"usage\"") || txt.includes("\"prompt_tokens\"")) {
               try {
@@ -326,6 +334,10 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     if (u) detail.usage = u;
     if (parsed.choices?.[0]?.message?.content) detail.chars = String(parsed.choices[0].message.content).length;
     else if (parsed.choices?.[0]?.text) detail.chars = String(parsed.choices[0].text).length;
+    // 非流式同样只判 chat 形状：无 choices 的任意 JSON 是透传契约（chat-route 单测锁死），不得判空
+    if (Array.isArray(parsed?.choices)) detail.chatShaped = true;
+    const _tcList = parsed.choices?.[0]?.message?.tool_calls;
+    if (Array.isArray(_tcList) && _tcList.length) detail.toolCalls = _tcList.length;
     const enriched = enrichNonStreamJson(parsed, fallback);
     json(res, upRes.status, enriched);
   } catch {

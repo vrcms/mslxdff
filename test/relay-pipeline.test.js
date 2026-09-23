@@ -364,4 +364,116 @@ describe("relay-pipeline 深模块", () => {
       assert.ok(probe.list.some((e) => e.type === "relay-start" && e.data.via === via));
     }
   });
+
+  test("US11 空转 200（finish=error，零正文零工具）→ handled:false + EMPTY_MODEL_RESPONSE", async () => {
+    const probe = evtProbe();
+    let logErrCalls = [];
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 0, totalMs: 2368, aborted: false, interrupted: false, detail: { receivedChunks: 5, receivedBytes: 3170, wroteChunks: 5, wroteBytes: 3170, sawDone: true, sawFinishReason: "error", chars: 0, toolCalls: 0, chatShaped: true, exitReason: "normal" } }),
+      evtFn: probe,
+      logError: (...a) => logErrCalls.push(a),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r11", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, false, "空转必须回退换候选，不把空轮递给客户端");
+    assert.equal(out.lastErr.status, 502);
+    assert.match(out.lastErr.message, /EMPTY_MODEL_RESPONSE/);
+    assert.match(out.lastErr.message, /finish_reason=error/);
+    assert.ok(probe.list.some((e) => e.type === "upstream-error" && e.data.message === "empty turn"));
+    assert.ok(probe.list.some((e) => e.type === "fallback" && e.data.reason === "empty turn"));
+    assert.equal(logErrCalls.length, 1);
+  });
+
+  test("US12 stop+零正文无工具 → 同样空转 failover", async () => {
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 5, totalMs: 100, aborted: false, interrupted: false, detail: { sawDone: true, sawFinishReason: "stop", chars: 0, chatShaped: true, exitReason: "normal" } }),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r12", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, false);
+    assert.match(out.lastErr.message, /EMPTY_MODEL_RESPONSE/);
+  });
+
+  test("US13 工具轮（零正文但有 tool_calls）→ 豁免不误杀", async () => {
+    const probe = evtProbe();
+    const auto = spyAuto();
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 10, totalMs: 300, aborted: false, interrupted: false, detail: { sawDone: true, sawFinishReason: "tool_calls", chars: 0, toolCalls: 2, exitReason: "normal" } }),
+      auto,
+      evtFn: probe,
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: true,
+      handlerCtx: { reqId: "r13", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: Date.now(),
+    });
+    assert.equal(out.handled, true, "工具轮必须正常放行");
+    assert.equal(auto._calls.ok.length, 1);
+  });
+
+  test("US14 finish=tool_calls 但计数漏检 → 兜底豁免不误杀", async () => {
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 10, totalMs: 300, aborted: false, interrupted: false, detail: { sawDone: true, sawFinishReason: "tool_calls", chars: 0, exitReason: "normal" } }),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r14", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, true);
+  });
+
+  test("US15 正常正文 → 不触发空转闸门", async () => {
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 10, totalMs: 300, aborted: false, interrupted: false, detail: { sawDone: true, sawFinishReason: "stop", chars: 42, exitReason: "normal" } }),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r15", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, true);
+  });
+
+  test("US16 非 chat 形状（无 chatShaped，如透传契约）→ 一律放行不判空", async () => {
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 10, totalMs: 300, aborted: false, interrupted: false, detail: { stallHits: 0, exitReason: "normal" } }),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: false },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r16", hops: 0, model: "m" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, true, "看不出 chat 形状时不得判空（透传契约优先）");
+  });
 });
