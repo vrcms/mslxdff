@@ -54,6 +54,9 @@ export function responsesToChatBody(req = {}) {
   // 客户端重试/重放历史时会把同一 item 存两份），故按 id 保首个、丢后续——重复项无合法语义，删了不吃亏。
   let pendingReasoning = [];
   const seenReasoningIds = new Set();
+  // 同 call_id 的 function_call_output 重复出现 → 上游 400 "Duplicate function_call_output"
+  // （2026-09-23 实测，客户端重试/重放历史时会把同一工具结果存两份），故同样按 call_id 保首个、丢后续。
+  const seenToolResultIds = new Set();
   for (const it of items) {
     if (!it || typeof it !== "object") continue;
     if (it.type === "reasoning") {
@@ -81,6 +84,8 @@ export function responsesToChatBody(req = {}) {
       if (pendingReasoning.length) { msg.reasoning_items = pendingReasoning; pendingReasoning = []; }
       messages.push(msg);
     } else if (it.type === "function_call_output") {
+      const _tkey = String(it.call_id || "");
+      if (_tkey) { if (seenToolResultIds.has(_tkey)) continue; seenToolResultIds.add(_tkey); }
       messages.push({ role: "tool", tool_call_id: it.call_id || "", content: typeof it.output === "string" ? it.output : JSON.stringify(it.output ?? "") });
     }
   }

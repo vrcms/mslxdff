@@ -24,6 +24,7 @@ export function diagnoseToolSequence(messages) {
   const list = Array.isArray(messages) ? messages : [];
   const issues = [];
   const open = new Map();
+  const seenResults = new Set();
   let calls = 0;
   let results = 0;
   const first = list[0];
@@ -50,8 +51,8 @@ export function diagnoseToolSequence(messages) {
       results++;
       const id = String(m.tool_call_id || "");
       if (!id) issues.push(`#${i} tool 结果空 id`);
-      else if (!open.has(id)) issues.push(`#${i} 孤立结果:${id}`);
-      else open.delete(id);
+      else if (seenResults.has(id)) issues.push(`#${i} 结果重复:${id}（上游按 call_id 查重会 400 Duplicate function_call_output，去重后只应出现一次）`);
+      else { seenResults.add(id); if (!open.has(id)) issues.push(`#${i} 孤立结果:${id}`); else open.delete(id); }
     } else if (open.size) {
       issues.push(`#${i} ${role} 打断{${[...open.keys()].join(",")}}`);
     }
