@@ -117,6 +117,26 @@ export function createRelayPipeline({
       detail: out.detail ?? null,
     });
 
+    // 5a0. 空转 200：流正常结束但零正文零工具调用 → 客户端会报 EMPTY_MODEL_RESPONSE
+    // （"The model ended its turn without producing any output"）；转 failover 而不是
+    // 把空轮递给客户端。chatShaped 是前置证据：只有看得出是 chat 轮才判空，
+    // 非 chat SSE/无 choices JSON 透传是正式契约（chat-route 单测锁死），一律放行。
+    // 工具轮豁免：tool_calls 无正文是合法 agent 形态；
+    // finish=tool_calls/function_call 兜底豁免（防计数漏检误杀）；下游已断开不重试（写给谁看）。
+    // 对标 dsh-cline-pass 的 EMPTY_RESPONSE 语义；不记 auto 冷却（空转≠模型坏，重试多半能好）。
+    const _d = out.detail || {};
+    const _emptyTurn = out.status === 200 && !out.timedOut && !out.interrupted && !_d.downstreamClosed &&
+      _d.chatShaped === true &&
+      (Number(_d.chars) || 0) === 0 && (Number(_d.toolCalls) || 0) === 0 &&
+      !["tool_calls", "function_call"].includes(_d.sawFinishReason);
+    if (_emptyTurn) {
+      const _why = _d.sawFinishReason ? ` (finish_reason=${_d.sawFinishReason})` : " (no content, no tool calls)";
+      try { _logError(actual, 502, `empty turn${_why}`); } catch {}
+      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null });
+      _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
+      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why} — retry or rephrase` } };
+    }
+
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
     if (out.timedOut === true) {
       const why = out.detail?.upstreamError ? ` (upstream read error: ${out.detail.upstreamError})` : "";

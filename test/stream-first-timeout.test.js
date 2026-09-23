@@ -231,3 +231,36 @@ test("客户端断开：立即取消上游读（不再空转读完）", async ()
   assert.equal(cancelled, 1, "断开即掐上游");
   assert.equal(r.detail.downstreamClosed, true);
 });
+
+test("tool_calls 计数：非空数组计入 toolCalls，空数组不算（空转闸门豁免依据）", async () => {
+  const res = fakeRes();
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield sseChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "bash", arguments: "{}" } }] } }] });
+      yield sseChunk({ choices: [{ delta: { tool_calls: [] }, finish_reason: "tool_calls" }] });
+      yield Buffer.from("data: [DONE]\n\n");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 0 });
+  assert.equal(r.status, 200);
+  assert.equal(r.detail.toolCalls, 1, "只有非空 tool_calls 数组计数");
+  assert.equal(r.detail.chars, 0);
+  assert.equal(r.detail.sawFinishReason, "tool_calls");
+  assert.equal(r.detail.chatShaped, true, "含 choices/delta 即 chat 形状");
+});
+
+test("chatShaped：data 无 chat 字段但有 [DONE] → 仍计 chat 流式约定", async () => {
+  const res = fakeRes();
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from('data: {"foo":"bar"}\n\n', "utf8");
+      yield Buffer.from("data: [DONE]\n\n");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 0 });
+  assert.equal(r.status, 200);
+  assert.equal(r.detail.chatShaped, true, "[DONE] 也是 chat 流式约定，计入形状证据");
+  assert.equal(r.detail.chars, 0);
+});
