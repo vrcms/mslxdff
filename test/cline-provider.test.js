@@ -269,3 +269,27 @@ test("cline: preheat failure leaves snapshot untouched", async () => {
   await p.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("cline: 默认 token 上限 32000 且 reasoning_effort 缺省不发（对标 dsh-cline-pass）", async () => {
+  const { fetchImpl } = mockFetch({ chatSse: false });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  const resp = await p.chat({ model: "z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: false });
+  assert.equal(resp.status, 200);
+  const sent = JSON.parse(await resp.text()).data;
+  assert.equal(sent.max_tokens, 32000, "缺省不再 4096 截断长文");
+  assert.equal(sent.max_completion_tokens, 32000, "max_completion 双写保留");
+  assert.ok(!("reasoning_effort" in sent), "缺省不替上游做 high 假设");
+  await p.close();
+});
+
+test("cline: 客户端显式 max_tokens/reasoning_effort 优先透传", async () => {
+  const { fetchImpl } = mockFetch({ chatSse: false });
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  const resp = await p.chat({ model: "z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: false, max_tokens: 8000, reasoning_effort: "low" });
+  assert.equal(resp.status, 200);
+  const sent = JSON.parse(await resp.text()).data;
+  assert.equal(sent.max_tokens, 8000);
+  assert.equal(sent.max_completion_tokens, 8000);
+  assert.equal(sent.reasoning_effort, "low");
+  await p.close();
+});

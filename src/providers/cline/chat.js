@@ -170,18 +170,21 @@ export function createChatService({
     const sessionId = genSessionId();
     const isStream = body?.stream === true;
     const upstreamModel = stripProviderPrefix(model, id);
-    // token 口径双写：对标官方 withMaxCompletionTokensForReasoningModels——
-    // cline 上游默认 reasoning_effort high，推理模型认 max_completion_tokens，
-    // 只发 max_tokens 会被部分通道拒；双写兼容最稳。
-    const tokLimit = body?.max_tokens || body?.max_completion_tokens || 4096;
+    // token 上限对标 dsh-cline-pass（DEFAULT_MAX_TOKENS=32000）：客户端显式 max 优先，
+    // 缺省给 32000 而非 4096——旧 4096 默认会在长文处 finish=length 拦腰截断（2026-09-23 实测）。
+    // reasoning_effort 缺省不发（dsh 同款：调用方自选 none→max，不替上游做 high 假设；
+    // 高推理+小预算双挤是超大上下文秒回超短答的推手之一）；max_completion_tokens 双写保留
+    //（只发 max_tokens 会被部分通道拒，历史教训）。
+    const tokLimit = body?.max_tokens || body?.max_completion_tokens || 32000;
     const upstreamBody = {
       model: upstreamModel,
       max_tokens: tokLimit,
       max_completion_tokens: tokLimit,
       session_id: sessionId,
-      reasoning_effort: body?.reasoning_effort || body?.reasoningEffort || "high",
       messages: body?.messages || [],
     };
+    const effort = body?.reasoning_effort || body?.reasoningEffort;
+    if (effort) upstreamBody.reasoning_effort = effort;
     // 部分免费通道（deepseek 家族，含 cline-free/deepseek-*）原生非流式不可靠
     //（500 empty response）：这类模型在内部走 stream+聚合成 JSON，对外仍按请求方
     // stream 标志返回（true 直透，false 聚合）。其它模型完全尊重请求方，不强制。
