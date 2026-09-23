@@ -51,10 +51,19 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
       const res = await fetchImpl(url, opts);
       if (!res.ok) return fallbackList();
       const json = await res.json().catch(() => ({}));
-      if (isClineBotHost(resolvedBase) && Array.isArray(json.free)) {
-        const out = json.free.filter((m) => m && typeof m.id === "string").map((m) => ({ ...m, id: joinModelId(id, m.id) }));
-        if (!out.length) return fallbackList();
-        cache = out; fetchedAt = now; return out;
+      if (isClineBotHost(resolvedBase) && json && typeof json === "object") {
+        const all = [];
+        for (const k of ["free", "clinePass"]) {
+          const arr = Array.isArray(json[k]) ? json[k] : null;
+          if (!arr || !arr.length) continue;
+          for (const m of arr) {
+            if (!m || typeof m.id !== "string") continue;
+            const mid = joinModelId(id, m.id);
+            if (!all.some((x) => x.id === mid)) all.push({ ...m, id: mid });
+          }
+        }
+        if (!all.length) return fallbackList();
+        cache = all; fetchedAt = now; return all;
       }
       const raw = Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : Array.isArray(json) ? json : [];
       const out = raw.filter((m) => m && typeof m.id === "string").map((m) => ({ ...m, id: joinModelId(id, m.id) }));
@@ -108,8 +117,8 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
       return { ok: httpOk, status: cat.status, ...(httpOk ? {} : { error: cat.error }), ms: ms() };
     }
     const valid = cat.models;
-    cache = valid.map((m) => ({ ...m, id: joinModelId(id, m.id) }));
-    fetchedAt = Date.now();
+    // 注意：只做快照 diff，不碰 listModels 的合并缓存——缓存里是 free+clinePass 全量，
+    // 这里 cat.models 只有 free，写进去会把 pass 挤掉 10 分钟（daemon 启动后 /v1/models 就缺 pass）。
     let change = null;
     if (snapshotPath) { try { change = detectFreeChanges(valid.map((m) => m.id)); } catch {} }
     return {
