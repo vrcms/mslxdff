@@ -219,12 +219,12 @@
 ### `-stats` / `--stats`（模型用量报表）
 
 - **语法**：`mslxdff -stats [--hours N] [--json] [--model <id>]`
-- **作用**：打印近 `N` 小时（默认 24，上限 168）每模型的 token 消耗与速度。每行 `模型 / 请求 / prompt / 输出 / 合计 / 首字 / 总耗时 / 速度`，末行 `合计`；`reasoning` 累计 > 0 时额外出 `其中思考 tokens`。
-- **口径**：速度 = 输出 tokens ÷ 生成耗时（总耗时 − 首字），**按窗口加权**（`Σ输出 ÷ Σ生成耗时`），不是每请求速度的算术平均（短回答会把算术均值拉飞）；只统计成功请求（status 200）。
+- **作用**：打印近 `N` 小时（默认 24，上限 168）的模型用量。默认分成 `Token 用量` 与 `响应性能` 两张自适应边框表：`Token 用量` 每行 `模型 / 请求 / 输入 / 输出 / 思考 / 合计`，`响应性能` 每行 `模型 / 首字 / 总耗时 / 速度`，两张表均含 `合计`；长模型 id 自动扩列，不截断、不挤乱其他列。
+- **口径**：速度 = 输出 tokens ÷ 生成耗时（总耗时 − 首字），**按窗口加权**（`Σ输出 ÷ Σ生成耗时`），不是每请求速度的算术平均（短回答会把算术均值拉飞）；只统计成功请求（status 200）。普通表格中的大 token 用 `k/M` 缩写，`--json` 保留精确整数。
 - **数据来源**：`<logDir>/usage/YYYY-MM-DD.jsonl` 逐请求 JSONL（写 `src/usage/record.js`，聚合 `src/usage/report.js`）。**与 `state.json` 的 `modelStats` 终生 EMA 是两套数据**——EMA 服务排序与 `-status`/`-model stats`，本报表服务时间窗口。
-- **保留期**：默认 2 天（覆盖 24h 窗口 + 跨天边界），按日删旧文件；`MSLXDFF_USAGE_KEEP_DAYS=N` 调整。
+- **保留期**：默认 2 天（覆盖 24h 窗口 + 跨天边界），按日删旧文件；`MSLXDFF_USAGE_KEEP_DAYS=N` 调整。查询窗口超过保留期时会显示“历史可能不完整”警告。
 - **开关**：`MSLXDFF_USAGE_LOG=0` 完全关闭采集（此时 `-stats` 只打印关闭提示）。
-- **不含**：`-chat` 直连 `mimo-v2.5-free`/`big-pickle` 不经 8989 网关，不计入；失败请求（非 200）无 usage 也不计入，所以"请求数"是成功请求数。
+- **不含/未展开**：`-chat` 直连 `mimo-v2.5-free`/`big-pickle` 不经 8989 网关，不计入；失败请求（非 200）无 usage 也不计入，所以“请求数”是成功请求数。表格展示当前聚合层的全部字段，但不展开逐请求 `via`、`interrupted` 和单次 `tps` 明细。
 - **示例**：`mslxdff -stats` · `mslxdff -stats --hours 1` · `mslxdff -stats --json`（脚本用）· `mslxdff -stats --model opencode/big-pickle`
 
 ### `-log [N]` / `--log [N]` / `-logs [N]` / `--logs [N]`

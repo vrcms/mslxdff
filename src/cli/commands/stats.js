@@ -34,20 +34,39 @@ function fmtTps(v) {
   return v == null || !Number.isFinite(v) ? "—" : `${v} tok/s`;
 }
 
-// 中文字符按 2 列宽算，否则表格错位
-function width(s) {
+// 中文字符按 2 列宽算，否则表格错位。
+function width(value) {
   let w = 0;
-  for (const ch of String(s)) w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
+  for (const ch of String(value ?? "")) w += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
   return w;
 }
 
-function padW(s, w) {
-  const t = String(s);
-  return t + " ".repeat(Math.max(0, w - width(t)));
+function padCell(value, w, align = "left") {
+  const text = String(value ?? "");
+  const padding = " ".repeat(Math.max(0, w - width(text)));
+  return align === "right" ? padding + text : text + padding;
 }
 
-function rowText(id, r) {
-  return `  ${padW(id, 30)}  ${padW(r.requests, 6)}  ${padW(fmtTok(r.promptTokens), 8)}  ${padW(fmtTok(r.completionTokens), 10)}  ${padW(fmtTok(r.totalTokens), 8)}  ${padW(fmtMs(r.avgTtfbMs), 7)}  ${padW(fmtMs(r.avgTotalMs), 8)}  ${fmtTps(r.avgTps)}`;
+function renderTable(headers, rows, aligns = []) {
+  const matrix = [headers, ...rows];
+  const widths = headers.map((_, col) => Math.max(...matrix.map((row) => width(row[col]))));
+  const rule = (left, middle, right) => left + widths.map((w) => "─".repeat(w + 2)).join(middle) + right;
+  const line = (row) => `│${row.map((cell, col) => ` ${padCell(cell, widths[col], aligns[col])} `).join("│")}│`;
+  return [
+    rule("┌", "┬", "┐"),
+    line(headers),
+    rule("├", "┼", "┤"),
+    ...rows.map(line),
+    rule("└", "┴", "┘"),
+  ].join("\n");
+}
+
+function tokenRow(id, r) {
+  return [id, r.requests, fmtTok(r.promptTokens), fmtTok(r.completionTokens), fmtTok(r.reasoningTokens), fmtTok(r.totalTokens)];
+}
+
+function performanceRow(id, r) {
+  return [id, fmtMs(r.avgTtfbMs), fmtMs(r.avgTotalMs), fmtTps(r.avgTps)];
 }
 
 export function renderStats(report, { hours = 24, model = null } = {}) {
@@ -59,15 +78,30 @@ export function renderStats(report, { hours = 24, model = null } = {}) {
     lines.push("说明：-chat 直连 mimo/big-pickle 不经网关，不计入本表");
     return lines.join("\n");
   }
-  lines.push(`模型用量（近 ${hours}h · 成功请求 ${totals.requests} 次 · ${models.length} 个模型）`);
-  lines.push(`  ${padW("模型", 30)}  ${padW("请求", 6)}  ${padW("prompt", 8)}  ${padW("输出", 10)}  ${padW("合计", 8)}  ${padW("首字", 7)}  ${padW("总耗时", 8)}  速度`);
-  for (const m of models) lines.push(rowText(m.id, m));
-  lines.push(`  ${"-".repeat(76)}`);
-  lines.push(rowText("合计", totals));
-  if (totals.reasoningTokens > 0) lines.push(`  其中思考 tokens：${fmtTok(totals.reasoningTokens)}`);
+
+  const right = "right";
+  const tokenRows = [...models.map((m) => tokenRow(m.id, m)), tokenRow("合计", totals)];
+  const performanceRows = [...models.map((m) => performanceRow(m.id, m)), performanceRow("合计", totals)];
+  lines.push(`模型用量报告（近 ${hours}h${model ? ` · 筛选 ${model}` : ""}）`);
+  lines.push(`成功请求：${totals.requests} 次 · 模型：${models.length} 个`);
+  lines.push("");
+  lines.push("Token 用量");
+  lines.push(renderTable(["模型", "请求", "输入", "输出", "思考", "合计"], tokenRows, ["left", right, right, right, right, right]));
+  lines.push("");
+  lines.push("响应性能");
+  lines.push(renderTable(["模型", "首字", "总耗时", "速度"], performanceRows, ["left", right, right, right]));
   lines.push("");
   lines.push("说明：速度 = 输出 tokens ÷ 生成耗时（总耗时−首字），按窗口加权；只统计成功请求。");
-  lines.push(`      -chat 直连 mimo/big-pickle 不经 8989 网关，不计入。数据保留 ${usageKeepDays()} 天，mslxdff -stats --hours 1|--json|--model <id> 可调。`);
+  lines.push("范围：只含经 8989 网关的成功请求；不含失败请求和 -chat 直连。");
+  const keepDays = usageKeepDays();
+  if (hours > keepDays * 24) {
+    lines.push(`警告：查询 ${hours}h 超过数据保留 ${keepDays} 天，历史可能不完整。`);
+  } else {
+    lines.push(`数据保留 ${keepDays} 天；更早的历史已删除。`);
+  }
+  lines.push("明细口径：本表按模型聚合，不展开 via、interrupted 和单次 tps。");
+  lines.push("数值使用 k/M 缩写；需要精确值或机器处理请加 --json。");
+  lines.push("可调：mslxdff -stats --hours 1 | --model <id> | --json");
   return lines.join("\n");
 }
 
