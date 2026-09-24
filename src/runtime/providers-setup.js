@@ -100,6 +100,7 @@ export async function setupProviders() {
           providers.push(provider);
           console.log(`provider enabled: ${gid} (${keys.length} key${keys.length > 1 ? "s" : ""}) baseUrl=${base || provider.baseUrl} [custom]`);
           appendEvent({ ts: Date.now(), type: "provider-enabled", provider: gid, keys: keys.length, baseUrl: base || provider.baseUrl });
+          appendEvent({ type: "provider-state", provider: gid, state: "enabled", keys: keys.length, accounts: auths.length, baseUrl: base || provider.baseUrl });
         } catch (err) {
           console.log(`provider ${gid} failed: ${err?.message || err}`);
           appendEvent({ ts: Date.now(), type: "provider-error", provider: gid, error: String(err?.message || err) });
@@ -126,6 +127,7 @@ export async function setupProviders() {
           providers.push(createWorkbuddyProvider({ apiKeys: wbKeys, auths: wbAuths }));
           console.log(`provider enabled: workbuddy (${wbKeys.length} key${wbKeys.length > 1 ? "s" : ""}) baseUrl=https://copilot.tencent.com (env)`);
           appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "workbuddy", keys: wbKeys.length, baseUrl: "https://copilot.tencent.com" });
+          appendEvent({ type: "provider-state", provider: "workbuddy", state: "enabled", keys: wbKeys.length, accounts: wbAuths.length });
         } catch (err) {
           console.log(`provider workbuddy failed: ${err?.message || err}`);
         }

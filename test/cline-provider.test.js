@@ -293,3 +293,36 @@ test("cline: 客户端显式 max_tokens/reasoning_effort 优先透传", async ()
   assert.equal(sent.reasoning_effort, "low");
   await p.close();
 });
+
+test("cline: 429 按模型记限流——muse-spark 被限后同号 deepseek 仍可用（不冻结整号）", async () => {
+  async function fetchImpl(url, opts) {
+    const u = String(url);
+    if (u.includes("/auth/refresh")) {
+      return new Response(JSON.stringify({ data: { accessToken: "at", refreshToken: DUMMY_RT, expiresAt: Date.now() + 600000 } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (u.includes("/chat/completions")) {
+      const body = JSON.parse(opts.body || "{}");
+      if (String(body.model).includes("muse-spark")) {
+        return new Response(JSON.stringify({ error: { code: "INFERENCE_CAP_ERROR", message: "Error 429: Daily free limit reached on model meta/muse-spark-1.3-contributor. Try again in 12h 34m" } }), { status: 429, headers: { "Content-Type": "application/json" } });
+      }
+      const sse = `data: ${JSON.stringify({ id: "r1", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }
+    return new Response("", { status: 404 });
+  }
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  // 1) muse-spark 429 → 单号无其它可切 → 直接 429 返回
+  const r1 = await p.chat({ model: "cline-free/muse-spark-1.3-contributor", messages: [{ role: "user", content: "hi" }], stream: true });
+  assert.equal(r1.status, 429);
+  const acc = p._authPool.getAccounts()[0];
+  assert.equal(acc.cooldownUntil, 0, "429 必须只记模型级，不得冻结整号（cooldownUntil 是 refresh 失败专用）");
+  assert.ok(acc.accessToken, "429 不得清 accessToken（同号其它模型还要用）");
+  assert.ok(acc.limits["cline-free/muse-spark-1.3-contributor"] > Date.now(), "请求模型已挂模型级限流");
+  assert.ok(acc.limits["meta/muse-spark-1.3-contributor"] > Date.now(), "上游 429 点名的模型别名同样挂限");
+  assert.equal(p._authPool.accountAvailable(acc, "cline-free/muse-spark-1.3-contributor"), false, "被限模型必须挡");
+  assert.equal(p._authPool.accountAvailable(acc, "deepseek/deepseek-v4-flash"), true, "其它模型必须仍可用");
+  // 2) 同一个号请求 deepseek → 正常选号 200，无需 force-retry
+  const r2 = await p.chat({ model: "deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], stream: true });
+  assert.equal(r2.status, 200, "muse-spark 限流不得殃及同号的 deepseek");
+  await p.close();
+});

@@ -1,10 +1,40 @@
 import { joinUrl, sleep } from "../base.js";
+import { appendEvent } from "../../logs.js";
+import { createHash } from "node:crypto";
 import { clineHeaders } from "./headers.js";
 import { createTransport } from "../../transport/index.js";
 import { normalizeProviderId } from "../model-id.js";
+import { recordLimit, recordOutput, exactOutputTokens } from "./usage.js";
 import { createSdkDispatch } from "../../upstream-engine/sdk/dispatch.js";
 
 function genSessionId() { return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
+
+// 只记哈希标识，不落邮箱 / refreshToken（events.log 可读不可泄）
+function acctId(account) {
+  const seed = String(account?.refreshToken || "");
+  if (!seed) return "slot-unknown";
+  return `acct_${createHash("sha256").update(seed).digest("hex").slice(0, 8)}`;
+}
+// 池子快照：ready/cooling 按「该模型」口径统计（ready=对该模型可用的号数）。
+// isReady 由调用方注入 authPool.accountAvailable(a, model)，避免与 auth 逻辑分叉。
+function poolStat(pool, isReady = () => true) {
+  let cooling = 0;
+  let dead = 0;
+  for (const a of pool || []) {
+    if (a.dead) dead++;
+    else if (!isReady(a)) cooling++;
+  }
+  const total = (pool || []).length;
+  return { total, cooling, dead, ready: total - cooling - dead };
+}
+
+// 429 错误体自带权威模型名（"...Daily free limit reached on model meta/muse-spark-1.3-contributor"）。
+function limitModelOf(bodyText) {
+  // 模型名可含 / . - _ : 字母数字（如 meta/muse-spark-1.3-contributor），
+  // 遇空格/引号/逗号/句号结尾或 "Try again" 前的空白即停。
+  const m = String(bodyText || "").match(/on model\s+([A-Za-z0-9/._:-]+?)(?=[\s"',]|\.\s|$)/i);
+  return m ? m[1] : "";
+}
 
 // stripProviderPrefix 只剥「本供应商」前缀（cline/<裸 id> → 裸 id），非本前缀（含上游自带多段 id
 // 如 meta/vendor/x）原样透传，不误削首段（旧实现按段数剥曾是潜在 bug）。
@@ -23,7 +53,7 @@ function unwrapData(obj) {
   return obj;
 }
 
-async function streamToNonStream(upstream) {
+async function streamToNonStream(upstream, track = null) {
   let content = "";
   let reasoning = "";
   let finishReason = null;
@@ -49,6 +79,11 @@ async function streamToNonStream(upstream) {
   const msg = { role: "assistant", content };
   if (reasoning) msg.reasoning = reasoning;
   if (!content && reasoning) { msg.content = reasoning; msg.reasoning_used_as_content = true; }
+  if (track) {
+    const exact = exactOutputTokens(usage);
+    if (exact) track({ tokens: exact, estimated: false });
+    else if (content || reasoning) track({ tokens: Math.ceil((content.length + reasoning.length) / 4), estimated: true });
+  }
   return {
     id: id || `gen_${Date.now()}`,
     object: "chat.completion",
@@ -74,7 +109,8 @@ export function createChatService({
   const sdk = createSdkDispatch({ id, providerName: id || "cline" });
 
   async function clineFetch(body, sessionId, allowSdk = false) {
-    const token = await authPool.getAccessToken();
+    const token = await authPool.getAccessToken(body?.model);
+    appendEvent({ type: "cline-account-state", provider: id || "cline", state: "selected", accountId: acctId(authPool.getCurrentAccount()), model: body?.model, pool: poolStat(authPool.getAccounts(), (a) => authPool.accountAvailable(a, body?.model)) });
     const headers = clineHeaders(sessionId, token);
     const finalUrl = joinUrl(resolvedBase, resolvedChat);
     const isStream = body?.stream === true;
@@ -85,6 +121,8 @@ export function createChatService({
     }
     return transport.request({ url: finalUrl, headers, body, stream: isStream, timeoutMs: connectTimeoutMs });
   }
+  // 记账回调：捕获当前账号哈希，成功输出进当前额度周期
+  const track = (model) => ({ tokens, estimated }) => recordOutput({ accountId: acctId(authPool.getCurrentAccount()), model, tokens, estimated }).catch(() => {});
 
   function isLimitHit(status, bodyText) {
     if (status === 429) return true;
@@ -113,9 +151,32 @@ export function createChatService({
         const { parseCooldown } = await import("./auth.js");
         const cooldownMs = parseCooldown(bodyText, resp.status);
         const cur = authPool.getCurrentAccount();
-        if (cur) { cur.cooldownUntil = Date.now() + cooldownMs; cur.accessToken = null; cur.expiry = 0; }
+        // 免费额度按「账号 × 模型」计：只把该模型挂到这个号上（limits[model]），
+        // 不动账号级 cooldownUntil、不清 accessToken——同号其它模型照常可用。
+        authPool.markLimit(cur, body?.model, cooldownMs);
+        const limitedModel = limitModelOf(bodyText);
+        if (limitedModel && limitedModel !== body?.model) authPool.markLimit(cur, limitedModel, cooldownMs);
+        const cycle = await recordLimit({ accountId: acctId(cur), model: body?.model, reason: resp.status === 429 ? "daily_limit" : "empty_response", status: resp.status, cooldownMs });
         const pool = authPool.getAccounts();
-        const hasOther = pool.some((a) => !a.cooldownUntil || a.cooldownUntil <= Date.now());
+        const ready = (a) => authPool.accountAvailable(a, body?.model);
+        const hasOther = pool.some(ready);
+        // 限流是「账号 × 模型」维度：429 只说明当前账号在这个模型上额度用尽，
+        // 换模型（如 muse-spark → deepseek）往往仍可用，故日志必须点名模型。
+        appendEvent({
+          type: "cline-account-state",
+          provider: id || "cline",
+          state: hasOther ? "switch" : "pool-exhausted",
+          accountId: acctId(cur),
+          model: body?.model,
+          limitedModel: limitedModel || undefined,
+          scope: "model",
+          reason: resp.status === 429 ? "daily_limit" : "empty_response",
+          status: resp.status,
+          cooldownMs,
+          pool: poolStat(pool, ready),
+          cycleOutputTokens: cycle?.cycleOutputTokens ?? 0,
+          cycleCount: cycle?.cycleCount ?? 0,
+        });
         if (!hasOther) return resp;
         await sleep(500 + Math.floor(Math.random() * 500));
         continue;
@@ -140,7 +201,7 @@ export function createChatService({
       }
       const ct = resp.headers.get("content-type") || "";
       let normalized = null;
-      if (ct.includes("text/event-stream")) normalized = await streamToNonStream(resp);
+      if (ct.includes("text/event-stream")) normalized = await streamToNonStream(resp, track(body?.model));
       else {
         const raw = await resp.json().catch(() => null);
         if (raw) normalized = unwrapData(raw);
@@ -154,7 +215,9 @@ export function createChatService({
       if (content && !isFallback) return { data: normalized };
       if (reasoning || isFallback) {
         const cur = authPool.getCurrentAccount();
-        if (cur) { cur.cooldownUntil = Date.now() + 30 * 1000; cur.accessToken = null; cur.expiry = 0; }
+        // 空响应是「模型 × 通道」形态问题（deepseek 非流式特性），同样只挡该模型。
+        authPool.markLimit(cur, body?.model, 30 * 1000);
+        appendEvent({ type: "cline-account-state", provider: id || "cline", state: "cooldown", accountId: acctId(cur), model: body?.model, reason: "empty_response", cooldownMs: 30000, scope: "model", pool: poolStat(authPool.getAccounts(), (a) => authPool.accountAvailable(a, body?.model)) });
         await sleep(300 + Math.floor(Math.random() * 300));
         resp = null;
         continue;
@@ -213,6 +276,10 @@ export function createChatService({
         }
         const normalized = unwrapData(raw);
         normalized.model = model;
+        // 非流式终点：正文估算记账（上游有 usage 时 streamToNonStream 路径才拿得到精确值；此处 raw 无流）
+        const m2 = normalized?.choices?.[0]?.message || {};
+        const outLen2 = String(m2.content || "").length + String(m2.reasoning || "").length;
+        if (outLen2 > 0) track(model)({ tokens: Math.ceil(outLen2 / 4), estimated: true });
         return new Response(JSON.stringify(normalized), { status: 200, headers: { "Content-Type": "application/json" } });
       } catch (err) {
         if (netAttempt < 2 && String(err?.message || "").toLowerCase().includes("timed out")) { await sleep(300); continue; }
