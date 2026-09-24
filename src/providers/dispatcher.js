@@ -1,3 +1,4 @@
+import { appendEvent } from "../logs.js";
 import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
 import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
 
@@ -44,18 +45,36 @@ export function createProviderDispatcher(providers = [], opts = {}) {
     if (!isAllowedFn(provider.id, raw)) {
       const allowed = getAllowedFn(provider.id) || [];
       const msg = `model not allowed for provider "${provider.id}": "${raw}" — allowed: ${allowed.join(", ") || "(none)"} (use: mslxdff -provider ${provider.id} allowlist add <model>)`;
+      appendEvent({ type: "provider-model-state", provider: provider.id, model: body?.model, rawModel: raw, state: "blocked", reason: "allowlist", status: 403 });
       return new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json", "x-mslxdff-allowlist": "1" } });
     }
     const forwarded = raw === body?.model ? body : { ...body, model: raw };
     // ADR-0008：本请求携带瞬时共享 key（shareKeys 由组员侧按 header 解析后传入）。
     const sharedKeys = opts?.shareKeys?.[provider.id];
-    if (sharedKeys && sharedKeys.length && typeof provider.chatWithKeys === "function") {
-      return provider.chatWithKeys(forwarded, sharedKeys, opts);
+    const startedAt = Date.now();
+    let res;
+    try {
+      if (sharedKeys && sharedKeys.length && typeof provider.chatWithKeys === "function") {
+        res = await provider.chatWithKeys(forwarded, sharedKeys, opts);
+      } else if (provider.id === "workbuddy" && workbuddyUid) {
+        res = await provider.chat(forwarded, { ...opts, workbuddyUid });
+      } else {
+        res = await provider.chat(forwarded, opts);
+      }
+    } catch (err) {
+      appendEvent({ type: "provider-model-state", provider: provider.id, model: body?.model, rawModel: raw, state: "upstream-error", error: String(err?.message || err), durationMs: Date.now() - startedAt });
+      throw err;
     }
-    if (provider.id === "workbuddy" && workbuddyUid) {
-      return provider.chat(forwarded, { ...opts, workbuddyUid });
-    }
-    return provider.chat(forwarded, opts);
+    appendEvent({
+      type: "provider-model-state",
+      provider: provider.id,
+      model: body?.model,
+      rawModel: raw,
+      status: res?.status,
+      state: res?.status === 429 ? "limited" : res?.ok ? "ok" : "upstream-error",
+      durationMs: Date.now() - startedAt,
+    });
+    return res;
   }
 
   // 聚合所有供应商的模型列表；默认供应商（opencode）裸 id，其它带前缀

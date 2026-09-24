@@ -1,11 +1,20 @@
 import { joinUrl, sleep } from "../base.js";
 import { compatFetch } from "../../compat.js";
+import { appendEvent } from "../../logs.js";
+import { createHash } from "node:crypto";
 
 /**
  * Cline Token 池：多账号 round-robin + refresh 换 accessToken + 冷却 + 队列
  * 对标 pingmike2/cline2api-workers 的 accounts / getAccountToken / parseCooldown / enqueue
  */
 
+
+// 只记哈希标识，不落邮箱 / refreshToken（events.log 可读不可泄）
+function acctId(account) {
+  const seed = String(account?.refreshToken || "");
+  if (!seed) return "slot-unknown";
+  return `acct_${createHash("sha256").update(seed).digest("hex").slice(0, 8)}`;
+}
 export function parseCooldown(body, status) {
   const m = String(body || "").match(/try again in (?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
   if (m) {
@@ -86,7 +95,7 @@ export function createAuthPool({
     }
     const changed = accounts.length !== list.length || accounts.some((a, i) => a.refreshToken !== list[i]);
     if (changed) {
-      accounts = list.map((rt) => ({ refreshToken: rt, accessToken: null, expiry: 0, cooldownUntil: 0 }));
+      accounts = list.map((rt) => ({ refreshToken: rt, accessToken: null, expiry: 0, cooldownUntil: 0, limits: {} }));
       accountIndex = 0;
     }
     return accounts;
@@ -100,14 +109,27 @@ export function createAuthPool({
     queueTail = run.catch(() => {});
     return run;
   }
+  // 模型级限流：Cline 免费额度按「账号 × 模型」计，429 只应挡该模型，
+  // 不得把整个号冻住（muse-spark 被限时 deepseek 仍须能用同一账号）。
+  function markLimit(account, model, cooldownMs) {
+    if (!account || !model) return;
+    if (!account.limits) account.limits = {};
+    account.limits[model] = clock() + cooldownMs;
+  }
+  // 账号可用性：dead（账号死）/ cooldownUntil（refresh 失败，账号级）/ limits[model]（该模型 429）三关
+  function accountAvailable(acc, model, now = clock()) {
+    if (!acc || acc.dead) return false;
+    if (acc.cooldownUntil && acc.cooldownUntil > now) return false;
+    if (model && acc.limits && acc.limits[model] && acc.limits[model] > now) return false;
+    return true;
+  }
 
-  function pickAccount(pool) {
+  function pickAccount(pool, model) {
     const list = pool || accounts;
     for (let k = 0; k < list.length; k++) {
       const acc = list[accountIndex % list.length];
       accountIndex = (accountIndex + 1) % list.length;
-      if (acc.dead) continue;
-      if (!acc.cooldownUntil || acc.cooldownUntil <= clock()) {
+      if (accountAvailable(acc, model)) {
         currentAccount = acc;
         return acc;
       }
@@ -135,8 +157,14 @@ export function createAuthPool({
     if (!res.ok) {
       let t = "";
       try { t = await res.text(); } catch {}
-      if (isInvalidGrant(t, res.status)) { account.dead = true; throw new Error("invalid_grant"); }
-      account.cooldownUntil = now + 60 * 1000; throw new Error("refresh_failed");
+      if (isInvalidGrant(t, res.status)) {
+        account.dead = true;
+        appendEvent({ type: "cline-account-state", provider: id, state: "dead", accountId: acctId(account), status: res.status, reason: "invalid_grant" });
+        throw new Error("invalid_grant");
+      }
+      account.cooldownUntil = now + 60 * 1000;
+      appendEvent({ type: "cline-account-state", provider: id, state: "refresh-failed", accountId: acctId(account), status: res.status, cooldownMs: 60_000 });
+      throw new Error("refresh_failed");
     }
     let data;
     try { data = await res.json(); } catch { account.cooldownUntil = now + 60 * 1000; throw new Error("refresh_no_token"); }
@@ -159,20 +187,36 @@ export function createAuthPool({
     return accessToken;
   }
 
-  async function getAccessToken() {
+  async function getAccessToken(model) {
     const pool = accounts;
     if (pool.length === 0) throw new Error("缺少 CLINE_REFRESH_TOKEN（请用 cline_oauth.py 获取）");
     for (let attempt = 0; attempt < pool.length; attempt++) {
       const acc = pool[attempt % pool.length];
-      if (acc.dead) continue;
-      if (acc.cooldownUntil && acc.cooldownUntil > clock()) continue;
+      if (!accountAvailable(acc, model)) continue;
       currentAccount = acc;
       try { return await refreshOne(acc); } catch (e) { if (e.message === "account_cooldown") continue; continue; }
     }
     const acc = pool.find((a) => !a.dead) || null;
     if (!acc) throw new Error("无可用 Cline 账号");
     currentAccount = acc;
-    acc.cooldownUntil = 0;
+    // 防锁死：该模型全部号被限时，清掉这一号的该模型限制强取重试（只清模型维度，
+    // 不动账号级 cooldownUntil——那是 refresh 失败的冷却，仍由 accountAvailable 把关）。
+    if (model && acc.limits) delete acc.limits[model];
+    if (acc.cooldownUntil && acc.cooldownUntil > clock()) acc.cooldownUntil = 0;
+    appendEvent({
+      type: "cline-account-state",
+      provider: id,
+      state: "force-retry",
+      accountId: acctId(acc),
+      model,
+      reason: "all-accounts-cooling",
+      pool: {
+        total: pool.length,
+        cooling: pool.filter((a) => !accountAvailable(a, model)).length,
+        dead: pool.filter((a) => a.dead).length,
+        ready: pool.filter((a) => accountAvailable(a, model)).length,
+      },
+    });
     return refreshOne(acc);
   }
 
@@ -180,5 +224,5 @@ export function createAuthPool({
   function getAccounts() { return accounts; }
   function updateKeys(newKeys) { parseAccounts(newKeys); }
 
-  return { parseAccounts, getAccessToken, refreshOne, pickAccount, parseCooldown, enqueue, getCurrentAccount, getAccounts, updateKeys, _accounts: () => accounts };
+  return { parseAccounts, getAccessToken, refreshOne, pickAccount, parseCooldown, enqueue, getCurrentAccount, getAccounts, updateKeys, markLimit, accountAvailable, _accounts: () => accounts };
 }

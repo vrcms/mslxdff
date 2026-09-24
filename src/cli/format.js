@@ -109,6 +109,21 @@ export function fmtEvent(e) {
     case "auto-update-query-failed":
     case "auto-update-install-failed":
       return `${head} auto-update   failed ${e.type} error=${e.error||""}`;
+    case "cline-account-state": {
+      // 限流是「账号 × 模型」维度：模型名打头，pool 表示该模型上的可用账号，
+      // 避免把"这个模型的免费额度用尽"误读成"整池账号报废"。
+      const p = e.pool ? ` acct-ready=${e.pool.ready}/${e.pool.total}` : "";
+      const lm = e.limitedModel ? ` upstream=${e.limitedModel}` : "";
+      const detail = [e.reason, e.status ? `HTTP ${e.status}` : "", e.cooldownMs ? `cool ${Math.round(e.cooldownMs / 1000)}s` : ""].filter(Boolean).join(" ");
+      const hint = e.state === "pool-exhausted" ? " [该模型所有账号额度耗尽 → 换模型或等冷却]" : e.state === "switch" ? " [换号重试]" : e.state === "force-retry" ? " [全部号冷却中，强行取号重试]" : "";
+      return `${head} cline acct    ${e.state} model=${m(e.model)}${lm} account=${m(e.accountId)}${e.from ? ` from=${e.from}` : ""}${detail ? ` ${detail}` : ""}${p}${hint}`;
+    }
+    case "cline-model-usage":
+      return `${head} cline tokens  ${e.state === "limit" ? "限流封存" : "正常输出"}${e.estimated ? "(估算)" : ""} model=${m(e.model)} account=${m(e.accountId)} output=${m(e.outputTokens)} 周期累计=${m(e.cycleOutputTokens)}${e.cycleCount ? ` 第${e.cycleCount}周期` : ""}${e.reason ? ` reason=${e.reason}` : ""}`;
+    case "provider-state":
+      return `${head} provider      ${m(e.provider)} ${m(e.state)}${e.keys !== undefined ? ` keys=${e.keys}` : ""}${e.accounts !== undefined ? ` accounts=${e.accounts}` : ""}${e.baseUrl ? ` baseUrl=${e.baseUrl}` : ""}${e.error ? ` error=${e.error}` : ""}`;
+    case "provider-model-state":
+      return `${head} prov model    ${m(e.provider)} ${m(e.state)} model=${m(e.model)}${e.status ? ` HTTP ${e.status}` : ""}${e.error ? ` error=${e.error}` : ""}${e.durationMs !== undefined ? ` ${fmtDur(e.durationMs)}` : ""}`;
     default:
       return `${head} ${e?.type || "?"} ${JSON.stringify(e || {})}`;
   }
