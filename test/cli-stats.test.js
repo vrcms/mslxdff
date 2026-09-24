@@ -37,24 +37,39 @@ test("renderStats 空状态给人话引导，不是空表", () => {
   assert.doesNotMatch(text, /模型\s+请求/, "空状态不该打印表头");
 });
 
-test("renderStats 有数据：含每模型行、合计行与速度口径说明", () => {
+test("renderStats 有数据：边框表格展示全部聚合列，长模型名不挤乱列位", () => {
   const report = {
     windowHours: 24,
     models: [
       { id: "opencode/big-pickle", requests: 3, promptTokens: 1500, completionTokens: 4200, totalTokens: 5700, reasoningTokens: 10, avgTtfbMs: 2100, avgTotalMs: 18400, avgTps: 86.2 },
-      { id: "workbuddy/hy3", requests: 1, promptTokens: 20, completionTokens: 5, totalTokens: 25, reasoningTokens: 0, avgTtfbMs: null, avgTotalMs: 300, avgTps: null },
+      { id: "cline/cline-free/super-long-model-name-for-column-alignment", requests: 1, promptTokens: 20, completionTokens: 5, totalTokens: 25, reasoningTokens: 7, avgTtfbMs: null, avgTotalMs: 300, avgTps: null },
     ],
-    totals: { requests: 4, promptTokens: 1520, completionTokens: 4205, totalTokens: 5725, reasoningTokens: 10, avgTtfbMs: 2100, avgTotalMs: 9000, avgTps: 90 },
+    totals: { requests: 4, promptTokens: 1520, completionTokens: 4205, totalTokens: 5725, reasoningTokens: 17, avgTtfbMs: 2100, avgTotalMs: 9000, avgTps: 90 },
   };
   const text = renderStats(report, { hours: 24 });
-  assert.match(text, /模型用量（近 24h · 成功请求 4 次 · 2 个模型）/);
+  assert.match(text, /模型用量报告（近 24h）/);
+  assert.match(text, /成功请求：4 次 · 模型：2 个/);
+  assert.match(text, /Token 用量/);
+  assert.match(text, /响应性能/);
+  assert.match(text, /┌/);
+  assert.match(text, /┬/);
+  assert.match(text, /┐/);
   assert.match(text, /opencode\/big-pickle/);
-  assert.match(text, /workbuddy\/hy3/);
+  assert.match(text, /cline\/cline-free\/super-long-model-name-for-column-alignment/);
   assert.match(text, /1\.5k/);
   assert.match(text, /86\.2 tok\/s/);
+  assert.match(text, /│\s+10\s+│/, "每个模型的思考 tokens 应进入表格");
+  assert.match(text, /│\s+7\s+│/);
   assert.match(text, /合计/);
   assert.match(text, /加权/);
-  assert.match(text, /其中思考 tokens：10/);
+
+  const lines = text.split("\n");
+  const rows = lines.filter((line) => line.includes("opencode/big-pickle") || line.includes("cline/cline-free/super-long"));
+  const displayWidth = (line) => [...line].reduce((sum, ch) => sum + (/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1), 0);
+  for (const row of rows) {
+    const rowIdx = lines.indexOf(row);
+    assert.equal(displayWidth(row), displayWidth(lines[rowIdx - 2]), "长模型名不能越界破坏列对齐");
+  }
 });
 
 test("renderStats：无 usage 的模型速度显示 —— 而不是 NaN", () => {
@@ -95,7 +110,7 @@ test("handleStats 端到端：写 usage 文件后打印报表", async () => {
       return out.join("\n");
     })();
     assert.match(text, /opencode\/big-pickle/);
-    assert.match(text, /成功请求 2 次/);
+    assert.match(text, /成功请求：2 次/);
   } finally {
     if (prevDir === undefined) delete process.env.MSLXDFF_DAEMON_DIR; else process.env.MSLXDFF_DAEMON_DIR = prevDir;
     rmSync(dir, { recursive: true, force: true });

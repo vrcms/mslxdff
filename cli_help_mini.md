@@ -17,7 +17,7 @@
 | 无参启动 | `mslxdff` | 已有 daemon 显示 status，否则后台启动 |
 | daemon | `-d` / `--daemon` | 后台启动（只升不降，低版本不覆盖高版本） |
 | 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(ts/model/status/dur)/last error/autostart/plugins — 全量聚合体检 |
-| 用量报表 | `-stats` / `--stats` `[--hours N] [--json] [--model <id>]` | 近 N 小时（默认24，上限168）每模型 token 消耗+首字/总耗时/速度；速度按窗口加权 `Σ输出÷Σ生成耗时`，只计成功请求（非200 无 usage 不计；`-chat` 直连不经8989 不计） |
+| 用量报表 | `-stats` / `--stats` `[--hours N] [--json] [--model <id>]` | 近 N 小时（默认24，上限168）模型用量；默认输出 `Token 用量`（请求/输入/输出/思考/合计）与 `响应性能`（首字/总耗时/加权速度）两张自适应边框表并含合计，长模型 id 不截断；大 token 用 k/M 缩写，`--json` 为精确值。速度按窗口加权 `Σ输出÷Σ生成耗时`，只计成功请求；不含失败请求、`-chat` 直连，也不展开逐请求 via/interrupted/单次 tps；查询超过保留期会警告可能不完整 |
 | 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10（含首字/tps/tok 详情） |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
