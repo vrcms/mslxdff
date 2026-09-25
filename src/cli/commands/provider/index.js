@@ -89,6 +89,8 @@ const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleProviderBench(id, sub, rest, args)) return true;
   const { handleClineFree } = await import("./cline-free.js");
   if (await handleClineFree(id, sub, rest, args)) return true;
+  const { handleClineQuota } = await import("./cline-quota.js");
+  if (await handleClineQuota(id, sub, rest, args)) return true;
   if (normalizeProviderId(id) === "cline" && sub === "migrate") {
     const { runStateMigrations } = await import("../../../state/migrations.js");
     const dryRun = args.includes("--dry-run") || args.includes("--dryrun");

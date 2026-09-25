@@ -1,5 +1,5 @@
 import { createKeyRing } from "../keyring.js";
-  import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath, saveProviderConfig, loadProviderAuths } from "../../state.js";
+  import { loadProviderKeys, loadProviderBaseUrl, loadProviderModelsPath, loadProviderChatPath, saveProviderConfig, loadProviderAuths, loadProviderAllowedModels, saveProviderAllowedModels, normalizeAllowedModel } from "../../state.js";
 import { envInt, joinUrl, getUndici, createAgent, collectApiKeysGeneric, createChatRunner } from "../base.js";
 import { compatFetch } from "../../compat.js";
 import { joinModelId } from "../model-id.js";
@@ -9,6 +9,7 @@ import { createAuthPool } from "./auth.js";
 import { clineHeaders, isRefreshToken } from "./headers.js";
 import { createChatService } from "./chat.js";
 import { createModelsService } from "./models.js";
+import { createAllowlistSync } from "./allowlist-sync.js";
 
 const { UndiciFetch } = getUndici();
 
@@ -101,7 +102,18 @@ export function createClineProvider({
   }
 
   // 快照文件供 daemon 启动自检 free 列表增删（默认 logDir 下，gitignored；测试可注入 tmp 路径）
-  const modelsSvc = createModelsService({ id, baseUrl: resolvedBase, modelsPath: resolvedModelsPath, fetchImpl, dispatcher, ring, loadKeys: (pid) => loadProviderKeys(pid, file ? { file } : {}), snapshotPath: snapshotPath || join(logDir(), "cline-free.json") });
+  // 白名单 auto-sync（上游列表 = 真相）：每次成功取 recommended-models 后，把 free + clinePass
+  // 并进 providerConfigs.cline.allowedModels，只增不减——解决上游新上架/换通道的免费模型被静态快照拦成 blocked。
+  // persist 复用 saveProviderAllowedModels（保留 keys/auths/baseUrl，并保留 allowAnyModels）。
+  // 关掉：MSLXDFF_CLINE_AUTOSYNC=0；无新增不写盘。
+  const allowlistSync = createAllowlistSync({
+    providerId: id,
+    loadCurrent: () => loadProviderAllowedModels(id, file ? { file } : {}),
+    persist: (pid, list) => saveProviderAllowedModels(pid, list, file ? { file } : {}),
+    normalize: normalizeAllowedModel,
+    onLog: (msg) => console.log(msg),
+  });
+  const modelsSvc = createModelsService({ id, baseUrl: resolvedBase, modelsPath: resolvedModelsPath, fetchImpl, dispatcher, ring, loadKeys: (pid) => loadProviderKeys(pid, file ? { file } : {}), snapshotPath: snapshotPath || join(logDir(), "cline-free.json"), onModelsRefreshed: (list) => allowlistSync.syncIds(list) });
 
   async function listModels() {
     const list = await modelsSvc.listModels();

@@ -64,3 +64,18 @@ test("cline: cline-free/deepseek id 也触发 forceStream 聚合（原生非流�
   const j = JSON.parse(await resp.text());
   assert.equal(j.choices[0].message.content, "hi", "对外仍按请求方 stream=false 返回 JSON");
 });
+
+test("cline: gemini max_tokens 钳制到 65536（Vertex 上限，128000 会 400）", async () => {
+  const { fetchImpl, seen } = captureChat();
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  await p.chat({ model: "cline/cline-free/gemini-3.8-flash", messages: [{ role: "user", content: "hi" }], max_tokens: 128000, max_completion_tokens: 128000, stream: false });
+  assert.equal(seen[0].max_tokens, 65536, "gemini 上游 max_tokens 必须被钳制");
+  assert.equal(seen[0].max_completion_tokens, 65536, "gemini 上游 max_completion_tokens 必须被钳制");
+});
+
+test("cline: 非 gemini 不钳制 max_tokens", async () => {
+  const { fetchImpl, seen } = captureChat();
+  const p = createClineProvider({ id: "cline", apiKeys: [DUMMY_RT], fetchImpl });
+  await p.chat({ model: "cline/deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "hi" }], max_tokens: 128000, stream: false });
+  assert.equal(seen[0].max_tokens, 128000, "deepseek 上游 max_tokens 保持原样");
+});

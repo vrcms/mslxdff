@@ -49,7 +49,10 @@ export async function handleClineFree(id, sub, rest = [], args = []) {
   const cat = await loadCatalog();
   const current = loadProviderAllowedModels("cline");
   const plan = computeNext(current, cat.ids, keepExtra);
-  const dryRun = !(isSync && yes);
+  // 兜底常量不是上游真相（与 daemon auto-sync 同一口径，ADR-0033）：上游不可达时拒绝写盘，
+  // 否则会把内置 FALLBACK_FREE 落成白名单，且 full-replace 还会挤掉 auto-sync 并入的 clinePass 条目。
+  const fallbackRefused = isSync && yes && cat.source === "fallback";
+  const dryRun = !(isSync && yes) || fallbackRefused;
   let written = [];
   if (isSync && !dryRun) {
     try {
@@ -85,7 +88,9 @@ export async function handleClineFree(id, sub, rest = [], args = []) {
   if (!isSync) {
     console.log(`\n预览（只读）。一键同步：mslxdff -provider cline free sync --yes   ·   只增不删：加 --keep-extra`);
   } else if (dryRun) {
-    console.log(`\n预览模式，未写入。执行：mslxdff -provider cline free sync --yes${keepExtra ? " --keep-extra" : ""}`);
+    console.log(fallbackRefused
+      ? `\n⛔ 上游目录不可达（${cat.error || cat.status}），已拒绝把内置兜底目录写进白名单——兜底常量不是上游真相（与 daemon auto-sync 同一口径）。待上游恢复后重试；确需手填用：mslxdff -provider cline allowlist set <id...>`
+      : `\n预览模式，未写入。执行：mslxdff -provider cline free sync --yes${keepExtra ? " --keep-extra" : ""}`);
   } else {
     console.log(`\n✅ 已写入 allowlist：${written.length} 个（providerConfigs.cline.allowedModels）`);
     console.log(`   生效：mslxdff -restart（daemon 的 /v1/models 聚合有 10 分钟缓存，重启即刷新）`);

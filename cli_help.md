@@ -69,6 +69,7 @@
 | `mslxdff -provider cline login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `cline` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider cline free [--json]` | `--provider` | **只读**：直查上游免费模型目录（`GET /api/v1/ai/cline/recommended-models` 的 `free` 数组，当前 5 个）并列出与当前 `allowlist` 的差异，不写任何 state；`--json` 输出 JSON 供脚本 | 否 | 否 |
 | `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删 | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
+| `mslxdff -provider cline quota [--json] [--account <hash>] [--model <substr>]` | `--provider` | **只读**：聚合 `cline-usage.jsonl` 的账号×模型双口径统计并分组打印：free 走本周期 tokens（+已完成周期/上周期），pass 走近 24h；`--json` 供脚本，`--account/--model` 过滤；空账本给引导 | 否 | 否 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
 | `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
 | `mslxdff -provider traework login` | `--provider` | TRAE SOLO 通道浏览器授权（复刻 traework2api login.sh）：打印 trae.cn 授权链接 → 登录后粘贴 `127.0.0.1` 回调链接 → ExchangeToken → 落盘 `auths/trae-<uid>.json`（0600）+ state 双写，自动签到+查积分；此后 `traework/<modelId>` 前缀路由（恒 `stream:true` SOLO SSE 透传/聚合，模型空/auto→`glm-5.2`，动态表+静态 32 回退；1005 plan 长冷却 12h、401 换号、429 短冷，过期前 24h 预刷新）；**恒 local-only** 不借出 key |
@@ -687,8 +688,19 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -provider cline free sync --yes --keep-extra
   ```
 
-#### `mslxdff -provider cline migrate [--dry-run]`（旧的 clinebot 配置合并进 cline）
+#### `mslxdff -provider cline quota [--json] [--account <hash>] [--model <substr>]`（账号×模型用量：free 周期 / pass 24h）
 
+- **语法**：`mslxdff -provider cline quota [--json] [--account <acct_hash>] [--model <子串>]`
+- **只读**：聚合 `cline-usage.jsonl`（`loadAndAggregate`，IO 失败返回空不报错），按账号哈希分组：free 行显示本周期 tokens + 已完成周期数（上周期产出）+ 累计，pass 行显示近 24h + 累计；`--json` 输出 `{provider, entries[]}` 供脚本；`--account/--model` 过滤；空账本打印引导（先跑一轮对话再查）。
+- **口径**：free 周期由 429 封存/恢复划分（`recordLimit`），pass 为滚动 24h 窗口；只记 output tokens，不记 prompt/正文/凭据。
+- **示例**：
+  ```bash
+  mslxdff -provider cline quota                        # 全量分组
+  mslxdff -provider cline quota --model gemini         # 只看 gemini
+  mslxdff -provider cline quota --json                 # 脚本消费
+  ```
+
+#### `mslxdff -provider cline migrate [--dry-run]`（旧的 clinebot 配置合并进 cline）
 - **语法**：`mslxdff -provider cline migrate [--dry-run]`
 - **作用**：Cline 供应商历史上有两个 id（`cline` / `clinebot`）：login 双写 + 每次 refreshToken 轮换回写另一个 id，使 `clinebot` 永不消亡（daemon 内两个实例、`/v1/models` 可能重复暴露 `cline/x` 与 `clinebot/x`）。本命令把 `providerConfigs.clinebot` 合并进 `cline` 后**删除旧键**：keys 去重并剔除 `sk_` 形态（`cline` 只认 refreshToken）、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`；**幂等**（没有 `clinebot` 时 no-op），真会改动前先备份 `state.json.bak-<ISO 时间戳>` 并 append 一条 `cline-unify-migrated` 事件（不含凭据）。CLI 入口同时把 `clinebot` / `cline-bot` 一次性归一为 `cline`（daemon 启动与 login 写盘前也会跑同一迁移）。
 - **local-only（硬约束，不可回退）**：`cline` 恒为 local-only —— 不经组员转发（`shouldUseGroupForModel("cline/…") === false`）、不借出 key（`share-keys` 硬排除 refresh-token 型凭据）、只走本地直连，历史别名同样硬排除（ADR-0015 / ADR-0019 / ADR-0026）。

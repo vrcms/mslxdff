@@ -3,6 +3,7 @@ import { recordModelStats } from "../../state.js";
 import { normalizeFullId } from "../../providers/model-id.js";
 import { computeMetrics } from "../../metrics.js";
 import { recordChatUsage } from "../../usage/record.js"; // 窗口报表唯一写入点（canonical 名单记防双计）— 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
+import { recordOutput, computeOutputRow } from "../../providers/cline/usage.js"; // cline 专属旁路统计（账号×模型，流式也覆盖）
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -216,6 +217,13 @@ export function createRelayPipeline({
         // 窗口报表：逐请求落 usage（行形状由 usage/record.js 拥有，含 prompt/total ——
         // state 的 modelStats 只存 completion 的 EMA）。只按 canonical 名记一次，避免双计。
         recordChatUsage({ model: fullId, via, usage, ttfbMs: ttfb, totalMs: total, tps: m.tps }).catch(() => {});
+        // cline 旁路记账：流式时 provider 已把账号哈希挂在 upRes 上，这里用消费完的 usage 记一笔。
+        // 纯旁路：只调 recordOutput，不改转发/切号/重试；无账号或非 cline 直接跳过。
+        if (upRes?.clineAccountId) {
+          const clineModel = upRes.clineModel || String(actual).replace(/^cline\//, "");
+          const orow = computeOutputRow({ model: clineModel, accountId: upRes.clineAccountId, usage, chars });
+          if (orow) recordOutput(orow).catch(() => {});
+        }
       } catch {}
     }
 

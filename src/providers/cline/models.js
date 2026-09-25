@@ -11,7 +11,16 @@ function isClineBotHost(baseUrl) {
   try { const u = new URL(baseUrl); return u.hostname === "api.cline.bot" || u.hostname.endsWith(".cline.bot"); } catch { return String(baseUrl).includes("cline.bot"); }
 }
 
-export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispatcher, ring, loadKeys, snapshotPath } = {}) {
+export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispatcher, ring, loadKeys, snapshotPath, onModelsRefreshed } = {}) {
+  // 白名单 auto-sync 通知：只在上游成功取数后调用（内置兜底不是上游真相，不触发）。
+  // 异常一律吞掉——同步是增益动作，绝不打断模型列表读取与请求链路。
+  function notifyRefresh(list) {
+    if (!onModelsRefreshed) return;
+    try {
+      const r = onModelsRefreshed(list);
+      if (r && typeof r.catch === "function") r.catch(() => {});
+    } catch {}
+  }
   if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
   const resolvedBase = String(baseUrl).trim().replace(/\/+$/, "");
   const resolvedPath = modelsPath || "/ai/cline/recommended-models";
@@ -63,12 +72,12 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
           }
         }
         if (!all.length) return fallbackList();
-        cache = all; fetchedAt = now; return all;
+        cache = all; fetchedAt = now; notifyRefresh(all); return all;
       }
       const raw = Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : Array.isArray(json) ? json : [];
       const out = raw.filter((m) => m && typeof m.id === "string").map((m) => ({ ...m, id: joinModelId(id, m.id) }));
       if (!out.length) return fallbackList();
-      cache = out; fetchedAt = now; return out;
+      cache = out; fetchedAt = now; notifyRefresh(out); return out;
     } catch { return fallbackList(); } finally { clearTimeout(timer); }
   }
 
@@ -121,6 +130,9 @@ export function createModelsService({ id, baseUrl, modelsPath, fetchImpl, dispat
     // 这里 cat.models 只有 free，写进去会把 pass 挤掉 10 分钟（daemon 启动后 /v1/models 就缺 pass）。
     let change = null;
     if (snapshotPath) { try { change = detectFreeChanges(valid.map((m) => m.id)); } catch {} }
+    // 自检同样是一次「读取上游」，故也喂给白名单 auto-sync：开机后即便没人访问 /v1/models，
+    // 新上架免费模型也已可用。这里只有 free（fetchFreeCatalog 只抽 free），clinePass 由 listModels 成功路径补齐。
+    notifyRefresh(valid);
     return {
       ok: true,
       status: cat.status,
