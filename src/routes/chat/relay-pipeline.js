@@ -12,6 +12,11 @@ export const LAST_CANDIDATE_TIMEOUT_MS = (() => {
   return Number.isInteger(n) && n >= 0 ? n : 120_000;
 })();
 
+/** 空转 200 判定（serial-trial 同模型重试用）：与 execute 内 _emptyTurn 产生的 lastErr 同源 */
+export function isEmptyTurnError(err) {
+  return Number(err?.status) === 502 && String(err?.message || "").startsWith("EMPTY_MODEL_RESPONSE");
+}
+
 /**
  * RelayPipeline 深模块
  * 把 5 个 handler 各自的 fallback→relay→scoring→事件 6段流水收敛为单一真相。

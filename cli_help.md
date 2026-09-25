@@ -1284,6 +1284,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块闸门：非末位候选到点即真掐上游换候选（`0`=关闭；keepalive 注释帧不算首块、不解除闸门） |
 | `MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS` | `120000` | 末位/唯一候选与借道（via-route）的耐心档：首块未到才放弃（`0`=不限，慢上游可调大） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
+| `MSLXDFF_EMPTY_TURN_RETRIES` | `2` | 空转 200（模型无输出）同模型自动重试次数（`0`=关闭回旧行为；仅 `EMPTY_MODEL_RESPONSE`，429/403/500 与 fetch 异常不重试） |
+| `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `1000` | 空转重试前暂停 ms（给上游 1s 喘息再重拉同模型） |
 | `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |
 | `MSLXDFF_MODELS_DEV_TTL_MS` | `86400000` (24h) | 能力目录缓存 TTL（过期重拉；`0`=每请求拉） |
 | `MSLXDFF_MODELS_DEV_CACHE` | `~/.config/mslxdff/models-dev.json` | 能力目录磁盘缓存路径（fetch 失败回退旧缓存） |
