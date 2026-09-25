@@ -30,6 +30,40 @@ function hasPayload(text) {
   return false;
 }
 
+// 错误包络 chunk 判定（纯函数）：data 行 JSON 含顶层 .error 对象、或只有 finish_reason=error
+// 的空帧，且整 chunk 无任何 content/tool_calls/reasoning 输出 → 返回错误摘要（建议暂扣），
+// 否则返回 null（透传）。解析失败一律透传（默认保安全）。
+// 背景：网关把上游失败包成 HTTP 200 SSE；暂扣后下游流式 UI 不再展示瞬时错误
+//（如 Vertex 503 + google fallback 400），本轮走空转重试，客户端只看到最终结果。
+function holdableChunk(txt) {
+  if (typeof txt !== "string" || !txt.includes("data:")) return null;
+  let sawData = false;
+  const errs = [];
+  for (const line of txt.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("data:")) continue;
+    const d = t.slice(5).trim();
+    if (!d || d === "[DONE]") continue;
+    let j = null;
+    try { j = JSON.parse(d); } catch { return null; }
+    if (!j || typeof j !== "object") return null;
+    sawData = true;
+    const c0 = (Array.isArray(j.choices) && j.choices[0]) || {};
+    const delta = c0.delta || {};
+    const msg = c0.message || {};
+    const out = delta.content || msg.content || delta.tool_calls || msg.tool_calls || delta.reasoning || msg.reasoning;
+    if (out && !(Array.isArray(out) && out.length === 0)) return null;
+    if (j.error && typeof j.error === "object") {
+      const m = j.error.message || j.error.code || "";
+      if (m) errs.push(String(m).slice(0, 300));
+    } else if (c0.finish_reason !== "error") {
+      return null;
+    }
+  }
+  if (!sawData) return null;
+  return errs.length ? errs.join(" | ") : "finish_reason=error 空帧";
+}
+
 // 自持 reader 优先：for-await 会锁定 ReadableStream，使 body.cancel() 必 reject（真流上等于空操作），
 // 超时/断下游要真能掐上游必须走 reader.cancel()
 async function* bodyChunks(body, reader) {
@@ -116,6 +150,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     chars: 0,
     toolCalls: 0,
     chatShaped: false,
+    heldErrorChunks: 0,
+    upstreamErrorText: null,
     recoveries: 0,
   };
   let prevChunkAt = t0;
@@ -206,6 +242,13 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           if (gap > SCORE_STALL_MS) detail.stallHits += 1;
           prevChunkAt = now;
           const txt = chunkText(chunk);
+          // 错误包络暂扣：本轮尚未写出真实输出时错误帧不写下游（下游 UI 不再展示瞬时错误），
+          // 摘要记 detail.upstreamErrorText 供空转判定与最终报错；已写出真实内容后的错误帧照常透传。
+          const holdErr = !wrotePayload ? holdableChunk(txt) : null;
+          if (holdErr) {
+            detail.heldErrorChunks += 1;
+            if (!detail.upstreamErrorText) detail.upstreamErrorText = String(holdErr).slice(0, 500);
+          }
           const isPayload = hasPayload(txt);
           try {
             if (txt.includes("[DONE]")) detail.sawDone = true;
@@ -252,7 +295,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
           // 首块/空闲超时后上游仍吐出了真实数据 → 只是慢，不是死：撤销超时判定，照常转发
           //（cancel 是异步的，竞态窗口内已到达的数据是纯收益；丢掉是纯损失）
           // 注释帧（keepalive）不算：否则对端只要在发心跳，闸门就永远解除
-          if (isPayload && (timedOut || stalled)) {
+          if (isPayload && !holdErr && (timedOut || stalled)) {
             timedOut = false;
             stalled = false;
             detail.recoveries = (detail.recoveries || 0) + 1;
@@ -260,7 +303,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
           if (timedOut || stalled || tooLong) break;
-          if (isPayload && first) {
+          if (isPayload && first && !holdErr) {
             first = false;
             ttf = Math.round(now - t0);
             onFirstChunk?.(ttf);
@@ -279,11 +322,13 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
               }
             } catch {}
           }
-          wroteAny = true;
-          if (isPayload) wrotePayload = true;
-          detail.wroteChunks += 1;
-          detail.wroteBytes += Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
-          try { res.write(outChunk); } catch { /* 下游已断开：onClose 已掐上游 */ }
+          if (!holdErr) {
+            wroteAny = true;
+            if (isPayload) wrotePayload = true;
+            detail.wroteChunks += 1;
+            detail.wroteBytes += Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
+            try { res.write(outChunk); } catch { /* 下游已断开：onClose 已掐上游 */ }
+          }
           armStall();
         }
         if (!detail.exitReason) detail.exitReason = detail.downstreamClosed ? "downstream-closed" : "normal";
