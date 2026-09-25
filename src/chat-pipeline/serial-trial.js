@@ -10,6 +10,7 @@ import { handleBroadbandRelay } from "../routes/chat/broadband-handler.js";
 import { handleViaRoute } from "../routes/chat/via-route-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
 import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from "../state/schemas/use-group.js";
+import { summarizeRequest } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -97,7 +98,7 @@ export async function runSerialTrial(ctx, deps = {}) {
     let emptyRetried = 0;
     for (;;) {
       const tUp = performance.now();
-      evt("upstream-try", { reqId, model, attempt: idx + 1, emptyRetry: emptyRetried });
+      evt("upstream-try", { reqId, model, attempt: idx + 1, emptyRetry: emptyRetried, payload: summarizeRequest(forwarded) });
       try {
         upRes = await upstream.chat(forwarded, chatOptsArg);
         evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });

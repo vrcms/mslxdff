@@ -4,10 +4,39 @@
 // HTTP 错误就地映射为带状态码的 Response；装载失败抛 _sdkLoadFailed 由引擎回退 legacy。
 // responses 适配器（sdk/responses.js）复用本文件的 baseURL 解析、错误映射与流序列化。
 // 见 .scratch/ai-sdk-upstream/{SPEC.md,SPEC-p3-responses.md} 与 docs/adr/0017。
+// Headers 超时（防 SDK 通道挂死）：doStream 裸 await 曾因上游连接半死永不 resolve
+//（cline muse-spark 2026-09-25 17:48 悬空 27min+，无 upstream-done/error/result）。
+// 默认 120s（覆盖慢模型首块握手的合理上限），MSLXDFF_SDK_HEADERS_TIMEOUT_MS=0 关闭。
+// 注意错误文案不得含 "timed out"：cline runChat 靠该子串做网络重试，命中会把挂死放大 3 倍。
 import { toModelPrompt, toModelTools, toModelToolChoice, toModelParams } from "./convert.js";
 import { createSseSerializer } from "./sse.js";
 import { diagnoseToolSequence, compactSequence } from "./diagnose.js";
 import { getUndici } from "../../compat.js";
+function headersTimeoutMs(env = process.env) {
+  const n = Number(env.MSLXDFF_SDK_HEADERS_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 120_000;
+}
+
+// race 包裹：超时 reject mkErr()；先赢路径清定时器并吞掉迟到的 rejection（防 unhandled）。
+export function withHeadersTimeout(promise, ms, mkErr) {
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(mkErr()), ms);
+  });
+  return Promise.race([
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); return v; },
+      (e) => { clearTimeout(timer); throw e; },
+    ),
+    guard,
+  ]).catch((e) => {
+    // 超时赢后原 promise 仍可能 reject：静默兜住，不让其变成 unhandled rejection。
+    if (promise && typeof promise.catch === "function") promise.catch(() => {});
+    throw e;
+  });
+}
+
 
 let sdkPromise = null;
 
@@ -155,15 +184,23 @@ export async function attemptOnceSdk({
     ...(capturedFetch ? { fetch: capturedFetch } : {}),
   });
   const model = provider.chatModel(String(body?.model || ""));
+  const htMs = headersTimeoutMs();
+  const aborter = htMs > 0 ? new AbortController() : null;
   let res;
   try {
-    res = await model.doStream({
-      prompt: toModelPrompt(body?.messages),
-      ...toModelParams(body, providerName),
-      tools: toModelTools(body?.tools),
-      toolChoice: toModelToolChoice(body?.tool_choice),
-    });
+    res = await withHeadersTimeout(
+      model.doStream({
+        prompt: toModelPrompt(body?.messages),
+        ...toModelParams(body, providerName),
+        tools: toModelTools(body?.tools),
+        toolChoice: toModelToolChoice(body?.tool_choice),
+        ...(aborter ? { abortSignal: aborter.signal } : {}),
+      }),
+      htMs,
+      () => new Error(`sdk-channel: headers timeout after ${htMs}ms（上游未返回响应头，防挂死；MSLXDFF_SDK_HEADERS_TIMEOUT_MS=0 关闭）`),
+    );
   } catch (e) {
+     try { aborter?.abort(); } catch {}
     const mapped = errorResponseFromSdkError(e, { marker });
     if (mapped) {
       try { logRequestDiagnosis(lastBodyText, mapped.status); } catch {}

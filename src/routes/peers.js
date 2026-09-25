@@ -12,6 +12,7 @@ const DEFAULT_PEER_CONNECT_TIMEOUT_MS = 3_000;
 // 沿用 30s 会把组内转发的中继活流掐成 "terminated"（实测首块后 ~31s 必断，本地直连
 // 无此限制——组内因此比直连"不流畅"）。与应用层 MAX_STREAM_MS(120s) 对齐：
 // undici 层只做最后兜底，掐流交给应用层的首块/总时长策略。
+import { summarizeRequest } from "../model-trace.js";
 const PEER_BODY_TIMEOUT_MS = 120_000;
 export { PEER_BODY_TIMEOUT_MS };
 
@@ -203,7 +204,7 @@ export async function racePeerCandidates(candidates, ctx) {
         tried.add(peer.url);
         const ctrl = new AbortController();
         ctrls.set(peer.url, ctrl);
-        ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1 });
+        ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1, payload: summarizeRequest(ctx.body) });
         // 插件 hook：peer:beforeForward — 转发给组员前观察
         if (ctx.plugins?.length) {
           runHook(ctx.plugins, "peer:beforeForward", { reqId: ctx.reqId, peer: peer.url, model: target, hops: ctx.hops + 1 }).catch(() => {});

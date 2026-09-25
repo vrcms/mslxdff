@@ -121,8 +121,8 @@ function captureRes() {
   return { res, cap };
 }
 
-function composePipeline({ candidates, upstream, events }) {
-  const logs = { appendCall() {}, appendError() {}, appendEvent(e) { events.push(e); } };
+function composePipeline({ candidates, upstream, events, traces = [] }) {
+  const logs = { appendCall() {}, appendError() {}, appendEvent(e) { events.push(e); }, appendModelTrace(model, entry) { traces.push({ model, ...entry }); } };
   return createChatPipeline({
     upstream,
     auto: fakeAuto({ candidates }),
@@ -193,5 +193,36 @@ describe("ChatPipeline.execute 组合路径（唯一 seam）", () => {
     assert.equal(cap.status, 200, `expected 200 got ${cap.status}`);
     assert.ok(calledModels.length >= 2, `两个候选应参与并发: ${JSON.stringify(calledModels)}`);
     assert.ok(!events.some((e) => e.type === "auto-scope"), "无 provider 头不应发 auto-scope");
+  });
+});
+
+describe("ChatPipeline 按模型链路日志", () => {
+  it("非流式请求记录 request/ordered/upstream-try/upstream-done/relay-done/client-response/result", async () => {
+    const events = [];
+    const traces = [];
+    const pipeline = composePipeline({
+      candidates: ["trace-model"],
+      events,
+      traces,
+      upstream: { chat: async (payload) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" } }] }), { status: 200, headers: { "content-type": "application/json" } }) },
+    });
+    const { res, cap } = captureRes();
+    await pipeline.execute({
+      req: {
+        headers: { "x-mslxdff-model-lock": "trace-model" },
+        body: { model: "trace-model", messages: [{ role: "user", content: "SECRET_PROMPT" }], stream: false },
+        socket: { remoteAddress: "127.0.0.1" },
+      },
+      res,
+    });
+    assert.equal(cap.status, 200);
+    const stages = traces.map((t) => t.type);
+    for (const s of ["request", "ordered", "upstream-try", "upstream-done", "relay-done", "client-response", "result"]) {
+      assert.ok(stages.includes(s), `缺少 ${s}: ${JSON.stringify(stages)}`);
+    }
+    const first = traces.find((t) => t.type === "upstream-try");
+    assert.deepEqual(first.data.payload, { stream: false, messages: 1, roles: { user: 1 }, tools: 0, maxTokens: null, temperature: null, topP: null });
+    const text = JSON.stringify(traces);
+    assert.ok(!text.includes("SECRET_PROMPT"), "模型链路日志不得包含 prompt 正文");
   });
 });
