@@ -183,6 +183,8 @@ export function saveProviderConfig(id, { baseUrl, keys, auths, allowedModels, mo
   if (!cleanUrl && !cleanKeys.length && !finalAllowed.length && !finalAuths.length && !finalModelsPath && !finalChatPath) delete configs[id];
   else {
     configs[id] = { baseUrl: cleanUrl, keys: cleanKeys };
+    // 同 saveProviderAllowedModels：起手不带 allowAnyModels 就会静默丢用户的「允许任意」设置（cline token 轮换每走一次这里就丢一次）
+    if (typeof cur.allowAnyModels === "boolean") configs[id].allowAnyModels = cur.allowAnyModels;
     if (finalAuths.length) configs[id].auths = finalAuths;
     if (finalAllowed.length) configs[id].allowedModels = finalAllowed;
     if (finalModelsPath) configs[id].modelsPath = finalModelsPath;

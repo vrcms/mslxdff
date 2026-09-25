@@ -48,6 +48,7 @@
   | Cline 登录 | `-provider cline login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`cline` 走 `refresh→workos:token`+指纹头，deepseek 家族免 403（含 `cline-free/deepseek-*`；非流式内部强制 stream 聚合成 JSON，对外仍按请求方 stream）；多账号重复 login 追加（同邮箱替换不追加，`list` 显示邮箱）；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
 | Cline 免费目录 | `-provider cline free [--json]` | 上游免费目录只读（`recommended-models` 的 `free`，5 个）：列目录 + 与当前 allowlist 的差异，不写 state |
 | Cline 免费同步 | `-provider cline free sync [--yes] [--json] [--keep-extra]` | 把免费目录同步为 `cline` 的 allowlist（写裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览，`--yes` 才落盘**；`--keep-extra` 只增不删 |
+| Cline 用量 | `-provider cline quota [--json] [--account <hash>] [--model <substr>]` | 账号×模型双口径只读统计（`cline-usage.jsonl`）：free 显示本周期/已完成周期/累计，pass 显示近 24h/累计；`--json` 供脚本；空账本给引导 |
 | Cline 迁移 | `-provider cline migrate [--dry-run]` | 旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔 `sk_`、allowlist 求并）后删旧键，幂等、改前备份；**cline 恒 local-only**（不走组员、不借 key、只走本地直连，历史别名同样硬排除） |
 | CodeArts 登录 | `-provider codearts login` | 华为云 CodeArts Agent（盘古助手）PKCE 浏览器授权：凭证 blob（refreshToken/codeVerifier/dpopJwk）落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转，默认 `allowAnyModels=true`）；此后 `codearts/<modelId>` 前缀（恒 `stream:true`，STS 临期自动刷新 + refresh_token 轮换原位写回，死号提示重登）；**恒 local-only** 不借 key（ADR-0027） |
 | CodeArts 模型 | `-provider codearts models [--json]` | 三路发现（builtin 归一 + 代理型 + 福利网关），benefit 模型自动 claim（幂等 `0000`），对外带 `tags:["free:benefit"]` |

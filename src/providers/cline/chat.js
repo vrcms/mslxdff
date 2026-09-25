@@ -256,12 +256,26 @@ export function createChatService({
     for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
       if (body[k] !== undefined) upstreamBody[k] = body[k];
     }
+    // Gemini 3.x Flash 经 Vertex 的 maxOutputTokens 上限 65536：客户端（PI-Desktop 默认
+    // 128000）原样透传即 400 invalid argument（网关 SSE 内 detail：
+    // "Unable to submit request because it has a maxOutputTokens va..."）。
+    // 2026-09-25 直连实测：max 128000 必 400，65536/32000/500 全 200；
+    // reasoning_effort=high 单独不触发，仅夹上限。只夹 gemini，其他通道不动。
+    if (/gemini/i.test(String(upstreamModel || "")) && tokLimit > 65536) {
+      upstreamBody.max_tokens = 65536;
+      upstreamBody.max_completion_tokens = 65536;
+    }
     for (let netAttempt = 0; netAttempt < 3; netAttempt++) {
       try {
         const resp = await clineFetchWithRetry(upstreamBody, sessionId, isStream);
         if (!resp) throw new Error("empty response");
         if (!resp.ok) return resp;
-        if (isStream) return resp;
+        if (isStream) {
+          // 旁路观测：把本次选中的账号哈希与裸 model 挂到透传 Response 上，供 relay 记账用。
+          // 转发链路不读这两个字段；记账失败也不影响返回。见 .agents/notes/implemented/feature/2026-09-24-cline-usage-dualwindow.md
+          try { resp.clineAccountId = acctId(authPool.getCurrentAccount()); resp.clineModel = model; } catch {}
+          return resp;
+        }
         if (forceStream) {
           const ret = await nonStreamWithContentCheck(upstreamBody, sessionId, resp);
           if (ret.error) return ret.error;

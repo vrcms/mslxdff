@@ -27,10 +27,15 @@ export function saveProviderAllowedModels(id, list, { file = defaultStateFile() 
   const auths = normalizeAuths(cur.auths);
   const modelsPath = typeof cur.modelsPath === "string" ? normalizeEndpointPath(cur.modelsPath) : "";
   const chatPath = typeof cur.chatPath === "string" ? normalizeEndpointPath(cur.chatPath) : "";
-  if (!baseUrl && !keys.length && !auths.length && !clean.length && !modelsPath && !chatPath) {
+  // allowAnyModels 是独立语义开关：只有它也设过时，即使其余字段全空也不能整键删（否则 clear 会把「允许任意」连带抹掉，供应商从放行降级成全拦 403）
+  if (!baseUrl && !keys.length && !auths.length && !clean.length && !modelsPath && !chatPath && typeof cur.allowAnyModels !== "boolean") {
     delete configs[id];
   } else {
     configs[id] = { baseUrl, keys };
+    // 重建 cfg 是 `{ baseUrl, keys }` 起手，不显式带 allowAnyModels 就会静默丢用户的「允许任意」设置
+    // （实测 2026-09-24：saveProviderAllowedModels 把 allowAnyModels:true 抹成默认 false）。
+    // cline 白名单 auto-sync 会周期性写这里，丢了就是持续丢，必须保留。
+    if (typeof cur.allowAnyModels === "boolean") configs[id].allowAnyModels = cur.allowAnyModels;
     if (auths.length) configs[id].auths = auths;
     if (clean.length) configs[id].allowedModels = clean;
     if (modelsPath) configs[id].modelsPath = modelsPath;
