@@ -2,7 +2,7 @@
 
 > **活文档**：本文件与 `bin/mslxdff.js`、`docs/ARCHITECTURE.md §6` 同为单一事实源。
 > **新增或改动任何 CLI 参数，必须同步更新本文件**（否则视为未完成）。检查：`npm run docs:check` 会校验 `ARCHITECTURE.md` 的 CLI 表与实现一致，本文件需人工保持与之同步。
-> 适用版本：`>=0.1.79`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速 + `bench --via` 直连 vs 经 peer 延迟对比 + opencode 匿名 hermes 优先 + cline free 单一源与启动自检；Cline 供应商 id 统一为 `cline`，新增 `-provider cline free [sync]` / `-provider cline migrate`）。最后更新：2026-09-20。
+> 适用版本：`>=0.1.79`（含 WorkBuddy 供应商 + 端点可配 `modelsPath`/`chatPath` + `provider <id> models` 直查 + `provider <id> bench` 测速 + `bench --via` 直连 vs 经 peer 延迟对比 + opencode 匿名 hermes 优先 + cline free 单一源与启动自检；**2026-09-24：Cline 白名单 auto-sync（上游列表=真相）**；**2026-09-25：`timeline.log` 人读时间线 + 按模型链路日志 `<provider>-<model>.log` + SDK 通道 headers 超时**）。最后更新：2026-09-25。
 
 ## 目录
 
@@ -42,7 +42,7 @@
 | `mslxdff` | — | 无参：daemon 已在且版本 ≥ 本地→直接显示 status+help（**只升不降**，低版本不会覆盖高版本）；否则以后台 daemon 启动并退出（npx 友好） | 否 | 否 |
 | `mslxdff -d` | `--daemon` | 以 detached 后台进程启动 daemon，同裸跑有“只升不降”保护（高版本已在跑时不会被低版本覆盖） | 否 | 否 |
 | `mslxdff -status` | `--status`, `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（free 缓存/preferred/picks + 体检表 avg首字/tps/啰嗦/p95）、autostart/plugins、群组/failover、recent calls(含 ttfb/tps/tok)、last error | 否 | 否（未运行时也打印，health 显示 fail） |
-| `mslxdff -log [N]` | `--log`, `-logs`, `--logs` | 显示最近 N 条事件（默认 10），并提示其他日志路径 | 否 | 否 |
+| `mslxdff -log [N]` | `--log`, `-logs`, `--logs` | 显示最近 N 条事件（默认 10）+ `timeline.log` 人读时间线（直连/组员/重试/最终结果/总耗时），并提示其他日志路径（按模型链路日志 `<provider>-<model>.log`、calls/errors/daemon） | 否 | 否 |
 | `mslxdff -debug` | `--debug` | 停掉后台 daemon，前台运行并实时打印事件流；Ctrl+C 恢复后台 | 清空旧日志 | 会停旧 daemon |
 | `mslxdff -plugins` | `--plugins` | 列出插件目录与已识别插件及其 hooks，不启动 daemon | 否 | 否 |
 | `mslxdff -stop` | `--stop` | 停止 daemon | 否 | 需运行 |
@@ -68,7 +68,7 @@
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider cline login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `cline` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
 | `mslxdff -provider cline free [--json]` | `--provider` | **只读**：直查上游免费模型目录（`GET /api/v1/ai/cline/recommended-models` 的 `free` 数组，当前 5 个）并列出与当前 `allowlist` 的差异，不写任何 state；`--json` 输出 JSON 供脚本 | 否 | 否 |
-| `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删 | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
+| `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删。**注意**：本命令是**一次性全量替换**（不带 `--keep-extra` 会清空现有 allowlist，连 auto-sync 并入的 clinePass 一起挤掉）；daemon 运行期的 auto-sync 则是只增不减（见下节）；**上游不可达（走内置兜底）时拒绝写盘**，防把 `FALLBACK_FREE` 落成白名单——与 auto-sync 同一口径：兜底不是上游真相，确需手填改走 `-provider cline allowlist set <id...>` | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
 | `mslxdff -provider cline quota [--json] [--account <hash>] [--model <substr>]` | `--provider` | **只读**：聚合 `cline-usage.jsonl` 的账号×模型双口径统计并分组打印：free 走本周期 tokens（+已完成周期/上周期），pass 走近 24h；`--json` 供脚本，`--account/--model` 过滤；空账本给引导 | 否 | 否 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
 | `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
@@ -234,7 +234,9 @@
 - **作用**：显示最近 `N` 条事件（读 `eventsFile()`，`recentEvents(count)`），并打印：
   - `log dir: ...`、`events: ...`
   - `--- last X event(s) ---` + 每行 `fmtEvent(e)`（见 `fmtEvent` 的 `type` 分支）
-  - 当 `count <= 10` 时额外提示：`hint: mslxdff -log 100 | calls: ... errors: ... daemon: ...`
+  - `timeline.log` 同步显示最近 N 条人读时间线（每请求一行：直连、组员、重试、最终结果、总耗时）
+  - 按模型链路日志在同一个日志目录：`<provider>-<model>.log`（如 `ocgo-muse-spark-1.3-contributor.log`），每个请求逐阶段记录 request/route/upstream/peer/relay/result 与安全摘要；不落 prompt/响应正文/凭据
+  - 当 `count <= 10` 时额外提示 `hint: mslxdff -log 100 | calls: ... errors: ... daemon: ...`
 - **参数解析**：`args[ idx+1 ]` 转 `Number`，仅当整数且 `>0` 时取用，否则默认 10。
 - **示例**：
   ```bash
@@ -667,6 +669,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 - **数据源**：`GET https://api.cline.bot/api/v1/ai/cline/recommended-models`（公开免鉴权）返回 `free` / `recommended` / `clinePass` / `clineCloud` 四类，**只取 `free`**（当前 5 个：`z-ai/glm-5.3-flash`、`cline-free/deepseek-v4.1-flash`、`cline-free/muse-spark-1.3-contributor`、`cline-free/solar-pro4`、`poolside/laguna-s-2.1:free`）。与聚合目录/daemon 启动自检同源（`logDir/cline-free.json` 快照）。
 - **`free`（只读）**：打印 free 目录 + 与当前 `allowlist` 的差异（目录有而名单没有 / 名单有而目录没有），**不写任何 state**；`--json` 输出 JSON 供脚本。
 - **`free sync`（写）**：把 `allowlist` 置为上游 free 集合，**默认 dry-run 只预览**（末行提示 `预览模式，未写入。执行：mslxdff -provider cline free sync --yes`），加 `--yes` 才落盘 `providerConfigs.cline.allowedModels`（只重建名单，保留 baseUrl/keys/auths/端点）；`--keep-extra` 只增不删（保留名单里不在目录的条目）。写入的是**裸 id**（如 `z-ai/glm-5.3-flash`），对外 id 仍是 `cline/z-ai/glm-5.3-flash`。
+- **自动同步 (2026-09-24)**：daemon 运行期每次成功读取 `recommended-models` 后，把 free+clinePass 自动并入 `providerConfigs.cline.allowedModels`（只增不减、幂等零写盘）。新上架免费模型 (gemini-3.8-flash/space-bunny-alpha/mimo-v2.6-flash) 不再被误拦；通道切换 (`cline-pass/mimo`→`cline-free/mimo`) 两通道并存。关闭用 `MSLXDFF_CLINE_AUTOSYNC=0`（退回纯静态白名单）。观测：终端输出 `[cline] allowlist auto-sync: +N → M total (...)`。
 - **额度说明**：该接口只回**目录**、不回余额；免费额度用尽只能由上游 `429`（`Try again in Xh Ym Zs`）反推并进冷却。
 - **输出（示例）**：
   ```
@@ -701,6 +704,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   ```
 
 #### `mslxdff -provider cline migrate [--dry-run]`（旧的 clinebot 配置合并进 cline）
+
 - **语法**：`mslxdff -provider cline migrate [--dry-run]`
 - **作用**：Cline 供应商历史上有两个 id（`cline` / `clinebot`）：login 双写 + 每次 refreshToken 轮换回写另一个 id，使 `clinebot` 永不消亡（daemon 内两个实例、`/v1/models` 可能重复暴露 `cline/x` 与 `clinebot/x`）。本命令把 `providerConfigs.clinebot` 合并进 `cline` 后**删除旧键**：keys 去重并剔除 `sk_` 形态（`cline` 只认 refreshToken）、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`；**幂等**（没有 `clinebot` 时 no-op），真会改动前先备份 `state.json.bak-<ISO 时间戳>` 并 append 一条 `cline-unify-migrated` 事件（不含凭据）。CLI 入口同时把 `clinebot` / `cline-bot` 一次性归一为 `cline`（daemon 启动与 login 写盘前也会跑同一迁移）。
 - **local-only（硬约束，不可回退）**：`cline` 恒为 local-only —— 不经组员转发（`shouldUseGroupForModel("cline/…") === false`）、不借出 key（`share-keys` 硬排除 refresh-token 型凭据）、只走本地直连，历史别名同样硬排除（ADR-0015 / ADR-0019 / ADR-0026）。
@@ -1283,6 +1287,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_SLOW_TOTAL_MS` | `20000` | 慢模型判定：总耗时阈值 |
 | `MSLXDFF_STREAM_TIMEOUT_MS` | `25000` | 流式首块闸门：非末位候选到点即真掐上游换候选（`0`=关闭；keepalive 注释帧不算首块、不解除闸门） |
 | `MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS` | `120000` | 末位/唯一候选与借道（via-route）的耐心档：首块未到才放弃（`0`=不限，慢上游可调大） |
+| `MSLXDFF_SDK_HEADERS_TIMEOUT_MS` | `120000` (2m) | AI SDK 通道 headers 超时：`doStream` 到点仍未返回响应头即判挂死并抛错（由调用方回退/换路；`0`=关闭）；防上游连接半死导致请求永不返回，**错误文案不含 "timed out"**（否则 cline runChat 会按文案重试 3 次放大挂死） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
 | `MSLXDFF_EMPTY_TURN_RETRIES` | `2` | 空转 200（模型无输出）同模型自动重试次数（`0`=关闭回旧行为；仅 `EMPTY_MODEL_RESPONSE`，429/403/500 与 fetch 异常不重试） |
 | `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `1000` | 空转重试前暂停 ms（给上游 1s 喘息再重拉同模型） |

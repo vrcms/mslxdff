@@ -18,7 +18,7 @@
 | daemon | `-d` / `--daemon` | 后台启动（只升不降，低版本不覆盖高版本） |
 | 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(ts/model/status/dur)/last error/autostart/plugins — 全量聚合体检 |
 | 用量报表 | `-stats` / `--stats` `[--hours N] [--json] [--model <id>]` | 近 N 小时（默认24，上限168）模型用量；默认输出 `Token 用量`（请求/输入/输出/思考/合计）与 `响应性能`（首字/总耗时/加权速度）两张自适应边框表并含合计，长模型 id 不截断；大 token 用 k/M 缩写，`--json` 为精确值。速度按窗口加权 `Σ输出÷Σ生成耗时`，只计成功请求；不含失败请求、`-chat` 直连，也不展开逐请求 via/interrupted/单次 tps；查询超过保留期会警告可能不完整 |
-| 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件，默认10（含首字/tps/tok 详情） |
+| 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件 + `timeline.log` 人读时间线；按模型链路日志为 `logDir/<provider>-<model>.log`，逐阶段记录 request/route/upstream/peer/relay/result（安全摘要，不落 prompt/正文/凭据） |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
 | 停止 | `-stop` / `--stop` | 停 daemon |
@@ -42,12 +42,12 @@
 | 供应商增 | `-provider <id> add <key>` | 追加单 key |
 | 供应商删 | `-provider <id> remove <seq\|key> [more]` | 按序号或值删，逗号/空格均可 |
  | 供应商列表 | `-provider <id> list` / `status` | 脱敏列 keys/baseUrl/共享（`codearts`/`cline` 等硬排除显示"不借出"；codearts 每条 key 带 user/uid/domain 摘要） |
-| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`cline` 与聚合目录同源走 `recommended-models` 的 `free`，daemon 启动自检增删写 `daemon.log`；`--json` 供脚本） |
+| 供应商模型 | `-provider <id> models [--json]` | 列该供应商可用模型（按 allowlist 过滤，`workbuddy/xxx` 前缀；`cline` 与聚合目录同源走 `recommended-models` 的 `free`+`clinePass`，**每次成功取数即把上游 id 自动并入 allowlist（只增不减，`MSLXDFF_CLINE_AUTOSYNC=0` 关）**，daemon 启动自检 free 增删写 `daemon.log`；`--json` 供脚本） |
 | 供应商测速 | `-provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | 仅测（allowlist ∩ 全局 picks）交集的速度（TTFB/总耗时/TPS），空则探活 `/v1/models→/models` 并提示先 pick；**deepseek 网页通道不支持 bench**（防禁言，改用 `-provider deepseek health` 体检） |
 | 供应商选路 | `-provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `-provider bench --via` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 的 `TTFB`（仅测 picks∩allowlist 交集，串行轻探针 `max_tokens=5`，`--json` 时进度走 `stderr`；默认跳过 `opencode`需 `--include-opencode`+TTY `y/N`；**deepseek 一律跳过**（防禁言）；结果不写 state；空组直接引导；`--apply` 落盘 `via-routes.json` 供显式锁模型单路径择路） |
   | Cline 登录 | `-provider cline login` | Cline WorkOS 设备授权拿 refreshToken 落盘；`cline` 走 `refresh→workos:token`+指纹头，deepseek 家族免 403（含 `cline-free/deepseek-*`；非流式内部强制 stream 聚合成 JSON，对外仍按请求方 stream）；多账号重复 login 追加（同邮箱替换不追加，`list` 显示邮箱）；直连 workos 被墙则 `set HTTPS_PROXY=http://127.0.0.1:7890` 后重试 |
 | Cline 免费目录 | `-provider cline free [--json]` | 上游免费目录只读（`recommended-models` 的 `free`，5 个）：列目录 + 与当前 allowlist 的差异，不写 state |
-| Cline 免费同步 | `-provider cline free sync [--yes] [--json] [--keep-extra]` | 把免费目录同步为 `cline` 的 allowlist（写裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览，`--yes` 才落盘**；`--keep-extra` 只增不删 |
+| Cline 免费同步 | `-provider cline free sync [--yes] [--json] [--keep-extra]` | 把免费目录同步为 `cline` 的 allowlist（写裸 id）：**默认 dry-run，`--yes` 才落盘**；`--keep-extra` 只增不删；**全量替换**（会挤掉 daemon auto-sync 并入的 `cline-pass/*`）；**上游不可达时拒绝写盘**（不把内置兜底落成白名单） |
 | Cline 用量 | `-provider cline quota [--json] [--account <hash>] [--model <substr>]` | 账号×模型双口径只读统计（`cline-usage.jsonl`）：free 显示本周期/已完成周期/累计，pass 显示近 24h/累计；`--json` 供脚本；空账本给引导 |
 | Cline 迁移 | `-provider cline migrate [--dry-run]` | 旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔 `sk_`、allowlist 求并）后删旧键，幂等、改前备份；**cline 恒 local-only**（不走组员、不借 key、只走本地直连，历史别名同样硬排除） |
 | CodeArts 登录 | `-provider codearts login` | 华为云 CodeArts Agent（盘古助手）PKCE 浏览器授权：凭证 blob（refreshToken/codeVerifier/dpopJwk）落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转，默认 `allowAnyModels=true`）；此后 `codearts/<modelId>` 前缀（恒 `stream:true`，STS 临期自动刷新 + refresh_token 轮换原位写回，死号提示重登）；**恒 local-only** 不借 key（ADR-0027） |
@@ -76,6 +76,7 @@
 | WorkBuddy SDK 通道（缺省启用） | `MSLXDFF_WORKBUDDY_SDK`（未设置则继承 `MSLXDFF_UPSTREAM_ENGINE`） | 底层缺省走 `@ai-sdk/openai-compatible`（optionalDependencies，需 Node>=18，不可用自动回退原生）；设 `legacy`/关闭词回退原生 transport，上层轮换/刷新/reshape 不变 |
 | 上游引擎（默认，ADR-0017） | `MSLXDFF_UPSTREAM_ENGINE`（缺省 `sdk`） | opencode 流式 chat 走 `@ai-sdk/openai-compatible`、`muse-spark*` 走 `@ai-sdk/openai` 的 responses 适配器（响应标记头 `x-mslxdff-upstream-engine: sdk`，复用 legacy 连接池）；通用 OpenAI 兼容族与 cline 同源（供应商级 `MSLXDFF_<ID>_SDK` 未设置即继承本变量）；非流式自动委派 legacy，SDK 不可用回退并告警；显式 `legacy`/关闭词回退原实现 |
 | responses 类模型路由（ADR-0032） | `MSLXDFF_<ID>_RESPONSES_PATH`（缺省 `/responses`） | 通用带 key 供应商遇 responses 类模型（`muse-spark*` 等，判定与 `/v1/models` 的 `capabilities.upstreamApi` 同源）自动改打 `<baseUrl>/responses`（此前固定打 `chatPath` → 上游 503 `Endpoint is unavailable`）；流式走 `@ai-sdk/openai` responses 适配器（含加密思考往返），非流式/SDK 不可用走原生 `chatToResponsesBody` 转换，出参恒 chat 形状；异形上游用该 env 覆盖路径 |
+| SDK 通道 headers 超时 | `MSLXDFF_SDK_HEADERS_TIMEOUT_MS`（缺省 `120000`） | 防 SDK 通道挂死：`doStream` 到点仍未返回响应头即判挂死抛错（由调用方回退/换路），`0`=关闭；错误文案**不含 "timed out"**（避免 cline runChat 按文案重试放大挂死） |
 | 免费层形状门禁（ADR-0020） | `MSLXDFF_FREE_LANE`（缺省 1）/`MSLXDFF_FREE_LANE_DEBUG=1` | zen 免费模型必须 `stream:true` + tools 含 bash/edit/glob/grep/read 五名且 UA≥`opencode/1.18.0`（否则 403/426）；`src/free-lane.js` 自动补形状、非流式聚合回 JSON；`0`=关（逃生阀），DEBUG 打 `[free-lane]` 日志 |
 | WorkBuddy 摘除 | `-workbuddy remove <uid> [--keep-file]` / `-wb remove` | 按 `uid`（前缀6位）摘除，删 `keys/auths` 与 `auths/workbuddy-<uid>.json` |
 | 定号消耗 | `header x-mslxdff-workbuddy-uid: <uid>` 或 `model workbuddy/<uid>:<model>` | 钉死指定账号消耗，`x-mslxdff-workbuddy-uid` 回显实际账号 |

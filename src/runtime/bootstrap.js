@@ -1,10 +1,11 @@
-import { appendCall, appendError, appendEvent } from "../logs.js";
+import { appendCall, appendError, appendEvent, appendTimeline } from "../logs.js";
 import { setupProviders } from "./providers-setup.js";
 import { startServerLifecycle } from "./server-lifecycle.js";
+import { appendModelTrace } from "../model-trace.js";
 import { startGroupSync } from "./group-sync.js";
 import { startBroadband } from "./broadband.js";
 
-const logs = { appendCall, appendError, appendEvent };
+const logs = { appendCall, appendError, appendEvent, appendTimeline, appendModelTrace };
 
 /**
  * daemon 启动门面 — 仅编排：组装世界 → 服务生命周期 → 群组同步 → 宽带中继 → 自更新。

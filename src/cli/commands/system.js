@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defaultStateFile } from "../../state.js";
 import { loadToken, refreshToken } from "../../state.js";
 import { stopDaemon, pidFile, logFile } from "../../daemon.js";
-import { logDir, eventsFile, callsFile, errorsFile, recentEvents } from "../../logs.js";
+import { logDir, eventsFile, callsFile, errorsFile, recentEvents, timelineFile, recentTimeline } from "../../logs.js";
 import { fmtEvent } from "../format.js";
 import { fmtShanghaiYMDHMS, fmtShanghaiHMS } from "../../time.js";
 import { printHelp } from "../help.js";
@@ -95,6 +95,7 @@ export async function handleUninstall(args) {
     join(dir, "calls.log"),
     join(dir, "errors.log"),
     join(dir, "events.log"),
+    join(dir, "timeline.log"),
   ]) {
     try {
       rmSync(f, { force: true });
@@ -128,6 +129,13 @@ export async function handleLog(args) {
   if (count <= 10) {
     console.log(`\nhint: mslxdff -log 100  |  calls: ${callsFile()}  errors: ${errorsFile()}  daemon: ${logFile()}`);
   }
+  const timeline = recentTimeline(count);
+  if (timeline.length) {
+    console.log(`--- last ${timeline.length} timeline line(s) ---`);
+    for (const line of timeline) console.log(line);
+  }
+  console.log(`timeline: ${timelineFile()}`);
+  console.log(`model logs: ${dir}\\<provider>-<model>.log`);
   process.exit(0);
 }
 

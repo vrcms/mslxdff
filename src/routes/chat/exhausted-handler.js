@@ -15,6 +15,7 @@ export async function handleExhaustedLocal({ res, body, lastErr, order, handlerC
     });
     evt("relay-done", { reqId: handlerCtx.reqId, model: lastErr.model, via: "local-exhausted", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
     evt("result", { reqId: handlerCtx.reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+    evt("client-response", { requested, actual: lastErr.model, via: "local", fallback: false, status: out.status, reqId: handlerCtx.reqId });
     // 最后一站：relay 超时路径不写响应（设计留给上层 failover），这里没有上层，必须自己收尾
     if (out.timedOut) {
       json(res, 502, { error: out.detail?.upstreamError ? `upstream error: ${out.detail.upstreamError}` : `stream timed out after ${out.totalMs}ms` });
@@ -22,6 +23,7 @@ export async function handleExhaustedLocal({ res, body, lastErr, order, handlerC
     return true;
   }
   evt("result", { reqId: handlerCtx.reqId, model, status: lastErr?.status ?? 502, via: "none", timing: null });
+  evt("client-response", { requested, actual: model, via: "none", fallback: false, status: lastErr?.status ?? 502, reqId: handlerCtx.reqId });
   done({ via: "none", status: lastErr?.status ?? 502, error: lastErr?.message || "all auto models failed" });
   json(res, 502, { error: lastErr?.message || "all auto models failed" });
   return true;
@@ -39,6 +41,7 @@ export async function handleExhaustedAll({ res, body, lastErr, order, requested,
     });
     evt("relay-done", { reqId: handlerCtx.reqId, model: lastErr.model, via: "local-final", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
     evt("result", { reqId: handlerCtx.reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
+    evt("client-response", { requested, actual: lastErr.model, via: "local", fallback: false, status: out.status, reqId: handlerCtx.reqId });
     // 最后一站：relay 超时路径不写响应，这里没有上层 failover，必须自己收尾
     if (out.timedOut) {
       json(res, 502, { error: out.detail?.upstreamError ? `upstream error: ${out.detail.upstreamError}` : `stream timed out after ${out.totalMs}ms` });
@@ -46,6 +49,7 @@ export async function handleExhaustedAll({ res, body, lastErr, order, requested,
     return true;
   }
   evt("result", { reqId: handlerCtx.reqId, model: lastErr?.model ?? requested, status: lastErr?.status ?? 502, via: "none", timing: null });
+  evt("client-response", { requested, actual: lastErr?.model ?? requested, via: "none", fallback: false, status: lastErr?.status ?? 502, reqId: handlerCtx.reqId });
   json(res, 502, { error: lastErr?.message || "all auto models failed" });
   return true;
 }

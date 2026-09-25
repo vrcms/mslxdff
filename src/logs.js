@@ -25,6 +25,10 @@ export function eventsFile() {
   return join(logDir(), "events.log");
 }
 
+export function timelineFile() {
+  return join(logDir(), "timeline.log");
+}
+
 function ensureDir(dir) {
   mkdirSync(dir, { recursive: true });
 }
@@ -86,6 +90,13 @@ function appendLine(file, entry) {
     .then(() => trimIfOversizedAsync(file).catch(() => {}));
 }
 
+export function recentTimeline(n = 10, { file = timelineFile() } = {}) {
+  try {
+    if (!existsSync(file)) return [];
+    return readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-n);
+  } catch { return []; }
+}
+
 export function appendCall(entry, { file = callsFile() } = {}) {
   appendLine(file, entry);
 }
@@ -131,4 +142,15 @@ export function lastError({ file = errorsFile() } = {}) {
 
 export function recentErrors(n = 5, { file = errorsFile() } = {}) {
   return readLines(file).slice(-n);
+}
+
+export function appendTimeline(entry, { file = timelineFile() } = {}) {
+  const line = `${fmtShanghaiYMDHMS(new Date())} ${String(entry || "")}\n`;
+  ensureDir(dirname(file));
+  if (shouldSync(file)) {
+    appendFileSync(file, line);
+    trimIfOversized(file);
+    return;
+  }
+  appendFile(file, line).catch(() => {}).then(() => trimIfOversizedAsync(file).catch(() => {}));
 }

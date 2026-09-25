@@ -4,6 +4,8 @@ import { createEngine } from "./engine.js";
 import { runHook } from "../plugins.js";
 import { isFreeModel } from "../models.js";
 import { clientIp, summarizePrompt } from "../routes/helpers.js";
+import { formatTimeline } from "../timeline.js";
+import { summarizeRequest, shouldTraceModel } from "../model-trace.js";
 
 /**
  * ChatPipeline 深模块门面 — 对外 execute(req) 单一 inlet
@@ -25,6 +27,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     mark("parsed");
     if (aliasInfo) { try { res?.setHeader?.("x-mslxdff-alias", aliasInfo); } catch {} }
     // mslxdff/ 前缀或 alias 命中时，把 body.model 改写为还原后的模型（与原 gateway 语义一致）
+    const timeline = { direct: [], peers: [], retries: 0, result: null };
     if (aliasInfo && req?.body && req.body.model !== requested) {
       req.body = { ...req.body, model: requested };
     }
@@ -35,6 +38,25 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const logError = (model, status, message) => logs?.appendError({ reqId, model, auto: useAuto, status, message, stages });
     const evt = (type, data) => {
       const entry = { ts: Date.now(), reqId, type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
+      const traceModel = entry.model || requested;
+      if (shouldTraceModel(type)) {
+        // Note: 模型日志只投影安全字段，不能把含 prompt 的 entry 原样下传 — 见 .agents/notes/implemented/feature/2026-09-25-model-trace-log.md
+        const safeTraceData = { ...entry };
+        if (safeTraceData.prompt !== undefined) delete safeTraceData.prompt;
+        logs?.appendModelTrace?.(traceModel, { type, reqId, model: traceModel, data: safeTraceData, request: type === "request" ? summarizeRequest(req?.body) : null, totalMs: entry.durationMs });
+      }
+      if (type === "peer-forward") timeline.peers.push({ peer: entry.peer, ok: entry.ok === true, status: entry.status, latencyMs: entry.latencyMs, message: entry.message || entry.error || "" });
+      if (type === "upstream-done" || type === "upstream-error") timeline.direct.push({ status: entry.status, reason: entry.message || entry.error || "" });
+      if (type === "peer-error") {
+        const known = timeline.peers.find((p) => p.peer === entry.peer);
+        if (known) { known.ok = false; known.status = entry.status ?? known.status; known.message = entry.message || entry.error || known.message; }
+        else timeline.peers.push({ peer: entry.peer, ok: false, status: entry.status, message: entry.message || entry.error || "" });
+      }
+      if (type === "empty-turn-retry") timeline.retries += 1;
+      if (type === "result" || (type === "client-response" && !timeline.result)) {
+        timeline.result = { status: entry.status, detail: entry.detail || null };
+        try { logs?.appendTimeline?.(formatTimeline({ reqId, model: entry.model || requested, ...timeline, totalMs: Date.now() - startedAt })); } catch {}
+      }
       if (bus) bus.emit(entry);
       logs?.appendEvent?.(entry);
     };
