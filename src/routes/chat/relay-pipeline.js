@@ -137,10 +137,12 @@ export function createRelayPipeline({
       !["tool_calls", "function_call"].includes(_d.sawFinishReason);
     if (_emptyTurn) {
       const _why = _d.sawFinishReason ? ` (finish_reason=${_d.sawFinishReason})` : " (no content, no tool calls)";
-      try { _logError(actual, 502, `empty turn${_why}`); } catch {}
+      // 错误包络暂扣后下游不再直观看到上游原文：把摘要带进最终报错（截断 200 字），排障不断线。
+      const _err = _d.upstreamErrorText ? ` upstream=${String(_d.upstreamErrorText).slice(0, 200)}` : "";
+      try { _logError(actual, 502, `empty turn${_why}${_err}`); } catch {}
       _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null });
       _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
-      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why} — retry or rephrase` } };
+      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err} — retry or rephrase` } };
     }
 
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
