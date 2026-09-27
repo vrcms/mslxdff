@@ -1,4 +1,5 @@
 // 人读请求时间线：只输出状态/耗时/出口，不输出 prompt、响应正文或凭据。
+// Note: 渲染口径与失败路径 client-response 对账（result 与 client-response 条数须相等）— 见 .agents/notes/implemented/feature/2026-09-25-model-trace-log.md
 function hostPort(value) {
   try { const u = new URL(String(value)); return u.port ? `${u.hostname}:${u.port}` : u.hostname; } catch { return String(value || "-").slice(0, 80); }
 }

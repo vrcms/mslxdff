@@ -52,5 +52,6 @@ export function createKeyRing(keys = [], { cooldownMs = DEFAULT_COOLDOWN_MS, now
     return list.filter((k) => !isCooling(k)).length;
   }
 
-  return { next, onError, replace, available, size: list.length, cooldownMs, keys: [...list] };
+  // isCooling 对外暴露：粘号选择器要判断"上次这个号还在冷却吗"（决定是否必须换号）
+  return { next, onError, replace, available, isCooling, size: list.length, cooldownMs, keys: [...list] };
 }

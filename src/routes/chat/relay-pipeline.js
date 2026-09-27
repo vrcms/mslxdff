@@ -4,6 +4,7 @@ import { normalizeFullId } from "../../providers/model-id.js";
 import { computeMetrics } from "../../metrics.js";
 import { recordChatUsage } from "../../usage/record.js"; // 窗口报表唯一写入点（canonical 名单记防双计）— 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
 import { recordOutput, computeOutputRow } from "../../providers/cline/usage.js"; // cline 专属旁路统计（账号×模型，流式也覆盖）
+import { upstreamEcho } from "../../model-trace.js"; // 回显头→日志字段（谁上的/哪个号/为什么/是否冷却）单一来源
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -120,6 +121,7 @@ export function createRelayPipeline({
       aborted: out.aborted,
       interrupted: out.interrupted ?? false,
       timedOut: out.timedOut ?? false,
+      ...upstreamEcho(upRes),
       detail: out.detail ?? null,
     });
 
@@ -140,7 +142,7 @@ export function createRelayPipeline({
       // 错误包络暂扣后下游不再直观看到上游原文：把摘要带进最终报错（截断 200 字），排障不断线。
       const _err = _d.upstreamErrorText ? ` upstream=${String(_d.upstreamErrorText).slice(0, 200)}` : "";
       try { _logError(actual, 502, `empty turn${_why}${_err}`); } catch {}
-      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null });
+      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null, ...upstreamEcho(upRes) });
       _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
       return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err} — retry or rephrase` } };
     }
@@ -150,7 +152,7 @@ export function createRelayPipeline({
       const why = out.detail?.upstreamError ? ` (upstream read error: ${out.detail.upstreamError})` : "";
       if (auto) try { await auto.recordError(actual, { status: 502, slow: true, note: `stream timeout ${streamTimeoutMs}ms` }); } catch {}
       try { _logError(actual, 502, `stream timeout ${streamTimeoutMs}ms${why}`); } catch {}
-      _evt("upstream-error", { reqId, model: actual, status: 502, message: "stream timeout", timing: null });
+      _evt("upstream-error", { reqId, model: actual, status: 502, message: "stream timeout", timing: null, ...upstreamEcho(upRes) });
       _evt("fallback", { reqId, from: actual, to: null, reason: "stream timeout" });
       return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `stream timed out after ${streamTimeoutMs}ms${why}` } };
     }
@@ -161,7 +163,7 @@ export function createRelayPipeline({
         try { await auto.recordError(actual, { status: 200, slow: true, note: `stall ${C.STALL_TIMEOUT_MS}ms` }); } catch {}
         try { await auto.recordLatency(actual, out.totalMs ?? (Date.now() - curStartedAt)); } catch {}
       }
-      _evt("slow-model", { reqId, model: actual, elapsedMs: out.totalMs ?? (Date.now() - curStartedAt), threshold: C.STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null });
+      _evt("slow-model", { reqId, model: actual, elapsedMs: out.totalMs ?? (Date.now() - curStartedAt), threshold: C.STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null, ...upstreamEcho(upRes) });
       try { _logCall(actual, 200); } catch {}
       // interrupted 的 200 也是真实消耗（最贵的长生成）——照常落 usage 标 interrupted:1，口径与 5c 一致 — 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
       if (out.status === 200) {
@@ -172,7 +174,7 @@ export function createRelayPipeline({
           recordChatUsage({ model: normalizeFullId(actual), via, usage: u, interrupted: 1, ttfbMs: t0, totalMs: t1, tps: null }).catch(() => {});
         } catch {}
       }
-      _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, detail: out.detail ?? null, fallback, requested, actual });
+      _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, ...upstreamEcho(upRes), detail: out.detail ?? null, fallback, requested, actual });
       _evt("client-response", { requested, actual, via, fallback, status: out.status, reqId, interrupted: true });
       if (plugins?.length) runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body?.stream), durationMs: Date.now() - curStartedAt, via, status: out.status, actual, interrupted: true, fallback }).catch(() => {});
       return { handled: true };
@@ -186,13 +188,13 @@ export function createRelayPipeline({
     if (C.SLOW_TOTAL_MS && auto && elapsed > C.SLOW_TOTAL_MS && out.status === 200) {
       try { await auto.recordError(actual, { status: 200, slow: true, note: `slow ${elapsed}ms` }); } catch {}
       try { await auto.recordLatency(actual, latencyMs); } catch {}
-      _evt("slow-model", { reqId, model: actual, elapsedMs: elapsed, threshold: C.SLOW_TOTAL_MS, reason: "total", detail: out.detail ?? null });
+      _evt("slow-model", { reqId, model: actual, elapsedMs: elapsed, threshold: C.SLOW_TOTAL_MS, reason: "total", detail: out.detail ?? null, ...upstreamEcho(upRes) });
       scoredSlow = true;
     }
     if (out.detail?.stallHits > 0 && auto && out.status === 200) {
       try { await auto.recordError(actual, { status: 200, slow: true, note: `stall ${out.detail.stallHits}x gap>${C.SCORE_STALL_MS}ms maxGap ${out.detail.maxGapMs}ms` }); } catch {}
       try { await auto.recordLatency(actual, latencyMs); } catch {}
-      _evt("slow-model", { reqId, model: actual, elapsedMs: elapsed, threshold: C.SCORE_STALL_MS, reason: "stall", stallHits: out.detail.stallHits, maxGapMs: out.detail.maxGapMs, detail: out.detail ?? null });
+      _evt("slow-model", { reqId, model: actual, elapsedMs: elapsed, threshold: C.SCORE_STALL_MS, reason: "stall", stallHits: out.detail.stallHits, maxGapMs: out.detail.maxGapMs, detail: out.detail ?? null, ...upstreamEcho(upRes) });
       scoredSlow = true;
     }
     if (!scoredSlow && auto && out.status === 200) {
@@ -234,7 +236,7 @@ export function createRelayPipeline({
       } catch {}
     }
 
-    _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null, fallback, requested, actual });
+    _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, ...upstreamEcho(upRes), detail: out.detail ?? null, fallback, requested, actual });
     _evt("client-response", { requested, actual, via, fallback, status: out.status, reqId });
     if (plugins?.length) runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body?.stream), durationMs: Date.now() - curStartedAt, via, status: out.status, actual, fallback }).catch(() => {});
     return { handled: true };

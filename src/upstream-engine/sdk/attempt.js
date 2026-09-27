@@ -8,6 +8,7 @@
 //（cline muse-spark 2026-09-25 17:48 悬空 27min+，无 upstream-done/error/result）。
 // 默认 120s（覆盖慢模型首块握手的合理上限），MSLXDFF_SDK_HEADERS_TIMEOUT_MS=0 关闭。
 // 注意错误文案不得含 "timed out"：cline runChat 靠该子串做网络重试，命中会把挂死放大 3 倍。
+// Note: 闸门定时器不可 unref()（会让事件循环排空、node:test 判 cancelled）— 见 .agents/notes/implemented/bug-fix/2026-09-25-sdk-headers-timeout-and-failure-client-response.md
 import { toModelPrompt, toModelTools, toModelToolChoice, toModelParams } from "./convert.js";
 import { createSseSerializer } from "./sse.js";
 import { diagnoseToolSequence, compactSequence } from "./diagnose.js";

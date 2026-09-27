@@ -10,7 +10,7 @@ import { handleBroadbandRelay } from "../routes/chat/broadband-handler.js";
 import { handleViaRoute } from "../routes/chat/via-route-handler.js";
 import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
 import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from "../state/schemas/use-group.js";
-import { summarizeRequest } from "../model-trace.js";
+import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -91,6 +91,8 @@ export async function runSerialTrial(ctx, deps = {}) {
     if (Object.keys(shareKeys).length) chatOpts.shareKeys = shareKeys;
     if (workbuddyUid) chatOpts.workbuddyUid = workbuddyUid;
     if (handlerCtx?.sessionId) chatOpts.sessionId = handlerCtx.sessionId;
+    // reqId = 本次客户端请求的身份：供应商据此"同请求粘号"（重试不换号，只有 401/403/429/5xx 冷却才换）
+    if (reqId) chatOpts.reqId = reqId;
     const chatOptsArg = Object.keys(chatOpts).length ? chatOpts : undefined;
     // 空转 200（模型无输出）同模型暂停重试：默认 2 次、间隔 1s；仅 EMPTY_MODEL_RESPONSE，
     // 429/403/500 与 fetch 异常走原有切号/failover（防烧额度）。MSLXDFF_EMPTY_TURN_RETRIES=0 关闭。
@@ -101,7 +103,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       evt("upstream-try", { reqId, model, attempt: idx + 1, emptyRetry: emptyRetried, payload: summarizeRequest(forwarded) });
       try {
         upRes = await upstream.chat(forwarded, chatOptsArg);
-        evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null });
+        evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null, ...upstreamEcho(upRes) });
       } catch (err) {
         if (auto) await auto.recordError(model, { message: errMsg(err) });
         lastErr = { model, upstream: null, status: 502, message: errMsg(err) };
@@ -148,7 +150,7 @@ export async function runSerialTrial(ctx, deps = {}) {
         const upMsg = upBody || `upstream ${upRes.status}`;
         lastErr = { model, upstream: upRes, status: upRes.status, message: upMsg };
         logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}`);
-        evt("upstream-error", { reqId, model, status: upRes.status, message: upMsg.slice(0, 300), timing: upRes._t ?? null });
+        evt("upstream-error", { reqId, model, status: upRes.status, message: upMsg.slice(0, 300), timing: upRes._t ?? null, ...upstreamEcho(upRes) });
         upRes = null;
         break;
       }
@@ -170,7 +172,8 @@ export async function runSerialTrial(ctx, deps = {}) {
           if (lr.handled) return { done: true };
           if (lr.lastErr && isEmptyTurnError(lr.lastErr) && emptyRetried < emptyCfg.max) {
             emptyRetried++;
-            evt("empty-turn-retry", { reqId, model, retry: emptyRetried, max: emptyCfg.max, delayMs: emptyCfg.delayMs });
+            // 带上"刚空转的是哪个号/哪个站"：切号是重试驱动的，日志必须能自证
+            evt("empty-turn-retry", { reqId, model, retry: emptyRetried, max: emptyCfg.max, delayMs: emptyCfg.delayMs, ...upstreamEcho(upRes) });
             await sleep(emptyCfg.delayMs);
             continue;
           }

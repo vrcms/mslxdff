@@ -1,3 +1,4 @@
+// Note: 失败收尾四分支在 result 后补 client-response，与成功路径对账口径一致（result 条数 == client-response 条数）— 见 .agents/notes/implemented/bug-fix/2026-09-25-sdk-headers-timeout-and-failure-client-response.md
 import { relay } from "../stream.js";
 import { json } from "../helpers.js";
 import { performance } from "node:perf_hooks";

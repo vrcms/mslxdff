@@ -11,6 +11,7 @@ import { normalizeRegion } from "./constants.js";
 import { fingerprintSeed, deriveMachineId, deriveMachineToken, deriveMachineType } from "./fingerprint.js";
 import { newSession } from "./session.js";
 import { createChatService } from "./chat.js";
+import { createStickyPicker } from "./sticky.js";
 import { createModelsService } from "./models.js";
 import { compatFetch } from "../../compat.js";
 
@@ -55,15 +56,27 @@ export function createQoderProvider({
 
 
 
+  // 选号：同一客户端请求内粘住（重试不换号），只有该号被冷却（401/403/429/5xx）才换下一个；
+  // 无 scope（拿不到 reqId，如独立的 models 探活）时退回原 round-robin。
+  const pickKey = createStickyPicker({
+    pick: () => ring.next() || keys[0] || "",
+    isCooling: (k) => ring.isCooling(k),
+    ttlMs: envInt("MSLXDFF_QODER_STICKY_MS", 600_000),
+  });
+
   // 凭据 → 会话（会话含 RSA/AES 临时密钥，进程内可复用；此处按请求轻建，成本低）
-  function pickSession() {
-    const key = ring.next() || keys[0] || "";
+  function pickSession(scope) {
+    let decision = "new";
+    const key = pickKey(scope, (d) => { decision = d; });
+    // 全部号都在冷却时 pick() 只能兜底取 keys[0]：这是"被迫选择"，必须与正常轮转区分开
+    if (ring.available() === 0) decision = "forced";
     const blob = accountFromBlob(key);
     if (!blob?.deviceToken) return null;
     const auth = authList.find((a) => String(a?.refreshToken || "") === String(blob.refreshToken || "")) || authList[0] || {};
     const region = normalizeRegion(region0 || auth.region || "global");
     const sess = buildSessionFor({ ...blob, uid: auth.uid, name: auth.name, region });
-    return { sess, region };
+    // key/pick 带出：onError(key) 要冷却"刚用过的这个号"；pick 让日志能写"这次为什么是它"
+    return { sess, region, key, pick: decision };
   }
   const region0 = region; // 构造参数优先
 
@@ -71,14 +84,37 @@ export function createQoderProvider({
   // models 服务按号选区：构造时无固定 region，listModels(sess, region) 动态传
   const modelsSvc = createModelsService({ id, fetchImpl });
 
-  async function chat(body) {
-    const picked = pickSession();
+  // 失败冷却：401/403/429/5xx 冷却当前号（cooldownMs，默认 30s），坏号不再参与轮换。
+  // 对齐 workbuddy/chat.js 的 onError 语义——此前 qoder 只 next() 不 onError，坏号恒在轮换池里。
+  // 网络异常（fetch throw）同样冷却。业务错（4xx 内容类）不冷却。
+  async function chat(body, opts) {
+    // scope=reqId：同一次客户端请求的多次上游调用（空转重试）粘同一个号
+    const picked = pickSession(opts?.reqId ? `req:${opts.reqId}` : null);
     if (!picked) {
       return new Response(JSON.stringify({ error: { message: "qoder: 无可用账号 — 先跑 mslxdff -provider qoder login", type: "auth_error" } }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
+    const pickedKey = picked.key || "";
     const stripped = { ...body };
     if (typeof stripped.model === "string" && stripped.model.startsWith("qoder/")) stripped.model = stripped.model.slice(6);
-    return chatSvc.runChat(stripped, picked.sess, picked.region);
+    let res;
+    try {
+      res = await chatSvc.runChat(stripped, picked.sess, picked.region, picked.pick);
+    } catch (e) {
+      try { ring.onError(pickedKey); } catch {}
+      throw e;
+    }
+    const badAuth = (n) => n === 401 || n === 403 || n === 429 || n >= 500;
+    const st = res?.status ?? 0;
+    // 流式路径把上游非 200 整形成 200 + 流内 error（对外契约），真实状态码只能从回显头取；
+    // 否则坏号（401/403/429/5xx）永不冷却，粘号还会把重试继续粘在这个坏号上。
+    const ust = Number(res?.headers?.get?.("x-mslxdff-qoder-upstream-status")) || 0;
+    const bad = badAuth(st) ? st : (badAuth(ust) ? ust : 0);
+    if (bad) {
+      try { ring.onError(pickedKey); } catch {}
+      // 冷却是个决定：钉在响应上，管线写进模型日志（cooled=<status>）
+      try { res.headers?.set?.("x-mslxdff-qoder-cooldown", String(bad)); } catch {}
+    }
+    return res;
   }
 
    // 全号聚合：双号分属 cn/global 两区，模型表各不同（cn 14 个/global 15 个）；
@@ -140,9 +176,9 @@ export function createQoderProvider({
    }
 
   async function close() {}
-  async function chatWithKeys(body, keysOverride) {
+  async function chatWithKeys(body, keysOverride, opts) {
     const tmp = createQoderProvider({ id, apiKeys: keysOverride, file, fetchImpl, cooldownMs, connectTimeoutMs });
-    return tmp.chat(body);
+    return tmp.chat(body, opts);
   }
 
   return { id, chat, chatWithKeys, listModels, preheat, close, keyRing: ring, baseUrl: "qoder://native", region: normalizeRegion(region || authList[0]?.region) };
