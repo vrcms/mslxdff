@@ -1,5 +1,6 @@
 // Per-model request trace formatting. Never include prompt, response body, headers or credentials.
 // Note: 同步 appendFileSync（异步 append 会在并发下打乱同一请求的阶段行序）— 见 .agents/notes/implemented/feature/2026-09-25-model-trace-log.md
+// Note: 事件面用黑名单（默认全可见，只排除噪声/敏感面）+ 决定类事件只渲染登记过的标量字段——起因是 empty-turn-retry 曾被阶段白名单静默吞掉，"关键决定不许再被漏登记" — 见 .agents/notes/implemented/feature/2026-09-27-qoder-per-request-sticky-account.md
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { logDir } from "./logs.js";

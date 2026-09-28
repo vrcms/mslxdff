@@ -88,3 +88,17 @@ test("坏 JSON chunk：默认透传保安全", async () => {
   assert.ok(res.wrote.join("").includes("broken json"), "解析失败不得暂扣");
   assert.equal(r.detail.heldErrorChunks || 0, 0);
 });
+
+test("Qoder 错误包络与 retryAfterSeconds：暂扣并生成显式重试文案", async () => {
+  const res = fakeRes();
+  const qoderErrorChunk = Buffer.from(
+    'data: {"id":"chatcmpl-qoder","object":"chat.completion.chunk","choices":[{"index":0,"delta":{}}]}\n\n' +
+    'event: error\n' +
+    'data: {"message":"{\\\"code\\\":\\\"403\\\",\\\"message\\\":\\\"{\\\\\\\"code\\\\\\\":\\\\\\\"10605\\\\\\\",\\\\\\\"message\\\\\\\":{\\\\\\\"isQueued\\\\\\\":true,\\\\\\\"modelKey\\\\\\\":\\\\\\\"qfmodel\\\\\\\",\\\\\\\"retryAfterSeconds\\\\\\\":30,\\\\\\\"serviceAvailable\\\\\\\":false}}\\\"}\",\"type\":\"upstream\"}\n\n' +
+    'data: [DONE]\n\n',
+    'utf8'
+  );
+  const r = await relay(res, upResWith([qoderErrorChunk]), { stream: true, model: "qoder/qfmodel" }, { streamTimeoutMs: 5000 });
+  assert.equal(r.detail.heldErrorChunks, 1, "错误帧必须暂扣");
+  assert.match(String(r.detail.upstreamErrorText), /上游供应商触发 retryAfterSeconds: 30 ，请等候重试/);
+});

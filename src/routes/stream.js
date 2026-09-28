@@ -35,12 +35,40 @@ function hasPayload(text) {
 // 否则返回 null（透传）。解析失败一律透传（默认保安全）。
 // 背景：网关把上游失败包成 HTTP 200 SSE；暂扣后下游流式 UI 不再展示瞬时错误
 //（如 Vertex 503 + google fallback 400），本轮走空转重试，客户端只看到最终结果。
+// Note: 流内错误包络捕获与 retryAfterSeconds 错误直出 — 见 .agents/notes/implemented/bug-fix/2026-09-28-retry-after-surfacing-error.md
+function extractRetryAfterSec(obj) {
+  if (!obj) return null;
+  if (typeof obj === "number") return obj;
+  if (typeof obj === "string") {
+    const m = obj.match(/"retryAfterSeconds"\s*:\s*(\d+)/i) || obj.match(/\bretryAfterSeconds\s*[:=]\s*(\d+)/i);
+    if (m) return Number(m[1]);
+    try {
+      const parsed = JSON.parse(obj);
+      return extractRetryAfterSec(parsed);
+    } catch {}
+  }
+  if (typeof obj === "object") {
+    if (Number.isFinite(obj.retryAfterSeconds)) return Number(obj.retryAfterSeconds);
+    if (obj.message) {
+      const r = extractRetryAfterSec(obj.message);
+      if (r != null) return r;
+    }
+  }
+  return null;
+}
+
 function holdableChunk(txt) {
   if (typeof txt !== "string" || !txt.includes("data:")) return null;
   let sawData = false;
+  let sawEventError = false;
+  let retrySec = null;
   const errs = [];
-  for (const line of txt.split("\n")) {
-    const t = line.trim();
+  for (const rawLine of txt.split("\n")) {
+    const t = rawLine.trim();
+    if (t.startsWith("event:") && t.slice(6).trim() === "error") {
+      sawEventError = true;
+      continue;
+    }
     if (!t.startsWith("data:")) continue;
     const d = t.slice(5).trim();
     if (!d || d === "[DONE]") continue;
@@ -53,15 +81,26 @@ function holdableChunk(txt) {
     const msg = c0.message || {};
     const out = delta.content || msg.content || delta.tool_calls || msg.tool_calls || delta.reasoning || msg.reasoning;
     if (out && !(Array.isArray(out) && out.length === 0)) return null;
+
+    const r = extractRetryAfterSec(j);
+    if (r != null) {
+      retrySec = r;
+      continue;
+    }
     if (j.error && typeof j.error === "object") {
       const m = j.error.message || j.error.code || "";
       if (m) errs.push(String(m).slice(0, 300));
-    } else if (c0.finish_reason !== "error") {
-      return null;
+    } else if (sawEventError && j.message) {
+      errs.push(String(j.message).slice(0, 300));
+    } else if (c0.finish_reason === "error") {
+      errs.push("finish_reason=error 空帧");
     }
   }
   if (!sawData) return null;
-  return errs.length ? errs.join(" | ") : "finish_reason=error 空帧";
+  if (retrySec != null) return `上游供应商触发 retryAfterSeconds: ${retrySec} ，请等候重试`;
+  if (errs.length) return errs.join(" | ");
+  if (sawEventError) return "event: error 空帧";
+  return null;
 }
 
 // 自持 reader 优先：for-await 会锁定 ReadableStream，使 body.cancel() 必 reject（真流上等于空操作），

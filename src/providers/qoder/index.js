@@ -1,6 +1,7 @@
 // qoder provider 门面（原生直连，零桥依赖）：
 // 多号 = keys[] 里每条 device_token blob（auths/qoder-<uid>.json 落盘由 login 维护）；
-// 每请求 round-robin 选号 → 建会话 → COSY 签名直调上游；恒 local-only 不借 key。
+// 选号 → 建会话 → COSY 签名直调上游；恒 local-only 不借 key。
+// Note: 同请求粘号（一次客户端请求内复用同一个号，仅 401/403/429/5xx 冷却才换）与流式坏号冷却（真实状态码经内部头带出）— 见 .agents/notes/implemented/feature/2026-09-27-qoder-per-request-sticky-account.md
 import { loadProviderKeys, loadProviderConfig } from "../../state.js";
 import { listAccountDocs } from "./account-store.js";
 import { defaultStateFile } from "../../state/store.js";

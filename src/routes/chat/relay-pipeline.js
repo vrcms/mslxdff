@@ -144,7 +144,11 @@ export function createRelayPipeline({
       try { _logError(actual, 502, `empty turn${_why}${_err}`); } catch {}
       _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null, ...upstreamEcho(upRes) });
       _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
-      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err} — retry or rephrase` } };
+      let _errMsg = `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err} — retry or rephrase`;
+      if (_d.upstreamErrorText && _d.upstreamErrorText.includes("retryAfterSeconds")) {
+        _errMsg = _d.upstreamErrorText;
+      }
+      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg } };
     }
 
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）

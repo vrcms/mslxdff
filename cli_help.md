@@ -235,7 +235,7 @@
   - `log dir: ...`、`events: ...`
   - `--- last X event(s) ---` + 每行 `fmtEvent(e)`（见 `fmtEvent` 的 `type` 分支）
   - `timeline.log` 同步显示最近 N 条人读时间线（每请求一行：直连、组员、重试、最终结果、总耗时）
-  - 按模型链路日志在同一个日志目录：`<provider>-<model>.log`（如 `ocgo-muse-spark-1.3-contributor.log`），每个请求逐阶段记录 request/route/upstream/peer/relay/result 与安全摘要；不落 prompt/响应正文/凭据
+  - 按模型链路日志在同一个日志目录：`<provider>-<model>.log`（如 `ocgo-muse-spark-1.3-contributor.log`），每个请求逐阶段记录 request/route/upstream/peer/relay/result/client-response 与安全摘要；**事件面用黑名单**（默认全部可见，只排除噪声 `peer-health`/`heartbeat` 与敏感面 `client-session`/`upstream-probe*`），决定类事件只渲染登记过的标量字段（`status`/`reason`/`pick`/`cooled` 等），payload 与正文一律不落；上游回显 `upstream=<host>`/`account=<uid|region>`/`pick=new|sticky|switch|forced`/`cooled=<status>`；不落 prompt/响应正文/凭据
   - 当 `count <= 10` 时额外提示 `hint: mslxdff -log 100 | calls: ... errors: ... daemon: ...`
 - **参数解析**：`args[ idx+1 ]` 转 `Number`，仅当整数且 `>0` 时取用，否则默认 10。
 - **示例**：
@@ -1254,6 +1254,11 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_WORKBUDDY_CHECKIN` | `1` | daemon 每日自动签到开关（`0` 关；开则每天本地时 `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 全号签到+过期 token 续期，code 10001 幂等，落盘 `workbuddyCheckin {date}` 防重复，启动时过期补签） |
 | `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` | `9` | 自动签到小时（0~23 本地时，非法回退 9） |
 | `WORKBUDDY_AUTH_DIR` | `<state 目录>/auths`（默认 `~/.config/mslxdff/auths`） | WorkBuddy token 落盘目录（`workbuddy-*.json`，`0600`）。**跟随 state 文件走，不再用 cwd 兜底**；旧 `./auths` 降级为只读兜底（ADR-0025） |
+| `MSLXDFF_QODER_COOLDOWN_MS` | `30000` | qoder 多号冷却（401/403/429/5xx 与 fetch 异常——流式路径的真实状态码经内部头 `x-mslxdff-qoder-upstream-status` 带出后才判定，400 等业务错不冷却） |
+| `MSLXDFF_QODER_TIMEOUT_MS` | `120000` | qoder 上游连接超时（COSY 会话请求的 `timeoutSignal`） |
+| `MSLXDFF_QODER_STICKY_MS` | `600000` | qoder 同请求粘号 TTL（同一次客户端请求内复用同一个号，仅冷却才换，ADR-0036；`0`=关，退回每次调用 round-robin） |
+| `MSLXDFF_QODER_CHECKIN` | `1` | qoder 每日自动签到开关（`0` 关；开启则每日本地时 `_CHECKIN_HOUR` 全号签到，按每号 region 选域名，落盘 `state.qoderCheckin`） |
+| `MSLXDFF_QODER_CHECKIN_HOUR` | `9` | qoder 自动签到小时（`0~23` 本地时，非法回退 9） |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |

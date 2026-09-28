@@ -1,7 +1,9 @@
 /**
  * 其他供应商 allowlist 段 + 遗留别名映射展示。
  * 输入均为已算好的数据；state/model-id 走动态 import（与原内联一致，避免循环依赖）。
+ * allowlist 按 compareModelIds 排序展示（只改展示顺序，不改 allowlist 落盘内容）。
  */
+import { compareModelIds } from "./list-sort.js";
 export async function renderOtherProviders({ pickedIds, ids, fullAliases }) {
   const { loadProviderConfigs, loadProviderAllowedModels, loadProviderAllowAnyModels, loadProviderBaseUrl } = await import("../../../state.js");
   const { loadModelAliases: _la2, getAliasForModel: _gaf } = await import("../../../providers/model-id.js");
@@ -38,8 +40,7 @@ export async function renderOtherProviders({ pickedIds, ids, fullAliases }) {
           console.log(`     或放行全部: mslxdff -provider ${pid} allowAny on`);
         }
       } else {
-        for (const raw of allowed) {
-          const canonical = `${pid}/${raw}`;
+        for (const canonical of allowed.map((raw) => `${pid}/${raw}`).sort(compareModelIds)) {
           let alias = null;
           try { alias = _gaf(canonical); } catch {}
           if (!alias && String(canonical).includes("/")) alias = String(canonical).replace(/\//g, "-");

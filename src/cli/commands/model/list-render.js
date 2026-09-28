@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { compareModelIds, providerOf, providerRank } from "./list-sort.js";
 
 /** 构建 id → 别名映射（原 list 两处重复逻辑收敛） */
 export function buildAliasMap(ids, getAliasForModel) {
@@ -57,22 +58,19 @@ export function renderFreeList({ ids, at, pickedIds, sortedProvs, groups, aliasM
   }
 }
 
-/** 按供应商分组 + 排序（opencode/workbuddy/cline/openrouter 优先） */
+/** 按供应商分组 + 排序（opencode 段最前，已知供应商优先，组内字母序） */
 export function groupByProvider(ids) {
   const groups = {};
   for (const id of ids) {
-    const prov = String(id).includes("/") ? String(id).split("/")[0] : "opencode";
+    const prov = providerOf(id);
     if (!groups[prov]) groups[prov] = [];
     groups[prov].push(id);
   }
-  const order = ["opencode", "workbuddy", "cline", "openrouter"];
+  for (const key of Object.keys(groups)) groups[key].sort(compareModelIds);
   const sortedProvs = Object.keys(groups).sort((a, b) => {
-    const ia = order.indexOf(a), ib = order.indexOf(b);
-    if (ia !== -1 || ib !== -1) {
-      if (ia === -1) return 1;
-      if (ib === -1) return -1;
-      return ia - ib;
-    }
+    const ra = providerRank(a);
+    const rb = providerRank(b);
+    if (ra !== rb) return ra - rb;
     return a.localeCompare(b);
   });
   return { groups, sortedProvs };

@@ -476,4 +476,23 @@ describe("relay-pipeline 深模块", () => {
     });
     assert.equal(out.handled, true, "看不出 chat 形状时不得判空（透传契约优先）");
   });
+
+  test("US17 上游包含 retryAfterSeconds 时：报错直出提示文案", async () => {
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 0, totalMs: 50, aborted: false, interrupted: false, detail: { receivedChunks: 2, receivedBytes: 500, wroteChunks: 1, wroteBytes: 15, sawDone: true, chars: 0, toolCalls: 0, chatShaped: true, exitReason: "normal", upstreamErrorText: "上游供应商触发 retryAfterSeconds: 30 ，请等候重试" } }),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(),
+      upRes: { status: 200, headers: { get: () => null } },
+      body: { stream: true },
+      requested: "qoder/qfmodel", actual: "qoder/qfmodel", lastErr: null, via: "local", lockModel: "",
+      useAuto: false,
+      handlerCtx: { reqId: "r17", hops: 0, model: "qoder/qfmodel" },
+      mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, false);
+    assert.equal(out.lastErr.status, 502);
+    assert.match(out.lastErr.message, /上游供应商触发 retryAfterSeconds: 30 ，请等候重试/);
+    assert.ok(!out.lastErr.message.includes("EMPTY_MODEL_RESPONSE: upstream returned 200 with no content"));
+  });
 });
