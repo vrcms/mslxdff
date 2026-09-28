@@ -29,13 +29,14 @@ const PEEK_MAX_FRAMES = 8;
 // 返回 { res, status, frames }：res 是把预读帧回灌后的等价上游响应，frames 交回灌用。
 // 任何异常都降级为「无判决」（status=0）：排障手段不得变成故障源。
 async function peekEnvelopeVerdict(upRes, cdbg) {
-  if (!upRes?.body) return { res: upRes, status: 0, frames: [] };
+  if (!upRes?.body) return { res: upRes, status: 0, quota: false, frames: [] };
   let reader;
-  try { reader = upRes.body.getReader(); } catch { return { res: upRes, status: 0, frames: [] }; }
+  try { reader = upRes.body.getReader(); } catch { return { res: upRes, status: 0, quota: false, frames: [] }; }
   const dec = new TextDecoder();
   const frames = [];
   let text = "";
   let status = 0;
+  let quota = false;
   let decided = false;
   try {
     for (let i = 0; i < PEEK_MAX_FRAMES && !decided; i++) {
@@ -49,7 +50,7 @@ async function peekEnvelopeVerdict(upRes, cdbg) {
         const p = line.slice(5).trim();
         if (!p || p === "[DONE]") continue;
         const d = extractDelta(p);
-        if (d.err) { status = Number(d.err.status) || 0; decided = true; break; }
+        if (d.err) { status = Number(d.err.status) || 0; quota = d.err.kind === "quota"; decided = true; break; }
         if (d.content || d.reasoning || d.toolCalls || d.usageIn || d.usageOut) { decided = true; break; }
       }
     }
@@ -73,7 +74,7 @@ async function peekEnvelopeVerdict(upRes, cdbg) {
       })();
     },
   });
-  return { res: new Response(body, { status: upRes.status, headers: upRes.headers }), status, frames };
+  return { res: new Response(body, { status: upRes.status, headers: upRes.headers }), status, quota, frames };
 }
 export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
   if (!fetchImpl) fetchImpl = compatFetch;
@@ -97,6 +98,11 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
   // Note: 流内判决需预读首帧才能拿到（HTTP 200 里裹 statusCodeValue）— 见 .agents/notes/implemented/bug-fix/2026-09-27-qoder-envelope-verdict-cooldown.md
   const withUpstreamStatus = (res, st) => {
     try { res.headers.set("x-mslxdff-qoder-upstream-status", String(st)); } catch {}
+    return res;
+  };
+  // 额度耗尽标记（内部交接，不落日志）：门面据此换号（长冷却该号）而非普通短冷却
+  const withQuota = (res) => {
+    try { res.headers.set("x-mslxdff-qoder-quota", "1"); } catch {}
     return res;
   };
 
@@ -157,16 +163,19 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
       // 判决状态码经 withUpstreamStatus 出门面 → index.js 据此 ring.onError 冷却该号 →
       // 粘号选择器下次因 isCooling 为真而换号。对外仍恒 200（契约不变）。
       const peek = await peekEnvelopeVerdict(upRes, cdbg);
-      const shaped = echo(reshapeQoderStream(peek.res, { model, chatId, prefetched: peek.frames }));
+      let shaped = echo(reshapeQoderStream(peek.res, { model, chatId, prefetched: peek.frames }));
       // 只在真有判决时挂状态码：正常流不写这个头（index.js 靠它区分"要不要冷却"）
-      return peek.status ? withUpstreamStatus(shaped, peek.status) : shaped;
+      if (peek.status) shaped = withUpstreamStatus(shaped, peek.status);
+      if (peek.quota) shaped = withQuota(shaped);
+      return shaped;
     }
     try {
       const agg = await aggregateQoderStream(upRes);
       const out = toCompletionJson({ model, chatId, ...agg });
       return echo(new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } }));
     } catch (e) {
-      return echo(errRes(errorStatus(e), String(e?.detail || e?.message || e).slice(0, 300), e?.kind || "upstream_error"));
+      const out = echo(errRes(errorStatus(e), String(e?.detail || e?.message || e).slice(0, 300), e?.kind || "upstream_error"));
+      return e?.kind === "quota" ? withQuota(out) : out;
     }
   }
 

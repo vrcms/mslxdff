@@ -8,9 +8,11 @@ export function createKeyRing(keys = [], { cooldownMs = DEFAULT_COOLDOWN_MS, now
   const errAt = new Map();
   let cursor = 0;
 
+  // errAt 存「冷却到期时间戳」：onError(key, durationMs?) 可自定义时长（额度错长冷却用），
+  // 缺省用构造时的 cooldownMs —— 旧的 onError(key) 调用方行为不变。
   function isCooling(key) {
-    const t = errAt.get(key);
-    return t != null && now() - t < cooldownMs;
+    const e = errAt.get(key);
+    return e != null && now() < e;
   }
 
   function next() {
@@ -26,8 +28,10 @@ export function createKeyRing(keys = [], { cooldownMs = DEFAULT_COOLDOWN_MS, now
     return null;
   }
 
-  function onError(key) {
-    if (list.includes(key)) errAt.set(key, now());
+  function onError(key, durationMs) {
+    if (!list.includes(key)) return;
+    const dur = Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : cooldownMs;
+    errAt.set(key, now() + dur);
   }
 
   function replace(oldKey, newKey) {

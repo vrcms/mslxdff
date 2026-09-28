@@ -35,6 +35,8 @@ export function createQoderProvider({
   region,
   fetchImpl,
   cooldownMs = envInt("MSLXDFF_QODER_COOLDOWN_MS", 30_000),
+  // 额度耗尽（code 110）按天重置：短冷却等于反复撞死号，故单独配长冷却（默认 1h）
+  quotaCooldownMs = envInt("MSLXDFF_QODER_QUOTA_COOLDOWN_MS", 3600_000),
   connectTimeoutMs = Number(process.env.MSLXDFF_QODER_TIMEOUT_MS) || 120_000,
 } = {}) {
   const keys = (() => {
@@ -53,6 +55,8 @@ export function createQoderProvider({
     }
   } catch {}
   const ring = createKeyRing(keys, { cooldownMs });
+  // 额度耗尽号集合（本次进程内）：全号在此集合 → 无可用号时回额度提示而非"无账号"401
+  const exhaustedByQuota = new Set();
   if (!fetchImpl) fetchImpl = compatFetch;
 
 
@@ -86,38 +90,79 @@ export function createQoderProvider({
   const modelsSvc = createModelsService({ id, fetchImpl });
 
   // 失败冷却：401/403/429/5xx 冷却当前号（cooldownMs，默认 30s），坏号不再参与轮换。
-  // 对齐 workbuddy/chat.js 的 onError 语义——此前 qoder 只 next() 不 onError，坏号恒在轮换池里。
-  // 网络异常（fetch throw）同样冷却。业务错（4xx 内容类）不冷却。
+  // 额度耗尽（quota）走长冷却（quotaCooldownMs，默认 1h）——额度按天重置，短冷却等于反复撞死号。
+  // 额度错在 provider 内直接换号重发（不依赖外层空转重试链路：那条链路在非流式路径不触发）。
+  // 收口只认「每个号都被上游明确判过额度」；排队/限流等非额度冷却不得谎称没额度
+  // Note: 判定收紧（全号才报 quota_exhausted，其余如实返回/报冷却中）— 见 .agents/notes/implemented/bug-fix/2026-09-28-qoder-quota-cooldown-switch.md
   async function chat(body, opts) {
     // scope=reqId：同一次客户端请求的多次上游调用（空转重试）粘同一个号
-    const picked = pickSession(opts?.reqId ? `req:${opts.reqId}` : null);
-    if (!picked) {
-      return new Response(JSON.stringify({ error: { message: "qoder: 无可用账号 — 先跑 mslxdff -provider qoder login", type: "auth_error" } }), { status: 401, headers: { "Content-Type": "application/json" } });
-    }
-    const pickedKey = picked.key || "";
+    const scope = opts?.reqId ? `req:${opts.reqId}` : null;
     const stripped = { ...body };
     if (typeof stripped.model === "string" && stripped.model.startsWith("qoder/")) stripped.model = stripped.model.slice(6);
-    let res;
-    try {
-      res = await chatSvc.runChat(stripped, picked.sess, picked.region, picked.pick);
-    } catch (e) {
-      try { ring.onError(pickedKey); } catch {}
-      throw e;
-    }
     const badAuth = (n) => n === 401 || n === 403 || n === 429 || n >= 500;
-    const st = res?.status ?? 0;
-    // 流式路径把上游非 200 整形成 200 + 流内 error（对外契约），真实状态码只能从回显头取；
-    // 否则坏号（401/403/429/5xx）永不冷却，粘号还会把重试继续粘在这个坏号上。
-    const ust = Number(res?.headers?.get?.("x-mslxdff-qoder-upstream-status")) || 0;
-    const bad = badAuth(st) ? st : (badAuth(ust) ? ust : 0);
-    if (bad) {
-      try { ring.onError(pickedKey); } catch {}
-      // 冷却是个决定：钉在响应上，管线写进模型日志（cooled=<status>）
-      try { res.headers?.set?.("x-mslxdff-qoder-cooldown", String(bad)); } catch {}
+    const total = ring.keys.length;
+    // 换号上限：每次 continue 必然冷却掉一个号，故最多 total 轮；超出即退出（收敛保证）
+    let lastRes = null;
+    for (let hop = 0; hop <= total; hop++) {
+      const picked = pickSession(scope);
+      if (!picked) break;
+      const pickedKey = picked.key || "";
+      // 该号额度已耗尽且仍在冷却 → 不再打上游（打也是同一堵墙）。另有可用号时继续换，不轻易断言全灭。
+      if (exhaustedByQuota.has(pickedKey)) {
+        if (ring.isCooling(pickedKey)) {
+          if (ring.available() > 0) continue;
+          break;
+        }
+        exhaustedByQuota.delete(pickedKey);
+      }
+      let res;
+      try {
+        res = await chatSvc.runChat(stripped, picked.sess, picked.region, picked.pick);
+      } catch (e) {
+        try { ring.onError(pickedKey); } catch {}
+        throw e;
+      }
+      const st = res?.status ?? 0;
+      // 流式路径把上游非 200 整形成 200 + 流内 error（对外契约），真实状态码只能从回显头取；
+      // 否则坏号（401/403/429/5xx）永不冷却，粘号还会把重试继续粘在这个坏号上。
+      const ust = Number(res?.headers?.get?.("x-mslxdff-qoder-upstream-status")) || 0;
+      const isQuota = res?.headers?.get?.("x-mslxdff-qoder-quota") === "1";
+      const bad = badAuth(st) ? st : (badAuth(ust) ? ust : 0);
+      if (bad) {
+        try { ring.onError(pickedKey, isQuota ? quotaCooldownMs : cooldownMs); } catch {}
+        if (isQuota) exhaustedByQuota.add(pickedKey);
+        // 冷却是个决定：钉在响应上，管线写进模型日志（cooled=<status>）
+        try { res.headers?.set?.("x-mslxdff-qoder-cooldown", String(bad)); } catch {}
+      }
+      // 额度耗尽：本号已废（长冷却），若还有别的号就立刻换号重发，别把空流递给客户端
+      if (isQuota) {
+        lastRes = res;
+        if (ring.available() > 0) continue;
+        break;
+      }
+      return res;
     }
-    return res;
+    // 收口按「真实全景」分档，不得把「非额度冷却」误报成没额度：
+    // 仅当每一个号都被上游明确判过额度，才是真的全号额度耗尽。
+    if (total > 0 && ring.keys.every((k) => exhaustedByQuota.has(k))) return quotaExhaustedResponse();
+    if (lastRes) return lastRes;               // 有上游响应 → 如实透出（含上游真错）
+    if (!ring.available()) return allCoolingResponse(); // 全在冷却但非额度 → 冷却中提示
+    return new Response(JSON.stringify({ error: { message: "qoder: 无可用账号 — 先跑 mslxdff -provider qoder login", type: "auth_error" } }), { status: 401, headers: { "Content-Type": "application/json" } });
   }
 
+  // 额度耗尽提示（每一个号都被上游明确判过额度）：继续等只会更糟，让调用方立刻知道要换号/等明天
+  function quotaExhaustedResponse() {
+    return new Response(JSON.stringify({
+      error: { message: "qoder: 所有账号额度已用完（Billing daily count exceeded），请更换账号或明日再试", type: "quota_exhausted" },
+    }), { status: 429, headers: { "Content-Type": "application/json", "x-mslxdff-qoder-quota-exhausted": "1" } });
+  }
+
+  // 冷却中（非额度原因）：如实说"暂不可用"，不得声称额度耗尽
+  function allCoolingResponse() {
+    return new Response(JSON.stringify({
+      error: { message: "qoder: 账号暂不可用（上游限流/排队冷却中），请稍后重试", type: "all_cooling" },
+    }), { status: 429, headers: { "Content-Type": "application/json", "x-mslxdff-qoder-all-cooling": "1" } });
+  }
    // 全号聚合：双号分属 cn/global 两区，模型表各不同（cn 14 个/global 15 个）；
    // 只取单号会漏另一区（如轮询到 global 就看不到 cn 独有的 q37fmodel/gm51model）。
    // 按 id 并集去重，只返回 enable=true 的可调用模型（过滤已下沉到 models.js）。
