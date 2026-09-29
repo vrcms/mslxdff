@@ -1,6 +1,6 @@
 {
   "name": "mslxdff",
-  "version": "0.1.158",
+  "version": "0.1.159",
   "description": "测试项目，请勿使用。",
   "type": "module",
   "bin": {
@@ -18,8 +18,8 @@
     "bin/",
     "src/",
     "plugins/",
-    "docs/",
-    "README.md"
+    "README.md",
+    "docs/cli_help_mini.md"
   ],
   "keywords": [
     "test",
