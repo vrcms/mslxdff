@@ -30,6 +30,16 @@ export const customProviders = [
     match: (id, baseUrl) => id === "qoder" || String(baseUrl).includes("qoder"),
     load: () => import("./qoder/index.js").then((m) => m.createQoderProvider),
   },
+  {
+    id: "qwenwork",
+    match: (id, baseUrl) => id === "qwenwork" || String(baseUrl).includes("qwenwork"),
+    load: () => import("./qwenwork/index.js").then((m) => m.createQwenworkProvider),
+  },
+  {
+    id: "zcode",
+    match: (id, baseUrl) => id === "zcode" || String(baseUrl).includes("zcode.z.ai"),
+    load: () => import("./zcode/index.js").then((m) => m.createZcodeProvider),
+  },
 ];
 
 // 供 bench/probe 等需要定制化解析模型列表的场景

@@ -50,6 +50,12 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "qoder") {
       const { createQoderProvider } = await import("../../../providers/qoder/index.js");
       provider = createQoderProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "qwenwork") {
+      const { createQwenworkProvider } = await import("../../../providers/qwenwork/index.js");
+      provider = createQwenworkProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "zcode") {
+      const { createZcodeProvider } = await import("../../../providers/zcode/index.js");
+      provider = createZcodeProvider({ id, apiKeys: keys, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);
@@ -80,6 +86,7 @@ export async function handleProviderModels(id, sub, args, rest) {
           const p = m.pricing.prompt ?? m.pricing.input ?? m.pricing.completion ?? "";
           if (p) return String(p);
         }
+        if (m.price_factor != null && String(m.price_factor).trim() !== "") return `x${m.price_factor}`;
         if (m.price != null && String(m.price).trim()) return String(m.price).trim();
         if (String(m.id).endsWith("/auto")) return "浮动";
         return "—";
@@ -93,13 +100,14 @@ export async function handleProviderModels(id, sub, args, rest) {
       };
       // 能力列：上下文 k + 📷识图 🧠推理 🔧工具调用（workbuddy 原生字段；其他供应商无这些字段则显示 —）
       const fmtCaps = (m) => {
-        const ctx = Number(m.maxInputTokens) || null;
-        const hasAny = ctx || m.supportsImages != null || m.supportsReasoning != null || m.supportsToolCall != null;
+        const ctx = Number(m.maxInputTokens ?? m.context_length) || null;
+        const reasoning = m.supportsReasoning ?? m.is_reasoning;
+        const hasAny = ctx || m.supportsImages != null || reasoning != null || m.supportsToolCall != null;
         if (!hasAny) return "—";
         const parts = [];
         if (ctx) parts.push(ctx >= 1_000_000 ? `${Math.round(ctx / 100000) / 10}M` : `${Math.round(ctx / 1000)}k`);
         if (m.supportsImages && !m.disabledMultimodal) parts.push("📷");
-        if (m.supportsReasoning) parts.push("🧠");
+        if (reasoning) parts.push("🧠");
         if (m.supportsToolCall) parts.push("🔧");
         return parts.join(" ");
       };
@@ -118,6 +126,9 @@ export async function handleProviderModels(id, sub, args, rest) {
       if (!all.length) console.log(`  (no models — check baseUrl/keys or try: curl ${baseUrl}/models)`);
       else if (allowedCount === 0) console.log(`  tip: all blocked — mslxdff -provider ${id} allowAny on  或  allowlist set <model...>`);
       else if (allowedCount !== all.length) console.log(`  tip: blocked 仅影响 /v1/chat 调用，展示已全量列出`);
+      if (id === "zcode") {
+        console.log(`  tip: 目录/额度可用；模型调用需上游一次性验证码参数（x-aliyun-captcha-verify-param，Start Plan 通道），未启用验证码农场前会返回 403 security_reject（code 3007）— 详见 docs/adr/0038`);
+      }
     }
     try { await provider.close?.(); } catch {}
   } catch (e) {

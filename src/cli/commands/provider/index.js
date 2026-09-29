@@ -44,6 +44,8 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider codearts login          华为云 CodeArts PKCE 授权（浏览器登录 → 凭证 blob 落盘，ADR-0027）");
     console.error("            mslxdff -provider qoder login [--region cn|global]   Qoder 设备授权（国际站默认，国内站 --region cn）");
     console.error("            mslxdff -provider qoder checkin [--json] [--region cn|global] [--any] [--dry]  每日签到领积分（cn=daily-check-in，global=campaigns）");
+    console.error("            mslxdff -provider zcode login [--bigmodel]       ZCode 授权（智谱免费额度，Start/Coding Plan）");
+    console.error("            mslxdff -provider zcode quota [--json]          查看套餐/余量（未登录给重登指引）");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
@@ -79,6 +81,12 @@ const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleQoderLogin(id, sub, rest)) return true;
   const { handleQoderCheckin } = await import("./qoder-checkin.js");
   if (await handleQoderCheckin(id, sub, rest)) return true;
+  const { handleQwenworkLogin } = await import("./qwenwork-login.js");
+  if (await handleQwenworkLogin(id, sub, rest)) return true;
+  const { handleZcodeLogin } = await import("./zcode-login.js");
+  if (await handleZcodeLogin(id, sub, rest)) return true;
+  const { handleZcodeQuota } = await import("./zcode-quota.js");
+  if (await handleZcodeQuota(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");
