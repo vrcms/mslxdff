@@ -40,12 +40,12 @@ export function buildProviderRows({ stateFile, env = process.env } = {}) {
     let allowed = [];
     let allowAny = false;
     try { keys = loadProviderKeys(gid, stateFile ? { file: stateFile } : undefined); } catch {}
-    try { baseUrl = loadProviderBaseUrl(gid, stateFile ? { file: stateFile } : undefined) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : gid === "traework" ? "https://trae-api-cn.mchost.guru" : gid === "qoder" ? "qoder://native" : gid === "qwenwork" ? "qwenwork://native" : ""); } catch { baseUrl = cfg?.baseUrl || ""; }
+    try { baseUrl = loadProviderBaseUrl(gid, stateFile ? { file: stateFile } : undefined) || cfg?.baseUrl || (gid === "openrouter" ? "https://openrouter.ai/api/v1" : gid === "workbuddy" ? "https://copilot.tencent.com" : gid === "traework" ? "https://trae-api-cn.mchost.guru" : gid === "qoder" ? "qoder://native" : gid === "qwenwork" ? "qwenwork://native" : gid === "zcode" ? "zcode://native" : ""); } catch { baseUrl = cfg?.baseUrl || ""; }
     try { allowed = loadProviderAllowedModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     try { allowAny = loadProviderAllowAnyModels(gid, stateFile ? { file: stateFile } : undefined); } catch {}
     // openrouter 特殊：opencode 例外默认 allowAny true，其余默认 false
     if (gid === "opencode") allowAny = true;
-    let enabled = Boolean(baseUrl && keys.length) || (gid === "openrouter" && keys.length > 0) || ((gid === "qoder" || gid === "qwenwork" || gid === "traework") && keys.length > 0);
+    let enabled = Boolean(baseUrl && keys.length) || (gid === "openrouter" && keys.length > 0) || ((gid === "qoder" || gid === "qwenwork" || gid === "traework" || gid === "zcode") && keys.length > 0);
     const auths = gid === "workbuddy" ? (() => { try { return loadProviderAuths(gid, stateFile ? { file: stateFile } : undefined) || []; } catch { return []; } })() : [];
     let note = "";
     const isWorkbuddyStub = gid === "workbuddy" && (keys.includes("k-new") || String(baseUrl).includes("127.0.0.1") || (keys.length === 1 && keys[0].length < 20));

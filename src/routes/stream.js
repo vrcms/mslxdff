@@ -1,8 +1,8 @@
 import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
 import { json } from "./helpers.js";
-import { extractUsageFromJson, extractUsageFromSseText } from "../metrics.js";
-
+import { extractUsageFromSseText } from "../metrics.js";
+import { scanSseChunk, scanNonStreamBody, preflightMs } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 上报锚点偏移（纯函数）
 // SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
 // 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
 function chunkText(chunk) {
@@ -149,8 +149,10 @@ export const MAX_STREAM_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 0;
 })();
 
-export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, keepaliveMs = KEEPALIVE_MS, fallback } = {}) {
+export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, keepaliveMs = KEEPALIVE_MS, fallback, attemptStartMs } = {}) {
   const t0 = performance.now();
+  // 上报锚点偏移：只加给「上报用时长」（usage 行），闸门计时仍从上面的 t0 起算，两者不得混用
+  const preflight = preflightMs(t0, attemptStartMs);
   const contentType = upRes.headers.get("content-type") || "";
   // 需同时满足：客户端要流 + 上游真的是 SSE；避免 muse-spark 聚合 JSON 被误判为流式，或 workbuddy SSE 被聚合
   const isStream = Boolean(body?.stream) && contentType.includes("text/event-stream");
@@ -187,6 +189,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     downstreamClosed: false,
     usage: null,
     chars: 0,
+    reasoningChars: 0, // 思考内容字符数（与 chars 分列，相加会重复计数）
     toolCalls: 0,
     chatShaped: false,
     heldErrorChunks: 0,
@@ -289,48 +292,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (!detail.upstreamErrorText) detail.upstreamErrorText = String(holdErr).slice(0, 500);
           }
           const isPayload = hasPayload(txt);
-          try {
-            if (txt.includes("[DONE]")) detail.sawDone = true;
-            const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);
-            if (m) detail.sawFinishReason = m[1];
-            // chat 形状证据：只有看得出是 chat 轮才配判空（非 chat SSE/JSON 透传是正式契约，不得误伤）
-            if (!detail.chatShaped && (txt.includes('"choices"') || txt.includes('"delta"') || txt.includes('"finish_reason"') || txt.includes('"usage"') || txt.includes('"prompt_tokens"') || txt.includes("[DONE]"))) detail.chatShaped = true;
-            // 工具调用计数（空数组不算）：tool_calls 无正文是合法 agent 轮，
-            // 空转闸门必须豁免它，否则所有工具轮都会被误判为空轮——见 relay-pipeline 4b。
-            const tc = txt.match(/"tool_calls"\s*:\s*\[\s*\{/g);
-            if (tc) detail.toolCalls = (detail.toolCalls || 0) + tc.length;
-            // 尝试提取 usage（流式末帧）：口径收口到 metrics.js，与未流式分支共用
-            if (txt.includes("\"usage\"") || txt.includes("\"prompt_tokens\"")) {
-              try {
-                const lines = txt.split("\n");
-                for (const line of lines) {
-                  const t = line.trim();
-                  if (!t.startsWith("data:")) continue;
-                  const d = t.slice(5).trim();
-                  if (d === "[DONE]" || !d) continue;
-                  // 行级隔离：单行坏 JSON 不拖累同 chunk 其余行
-                  try {
-                    const j = JSON.parse(d);
-                    if (!j || typeof j !== "object") continue;
-                    const u = extractUsageFromJson(j);
-                    if (u) detail.usage = u;
-                    // 兜底 chars：从 choices 文本长度累加
-                    const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.message?.content || "";
-                    if (delta) detail.chars += String(delta).length;
-                  } catch { /* 单行坏帧忽略 */ }
-                }
-              } catch {}
-            } else {
-              // 非 usage 的普通 delta 也累 chars
-              try {
-                const ms = txt.match(/"content"\s*:\s*"([^"]*)"/g);
-                if (ms) for (const mm of ms) {
-                  const c = JSON.parse(`{${mm}}`);
-                  if (c.content) detail.chars += String(c.content).length;
-                }
-              } catch {}
-            }
-          } catch { /* ignore */ }
+          scanSseChunk(detail, txt);
           // 首块/空闲超时后上游仍吐出了真实数据 → 只是慢，不是死：撤销超时判定，照常转发
           //（cancel 是异步的，竞态窗口内已到达的数据是纯收益；丢掉是纯损失）
           // 注释帧（keepalive）不算：否则对端只要在发心跳，闸门就永远解除
@@ -386,14 +348,14 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       if ((timedOut || stalled || tooLong) && !wrotePayload) {
         res.removeListener("close", onClose);
         // Note: 超时是显式字段（timedOut），别再用 status 数值当信号 — 见 .agents/notes/implemented/architecture/2026-09-17-relay-timedout-explicit-and-metrics-seam.md
-        return { status: 504, timedOut: true, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, detail };
+        return { status: 504, timedOut: true, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, preflightMs: preflight, detail };
       }
       if ((stalled || tooLong) && wrotePayload) {
         interrupted = true;
         detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
         res.removeListener("close", onClose);
         try { res.end(); } catch { /* ignore */ }
-        return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, detail };
+        return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, preflightMs: preflight, detail };
       }
     } else {
       detail.exitReason = "empty-body";
@@ -403,7 +365,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     finishedNormally = true;
     res.removeListener("close", onClose);
     try { res.end(); } catch { /* ignore */ }
-    return { status: 200, timedOut: false, ttfMs: ttf, totalMs, aborted: false, interrupted: false, detail };
+    return { status: 200, timedOut: false, ttfMs: ttf, totalMs, aborted: false, interrupted: false, preflightMs: preflight, detail };
   }
 
   finishedNormally = true;
@@ -414,14 +376,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   // 非流式 usage 与 chars 提取（口径与流式分支共用 metrics.js）
   try {
     const parsed = JSON.parse(text);
-    const u = extractUsageFromJson(parsed);
-    if (u) detail.usage = u;
-    if (parsed.choices?.[0]?.message?.content) detail.chars = String(parsed.choices[0].message.content).length;
-    else if (parsed.choices?.[0]?.text) detail.chars = String(parsed.choices[0].text).length;
-    // 非流式同样只判 chat 形状：无 choices 的任意 JSON 是透传契约（chat-route 单测锁死），不得判空
-    if (Array.isArray(parsed?.choices)) detail.chatShaped = true;
-    const _tcList = parsed.choices?.[0]?.message?.tool_calls;
-    if (Array.isArray(_tcList) && _tcList.length) detail.toolCalls = _tcList.length;
+    scanNonStreamBody(detail, parsed);
     const enriched = enrichNonStreamJson(parsed, fallback);
     json(res, upRes.status, enriched);
   } catch {
@@ -434,5 +389,5 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   }
   // 非流式 ttf 视为 total（一次性返回）
   const totalMs = Math.round(performance.now() - t0);
-  return { status: upRes.status, timedOut: false, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, detail };
+  return { status: upRes.status, timedOut: false, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, preflightMs: preflight, detail };
 }

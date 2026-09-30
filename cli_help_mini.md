@@ -17,7 +17,7 @@
 | 无参启动 | `mslxdff` | 已有 daemon 显示 status，否则后台启动 |
 | daemon | `-d` / `--daemon` | 后台启动（只升不降，低版本不覆盖高版本） |
 | 状态 | `-status` / `--status` / `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（含 v0.1.59 体检表 avg首字/tps/啰嗦/p95）/群组/failover/recent calls(ts/model/status/dur)/last error/autostart/plugins — 全量聚合体检 |
-| 用量报表 | `-stats` / `--stats` `[--hours N] [--json] [--model <id>]` | 近 N 小时（默认24，上限168）模型用量；默认输出 `Token 用量`（请求/输入/输出/思考/合计）与 `响应性能`（首字/总耗时/加权速度）两张自适应边框表并含合计，长模型 id 不截断；大 token 用 k/M 缩写，`--json` 为精确值。速度按窗口加权 `Σ输出÷Σ生成耗时`，只计成功请求；不含失败请求、`-chat` 直连，也不展开逐请求 via/interrupted/单次 tps；查询超过保留期会警告可能不完整 |
+| 用量报表 | `-stats` / `--stats` `[--hours N] [--json] [--model <id>]` | 近 N 小时（默认24，上限168）模型用量；输出 `Token 用量`（请求/输入/输出/思考/合计）与 `响应性能`（首字/总耗时/加权速度/**首字样本 n/N**）两张自适应边框表并含合计，长 id 不截断；k/M 缩写，`--json` 精确值。**首字 = 本次上游尝试开始 → 网关转发首个真实数据帧**（含排队/建连/判决预读，ADR-0039），`0ms` 有效、非流式不进分子与分母，N=0 显示 `—`；**思考四态**：上报值 / `~` 估算（思考字符÷4）/ `0` 真无 / `—` 未知（不再拿 0 冒充「不思考」）；与 `-status`/`-model stats` 的 EMA 首字**不同源**；速度仍为窗口加权 `Σ输出÷Σ生成耗时`；不含失败请求与 `-chat` 直连 |
 | 日志 | `-log [N]` / `--log [N]` / `-logs N` | 最近 N 条事件 + `timeline.log` 人读时间线；按模型链路日志为 `logDir/<provider>-<model>.log`，逐阶段记录 request/route/upstream/peer/relay/result（安全摘要，不落 prompt/正文/凭据）。**事件面用黑名单**：默认全部可见，只排除 `peer-health`/`heartbeat`/`client-session`/`upstream-probe*`；决定类事件只渲染登记字段，含上游回显 `upstream=`/`account=`/`pick=`/`cooled=` |
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |

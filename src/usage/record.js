@@ -78,7 +78,8 @@ export async function recordUsage(entry, { dir, now = new Date() } = {}) {
 
 // 从 relay 结果组装一行 usage —— 行形状由本模块拥有，调用方只交原始字段。
 // usage 即 metrics.js 的 extractUsageFromJson 输出（prompt/completion/total/reasoning）。
-export function recordChatUsage({ model, via, usage, ttfbMs, totalMs, tps, interrupted } = {}) {
+export function recordChatUsage({ model, via, usage, ttfbMs, totalMs, tps, interrupted, reasoningChars, stream } = {}) {
+  const rc = Number(reasoningChars);
   return recordUsage({
     model,
     via,
@@ -87,6 +88,12 @@ export function recordChatUsage({ model, via, usage, ttfbMs, totalMs, tps, inter
     completion_tokens: usage?.completion_tokens ?? 0,
     total_tokens: usage?.total_tokens ?? 0,
     reasoning_tokens: usage?.reasoning_tokens ?? 0,
+    // —— 以下为纯增字段：只存原始观测，chars/4 的估算留给聚合层（口径可演进，不必回填历史行）——
+    reasoning_chars: Number.isFinite(rc) && rc > 0 ? Math.trunc(rc) : 0,
+    // 上游是否明确上报过思考 tokens（metrics.js 只在数值有限时才写 reasoning_tokens）
+    reasoning_reported: Number.isFinite(usage?.reasoning_tokens) ? 1 : 0,
+    // 调用方没表态时整字段不落盘：「未知」≠「非流式」，覆盖度分母宁低不假高
+    ...(stream === undefined ? {} : { stream: stream ? 1 : 0 }),
     ttfbMs: Number.isFinite(ttfbMs) ? ttfbMs : null,
     totalMs: Number.isFinite(totalMs) ? totalMs : null,
     tps: Number.isFinite(tps) ? tps : null,

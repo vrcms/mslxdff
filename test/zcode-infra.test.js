@@ -27,10 +27,10 @@ test("const: 网关地址与目录常量", () => {
   assert.ok(ZCODE_MODEL_CATALOG.includes("GLM-5.3-Flash"));
 });
 
-test("const: 版本默认 3.11.2，env 可覆盖", () => {
-  assert.equal(zcodeAppVersion({}), "3.11.2");
+test("const: 版本默认 3.14.4（v3.14.4 起模型请求免验证码），env 可覆盖", () => {
+  assert.equal(zcodeAppVersion({}), "3.14.4");
   assert.equal(zcodeAppVersion({ MSLXDFF_ZCODE_APP_VERSION: "9.9.9" }), "9.9.9");
-  assert.equal(zcodeAppVersion({ MSLXDFF_ZCODE_APP_VERSION: "  " }), "3.11.2");
+  assert.equal(zcodeAppVersion({ MSLXDFF_ZCODE_APP_VERSION: "  " }), "3.14.4");
 });
 
 test("const: 业务码分类", () => {

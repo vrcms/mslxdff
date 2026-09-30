@@ -19,7 +19,9 @@ export function parseStatsArgs(args) {
 }
 
 function fmtTok(n) {
-  const v = Number(n) || 0;
+  // 先判未知：Number(null) || 0 会把「未知」静默渲染成 0，思考列的 — 就永远出不来
+  const v = Number(n);
+  if (n == null || !Number.isFinite(v)) return "—";
   if (v < 1000) return String(v);
   if (v < 1_000_000) return `${(v / 1000).toFixed(1)}k`;
   return `${(v / 1_000_000).toFixed(2)}M`;
@@ -62,11 +64,20 @@ function renderTable(headers, rows, aligns = []) {
 }
 
 function tokenRow(id, r) {
-  return [id, r.requests, fmtTok(r.promptTokens), fmtTok(r.completionTokens), fmtTok(r.reasoningTokens), fmtTok(r.totalTokens)];
+  return [id, r.requests, fmtTok(r.promptTokens), fmtTok(r.completionTokens), reasoningCell(r), fmtTok(r.totalTokens)];
+}
+
+// 思考列的四态渲染：~ 只跟估算/混合来源；none（未知）显示 —，绝不显示成 0 冒充「不思考」
+function reasoningCell(r) {
+  if (r.reasoningSource === "none") return "—";
+  const text = fmtTok(r.reasoningTokens);
+  return r.reasoningSource === "estimated" || r.reasoningSource === "mixed" ? `${text}~` : text;
 }
 
 function performanceRow(id, r) {
-  return [id, fmtMs(r.avgTtfbMs), fmtMs(r.avgTotalMs), fmtTps(r.avgTps)];
+  const samples = Number(r.streamRequests) || 0;
+  const ttfb = samples > 0 ? fmtMs(r.avgTtfbMs) : "—"; // 无流式样本时不拿空样本算出的均值糊人
+  return [id, ttfb, fmtMs(r.avgTotalMs), fmtTps(r.avgTps), `${Number(r.ttfSamples) || 0}/${samples}`];
 }
 
 export function renderStats(report, { hours = 24, model = null } = {}) {
@@ -89,9 +100,13 @@ export function renderStats(report, { hours = 24, model = null } = {}) {
   lines.push(renderTable(["模型", "请求", "输入", "输出", "思考", "合计"], tokenRows, ["left", right, right, right, right, right]));
   lines.push("");
   lines.push("响应性能");
-  lines.push(renderTable(["模型", "首字", "总耗时", "速度"], performanceRows, ["left", right, right, right]));
+  lines.push(renderTable(["模型", "首字", "总耗时", "速度", "首字样本"], performanceRows, ["left", right, right, right, right]));
   lines.push("");
-  lines.push("说明：速度 = 输出 tokens ÷ 生成耗时（总耗时−首字），按窗口加权；只统计成功请求。");
+  lines.push("说明：首字 = 本次上游尝试 → 网关转发首个真实数据帧（含上游排队/建连/预读等待）；非流式请求不进首字。");
+  lines.push("思考：数值后带 ~ = 按思考字符÷4 估算（上游未上报）；— = 未上报且无可估内容；0 = 上游明确上报本轮无思考。");
+  lines.push("首字样本：n/N = 有首字样本数/流式请求数，N=0 时首字显示 —（样本太少的均值不可当全量真值）。");
+  lines.push("速度 = 输出 tokens ÷ 生成耗时（总耗时−首字），按窗口加权；只统计成功请求。");
+  lines.push("口径差异：-status / -model stats 的首字仍取自 state 的终生 EMA（按转发入口量），与本表**不同源**。");
   lines.push("范围：只含经 8989 网关的成功请求；不含失败请求和 -chat 直连。");
   const keepDays = usageKeepDays();
   if (hours > keepDays * 24) {

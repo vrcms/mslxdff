@@ -65,4 +65,17 @@ describe("C6 provider-row 纯函数", () => {
     assert.match(txt, /export \* from ["']\.\.\/runtime\/bootstrap\.js["']/);
     assert.ok(txt.split("\n").length <= 5, `cli/bootstrap.js 应 ≤5 行，实 ${txt.split("\n").length}`);
   });
+
+test("zcode 内置端点型：有 key 即启用（picker 候选口径，与 qoder/qwenwork/traework 同构）", () => {
+  const f = tmpFile({ providerConfigs: { zcode: { keys: ["jwt.a.b"], allowedModels: ["zcode/GLM-5.3-Flash"] } } });
+  const rows = buildProviderRows({ stateFile: f, env: {} });
+  const z = rows.find((r) => r.id === "zcode");
+  assert.ok(z, "应含 zcode 行");
+  assert.equal(z.enabled, true, "登录后（有 JWT key）即启用 — 端点内置不该卡在 baseUrl");
+  assert.equal(z.baseUrl, "zcode://native", "内置端点给伪 baseUrl（与 qoder://native 同款）");
+  // 无 key 不得误判启用
+  const f2 = tmpFile({ providerConfigs: { zcode: { allowedModels: ["zcode/GLM-5.3-Flash"] } } });
+  const z2 = buildProviderRows({ stateFile: f2, env: {} }).find((r) => r.id === "zcode");
+  assert.equal(z2.enabled, false, "未登录不进 picker");
+});
 });

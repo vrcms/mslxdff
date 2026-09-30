@@ -16,6 +16,24 @@ function ms(v) {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
+// 思考 tokens 的四态判定（行级）：上报优先 → 有思考字符就估算 → 明确报 0 才算 0 → 否则未知。
+// 「上游报 0 却确有思考内容」按观测走估算：qoder 就是这形状，报 0 是上游没填，不是模型没想。
+export function resolveReasoning(row) {
+  const reportedVal = Number(row?.reasoning_tokens);
+  // 兼容判据：修复前的旧行没有 reasoning_reported，但带着真实上报值 —— 不能因缺字段退化成未知
+  const hasReported = row?.reasoning_reported === 1 || (Number.isFinite(reportedVal) && reportedVal > 0);
+  const chars = Number(row?.reasoning_chars);
+  const charCount = Number.isFinite(chars) && chars > 0 ? Math.trunc(chars) : 0;
+  if (hasReported && Number.isFinite(reportedVal) && reportedVal > 0) return { value: reportedVal, source: "reported" };
+  if (charCount > 0) {
+    const cap = Number(row?.completion_tokens);
+    const est = Math.ceil(charCount / 4); // 与 src/providers/cline/usage.js 的既有估算口径一致
+    return { value: Number.isFinite(cap) && cap > 0 ? Math.min(est, cap) : est, source: "estimated" };
+  }
+  if (hasReported) return { value: 0, source: "reported" }; // 该轮真的没思考
+  return { value: 0, source: "none" }; // 无从判断 → 表格渲染 —，绝不渲染成 0
+}
+
 
 function blank(id) {
   return {
@@ -31,6 +49,12 @@ function blank(id) {
     totalN: 0,
     completionMsSum: 0,
     tpsTokSum: 0,
+    reasoningReported: 0,
+    reasoningEstimated: 0,
+    reasoningReportedRows: 0,
+    reasoningEstimatedRows: 0,
+    reasoningChars: 0,
+    streamRequests: 0,
   };
 }
 
@@ -42,9 +66,16 @@ function finalize(a) {
     promptTokens: a.promptTokens,
     completionTokens: a.completionTokens,
     totalTokens: a.totalTokens,
-    reasoningTokens: a.reasoningTokens,
+    reasoningTokens: a.reasoningReported + a.reasoningEstimated,
     avgTtfbMs: a.ttfbN ? Math.round(a.ttfbSumMs / a.ttfbN) : null,
     avgTotalMs: a.totalN ? Math.round(a.totalSumMs / a.totalN) : null,
+    // 思考来源：上报与估算同时存在时是 mixed——合计值不冒充单一精确数（spec 锁死）
+    reasoningSource: a.reasoningReportedRows > 0 && a.reasoningEstimatedRows > 0 ? "mixed"
+      : a.reasoningReportedRows > 0 ? "reported"
+      : a.reasoningEstimatedRows > 0 ? "estimated" : "none",
+    reasoningChars: a.reasoningChars,
+    ttfSamples: a.ttfbN,
+    streamRequests: a.streamRequests,
     avgTps: a.completionMsSum > 0 ? Number((a.tpsTokSum / (a.completionMsSum / 1000)).toFixed(1)) : null,
   };
 }
@@ -57,7 +88,13 @@ function fold(acc, r) {
   acc.completionTokens += comp;
   const total = tok(r.total_tokens);
   acc.totalTokens += total || prompt + comp;
-  acc.reasoningTokens += tok(r.reasoning_tokens);
+  // 思考：四态分层累计（上报/估算各算各的，未知不贡献数值），原始字符数照实累加
+  const rs = resolveReasoning(r);
+  if (rs.source === "reported") { acc.reasoningReported += rs.value; acc.reasoningReportedRows++; }
+  else if (rs.source === "estimated") { acc.reasoningEstimated += rs.value; acc.reasoningEstimatedRows++; }
+  acc.reasoningChars += tok(r.reasoning_chars);
+  // 首字样本分母：非流式行既无首字也不该摊进分母；缺 stream 的旧行按未知保守计入
+  if (r.stream !== 0) acc.streamRequests++;
 
   const ttfb = ms(r.ttfbMs ?? r.ttfb_ms);
   if (ttfb != null) {

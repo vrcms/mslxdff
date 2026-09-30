@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recordUsage, pruneUsage, usageDir, usageFileFor, ymd, usageEnabled, usageKeepDays, _resetPruneMarker } from "../src/usage/record.js";
+import { recordUsage, pruneUsage, usageDir, usageFileFor, ymd, usageEnabled, usageKeepDays, recordChatUsage, _resetPruneMarker } from "../src/usage/record.js";
 
 function tmpDir() {
   return mkdtempSync(join(tmpdir(), "mslxdff-test-usage-"));
@@ -98,5 +98,51 @@ test("usageKeepDays 默认 2、可被 env 覆盖", () => {
     assert.equal(usageKeepDays(), 2, "非法值回退默认");
   } finally {
     if (prev === undefined) delete process.env.MSLXDFF_USAGE_KEEP_DAYS; else process.env.MSLXDFF_USAGE_KEEP_DAYS = prev;
+  }
+});
+
+// 报表要能区分「上游报了 0」「上游压根没报」「模型真没思考」——只靠 reasoning_tokens 一个字段做不到，
+// 因此行内纯增原始观测（思考字符数 + 是否上报 + 是否流式），估算留给聚合层。
+test("recordChatUsage 纯增 reasoning_chars / reasoning_reported / stream，既有字段不动", async () => {
+  const dir = tmpDir();
+  try {
+    _resetPruneMarker();
+    const now = new Date(2026, 8, 19, 12, 0, 0);
+    const a = await recordChatUsage({
+      model: "qoder/qfmodel", via: "local", stream: true, reasoningChars: 40,
+      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30, reasoning_tokens: 6 },
+      ttfbMs: 100, totalMs: 900, tps: 25,
+    }, { dir, now });
+    assert.equal(a.reasoning_chars, 40);
+    assert.equal(a.reasoning_reported, 1);
+    assert.equal(a.stream, 1);
+    assert.equal(a.reasoning_tokens, 6, "既有 reasoning_tokens 语义不变");
+    assert.equal(a.ttfbMs, 100);
+
+    // qoder 的真实形状：usage 只有 prompt/completion，但流里有思考
+    const b = await recordChatUsage({
+      model: "qoder/qfmodel", via: "local", stream: false, reasoningChars: 88,
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+      ttfbMs: null, totalMs: 300, tps: null,
+    }, { dir, now });
+    assert.equal(b.reasoning_reported, 0, "上游没报 reasoning_tokens → 未上报");
+    assert.equal(b.reasoning_chars, 88);
+    assert.equal(b.stream, 0);
+    assert.equal(b.reasoning_tokens, 0, "缺上报时既有字段仍写 0（旧消费方不断裂）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("调用方没传 stream 时不落该字段（未知 ≠ 非流式）", async () => {
+  const dir = tmpDir();
+  try {
+    _resetPruneMarker();
+    const row = await recordChatUsage({ model: "m/x", via: "local", usage: null, ttfbMs: null, totalMs: 5, tps: null }, { dir, now: new Date(2026, 8, 19) });
+    assert.equal("stream" in row, false, "臆断成 0 会让覆盖度分母悄悄变小");
+    assert.equal(row.reasoning_chars, 0);
+    assert.equal(row.reasoning_reported, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

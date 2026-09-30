@@ -18,6 +18,7 @@ export async function handlePeerRelay({
   logCall,
   mark,
   perf0,
+  attemptStartMs,
   stages,
   startedAt,
   plugins,
@@ -70,6 +71,7 @@ export async function handlePeerRelay({
     handlerCtx: { ...handlerCtx, model: win.target },
     mark,
     perf0,
+    attemptStartMs,
     stages,
     startedAt,
   });

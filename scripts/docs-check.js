@@ -78,5 +78,17 @@ try {
   fail(`功能树一致性检查执行失败: ${String(e?.message || e)}`);
 }
 
+// 6. 指令文档分层：AGENTS.md 是每会话注入的常驻层，长内容必须下沉到 nested AGENTS.md / docs/
+// （口径来源：GitHub repository-wide vs path-specific instructions、Anthropic「CLAUDE.md 每轮加载→只放普遍适用」、
+//   Sentry agents-md 规范「<60 行理想 / <100 行上限 + 精确指针」）→ 见 docs/adr/0040-agent-instruction-layering.md
+try {
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(process.execPath, [join(root, "scripts", "check-agent-docs.js")], { stdio: "inherit" });
+  if (r.status === 0) ok("指令文档分层检查通过（常驻层体积 + nested 契约 + 指针可解析）");
+  else fail("指令文档分层检查失败 — 长内容下沉到 nested AGENTS.md / docs/，别堆进每会话注入层");
+} catch (e) {
+  fail(`指令文档分层检查执行失败: ${String(e?.message || e)}`);
+}
+
 console.log(failures ? `\n${failures} 项检查失败 — 请同步文档（见 docs/ARCHITECTURE.md §1 变更契约）` : "\n文档就绪检查全部通过");
 process.exit(failures ? 1 : 0);

@@ -20,6 +20,7 @@ export async function handleLocalRelay({
   logError,
   mark,
   perf0,
+  attemptStartMs,
   stages,
   startedAt,
   plugins,
@@ -51,6 +52,7 @@ export async function handleLocalRelay({
     handlerCtx,
     mark,
     perf0,
+    attemptStartMs,
     stages,
     startedAt,
   });

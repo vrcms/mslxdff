@@ -101,7 +101,7 @@ export async function runAutoRace(ctx, deps = {}) {
       else if (r.status === "rejected") await auto.recordError(m, { status: 502 });
     }
     handlerCtx.model = winModel;
-    const lr = await localRelay({ upRes: best.val.res, model: winModel, body, order: raceModels, idx: best.idx, lastErr: null, requested, useAuto, lockModel, auto, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res });
+    const lr = await localRelay({ upRes: best.val.res, model: winModel, body, order: raceModels, idx: best.idx, lastErr: null, requested, useAuto, lockModel, auto, handlerCtx, evt, logCall, logError, mark, perf0, attemptStartMs: raceStart, stages, startedAt, plugins, res });
     if (lr.handled) return { done: true };
     if (!lr.lastErr) return { done: true };
   } else {

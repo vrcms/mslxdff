@@ -66,6 +66,7 @@ export function createRelayPipeline({
     handlerCtx,
     mark: m2,
     perf0,
+    attemptStartMs,
     stages: s2,
     startedAt: sa2,
     streamTimeoutMs: ctxStreamTimeoutMs,
@@ -100,6 +101,7 @@ export function createRelayPipeline({
     const out = await _relay(res, upRes, body, {
       fallback,
       streamTimeoutMs,
+      attemptStartMs, // 本次上游尝试起点（performance.now 同源），relay 用它算 preflightMs
       onFirstChunk: (delta) => {
         try { markFn(`ttf-${actual}`); } catch {}
         _evt("relay-first-chunk", { reqId, model: actual, ttfMs: delta, via });
@@ -151,6 +153,9 @@ export function createRelayPipeline({
       return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg } };
     }
 
+    // 上报锚点偏移：relay 入口之前消耗掉的等待（上游排队、建连、provider 为取判决预读的首帧）。
+    // 只加给 usage 行的时长；闸门计时与 recordModelStats 一律不碰 —— 见 design D2 与 Non-Goals。
+    const anchorMs = Number.isFinite(out?.preflightMs) && out.preflightMs > 0 ? out.preflightMs : 0;
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
     if (out.timedOut === true) {
       const why = out.detail?.upstreamError ? ` (upstream read error: ${out.detail.upstreamError})` : "";
@@ -173,9 +178,9 @@ export function createRelayPipeline({
       if (out.status === 200) {
         try {
           const u = out.detail?.usage || null;
-          const t1 = Number.isFinite(out.totalMs) && out.totalMs > 0 ? out.totalMs : (Date.now() - curStartedAt);
-          const t0 = Number.isFinite(out.ttfMs) && out.ttfMs > 0 ? out.ttfMs : null;
-          recordChatUsage({ model: normalizeFullId(actual), via, usage: u, interrupted: 1, ttfbMs: t0, totalMs: t1, tps: null }).catch(() => {});
+          const endMs = Number.isFinite(out.totalMs) && out.totalMs >= 0 ? out.totalMs + anchorMs : (Date.now() - curStartedAt);
+          const firstMs = Number.isFinite(out.ttfMs) && out.ttfMs >= 0 ? out.ttfMs + anchorMs : null;
+          recordChatUsage({ model: normalizeFullId(actual), via, usage: u, interrupted: 1, ttfbMs: firstMs, totalMs: endMs, tps: null, reasoningChars: out.detail?.reasoningChars ?? 0, stream: Boolean(body?.stream) }).catch(() => {});
         } catch {}
       }
       _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, ...upstreamEcho(upRes), detail: out.detail ?? null, fallback, requested, actual });
@@ -211,6 +216,7 @@ export function createRelayPipeline({
     if (out.status === 200) {
       try {
         const isStream = Boolean(body?.stream);
+        // —— 状态口径（-status / -model stats 的终生 EMA）：本期刻意不动，仍按转发入口量 ——
         let ttfb = isStream ? (out.ttfMs ?? upRes?._t?.ttfbMs ?? null) : null;
         // out.totalMs 为 0 时（非流式 <1ms 四舍五入）回退到 elapsed/durationMs
         const elapsedFallback = Date.now() - curStartedAt;
@@ -227,9 +233,17 @@ export function createRelayPipeline({
         const fullId = normalizeFullId(actual);
         recordModelStats(fullId, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
         if (fullId !== actual) recordModelStats(actual, { ttfbMs: ttfb, totalMs: total, tps, completionTokens: compTok });
+        // —— 报表口径（usage 行 = -stats 的唯一数据源）：把 relay 之前消耗掉的等待补回来 ——
+        // 首字 = 本次上游尝试起点 → 网关转发首帧；0ms 是有效样本，只有负值判无效；
+        // transport 的 _t.ttfbMs 本就从 fetch 起算，不再叠加锚点（否则双计）。
+        const rowTtfb = !isStream ? null
+          : Number.isFinite(out.ttfMs) ? (out.ttfMs < 0 ? null : out.ttfMs + anchorMs)
+          : (Number.isFinite(upRes?._t?.ttfbMs) ? upRes._t.ttfbMs : null);
+        const rowTotal = Number.isFinite(total) ? total + anchorMs : total;
+        // 速度恒等：首字与总耗时同加一个常数 → (总−首字) 不变，故沿用 m.tps。
         // 窗口报表：逐请求落 usage（行形状由 usage/record.js 拥有，含 prompt/total ——
         // state 的 modelStats 只存 completion 的 EMA）。只按 canonical 名记一次，避免双计。
-        recordChatUsage({ model: fullId, via, usage, ttfbMs: ttfb, totalMs: total, tps: m.tps }).catch(() => {});
+        recordChatUsage({ model: fullId, via, usage, ttfbMs: rowTtfb, totalMs: rowTotal, tps: m.tps, reasoningChars: out.detail?.reasoningChars ?? 0, stream: isStream }).catch(() => {});
         // cline 旁路记账：流式时 provider 已把账号哈希挂在 upRes 上，这里用消费完的 usage 记一笔。
         // 纯旁路：只调 recordOutput，不改转发/切号/重试；无账号或非 cline 直接跳过。
         if (upRes?.clineAccountId) {

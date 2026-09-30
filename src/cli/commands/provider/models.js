@@ -127,7 +127,7 @@ export async function handleProviderModels(id, sub, args, rest) {
       else if (allowedCount === 0) console.log(`  tip: all blocked — mslxdff -provider ${id} allowAny on  或  allowlist set <model...>`);
       else if (allowedCount !== all.length) console.log(`  tip: blocked 仅影响 /v1/chat 调用，展示已全量列出`);
       if (id === "zcode") {
-        console.log(`  tip: 目录/额度可用；模型调用需上游一次性验证码参数（x-aliyun-captcha-verify-param，Start Plan 通道），未启用验证码农场前会返回 403 security_reject（code 3007）— 详见 docs/adr/0038`);
+        console.log(`  tip: 目录/额度/模型调用全通（上游 v3.14.4 起模型请求免验证码，docs/adr/0038）；额度耗尽返回 429 quota_exhausted，按日窗口重置`);
       }
     }
     try { await provider.close?.(); } catch {}

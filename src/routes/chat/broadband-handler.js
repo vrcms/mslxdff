@@ -21,6 +21,7 @@ export async function handleBroadbandRelay({
   evt,
   mark,
   perf0,
+  attemptStartMs,
   stages,
   res,
   startedAt,
@@ -48,7 +49,7 @@ export async function handleBroadbandRelay({
   });
   const isResponse = bb.result && typeof bb.result.status === "number" && typeof bb.result.headers?.get === "function";
   if (isResponse) {
-    const r = await pipeline.execute({ res, upRes: bb.result, body, requested, actual: model, lastErr, via: "broadband", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    const r = await pipeline.execute({ res, upRes: bb.result, body, requested, actual: model, lastErr, via: "broadband", lockModel, useAuto, handlerCtx, mark, perf0, attemptStartMs, stages, startedAt });
     if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
     return { handled: true };
   }
@@ -62,7 +63,7 @@ export async function handleBroadbandRelay({
       text: async () => str,
       body: isSSE ? (async function* () { yield Buffer.from(str); })() : null,
     };
-    const r = await pipeline.execute({ res, upRes: fakeRes, body, requested, actual: model, lastErr, via: "broadband-local", lockModel, useAuto, handlerCtx, mark, perf0, stages, startedAt });
+    const r = await pipeline.execute({ res, upRes: fakeRes, body, requested, actual: model, lastErr, via: "broadband-local", lockModel, useAuto, handlerCtx, mark, perf0, attemptStartMs, stages, startedAt });
     if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
     return { handled: true };
   }

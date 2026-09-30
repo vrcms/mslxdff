@@ -8,7 +8,7 @@ export const ZCODE_MESSAGES_URL = `${ZCODE_ORIGIN}/api/v1/zcode-plan/anthropic/v
 export const zcodeBalanceUrl = (appVersion) =>
   `${ZCODE_ORIGIN}/api/v1/zcode-plan/billing/balance?app_version=${encodeURIComponent(String(appVersion || ""))}`;
 
-export const ZCODE_DEFAULT_APP_VERSION = "3.11.2";
+export const ZCODE_DEFAULT_APP_VERSION = "3.14.4";
 export const ZCODE_RELEASE_CHANNEL = "stable";
 
 export function zcodeAppVersion(env = process.env) {

@@ -27,7 +27,7 @@ test("oauth: init 解析 authorize_url/poll 信息，自带 poll_token 鉴权", 
   assert.equal(seenBody.provider, "zai");
   assert.match(seenHeaders.Authorization, /^Bearer [0-9a-f]{64}$/, "init 需自带 poll_token 鉴权");
   assert.equal(seenHeaders["X-Device-Mid"], "mid-x");
-  assert.equal(seenHeaders["User-Agent"], "ZCode/3.11.2");
+  assert.equal(seenHeaders["User-Agent"], "ZCode/3.14.4");
   assert.equal(flow.state, "st-1");
   assert.equal(flow.pollToken, "pt-server", "服务端 poll_token 优先");
   assert.ok(flow.pollUrl.includes("f%2F1"), "flow_id 须 urlencode");

@@ -109,13 +109,15 @@ test("chat: 非流式成功 → 200 JSON（聚合）", async () => {
   assert.equal(j.usage.total_tokens, 7);
 });
 
-test("chat: 鉴权头带 Bearer + source headers 出站", async () => {
+test("chat: 模型请求出站为官方线形头（cli 形态，不带 device-mid）", async () => {
   let seen = null;
   await forwardZcodeChat({ body: { model: "zcode/GLM-5.2", messages: [] }, token: "tok-abc", deviceMid: "mid-9", fetchImpl: async (url, opts) => { seen = { url: String(url), headers: opts.headers }; return sseResponse(); } });
   assert.ok(seen.url.endsWith("/api/v1/zcode-plan/anthropic/v1/messages"));
-  assert.equal(seen.headers.Authorization, "Bearer tok-abc");
-  assert.equal(seen.headers["X-Device-Mid"], "mid-9");
-  assert.equal(seen.headers["X-Title"], "Z Code@electron");
+  assert.equal(seen.headers.authorization, "Bearer tok-abc");
+  assert.equal(seen.headers["x-api-key"], "tok-abc", "双鉴权头并存（官方形态）");
+  assert.equal(seen.headers["X-Device-Mid"], undefined, "模型请求不出 device-mid");
+  assert.equal(seen.headers["x-device-mid"], undefined);
+  assert.equal(seen.headers["x-title"], "Z Code@cli");
 });
 
 test("index: 未登录 → 401 + login 指引", async () => {
@@ -128,8 +130,8 @@ test("index: 未登录 → 401 + login 指引", async () => {
 test("index: 双 key 一坏一好 → 自动换号且坏号进冷却", async () => {
   const calls = [];
   const fetchImpl = async (url, opts) => {
-    calls.push(opts.headers.Authorization);
-    if (String(opts.headers.Authorization).includes("bad")) return bizFail(1006, 401);
+    calls.push(opts.headers.authorization);
+    if (String(opts.headers.authorization).includes("bad")) return bizFail(1006, 401);
     return sseResponse();
   };
   const p = createZcodeProvider({ apiKeys: ["bad.jwt.token", "good.jwt.token"], fetchImpl, cooldownMs: 60_000 });
@@ -170,7 +172,7 @@ test("index: listModels 出目录（免费 4 模型，带前缀）", async () =>
 
 test("index: chatWithKeys 用临时 key 发一次", async () => {
   const seen = [];
-  const p = createZcodeProvider({ apiKeys: ["k1"], fetchImpl: async (url, opts) => { seen.push(opts.headers.Authorization); return sseResponse(); } });
+  const p = createZcodeProvider({ apiKeys: ["k1"], fetchImpl: async (url, opts) => { seen.push(opts.headers.authorization); return sseResponse(); } });
   await p.chatWithKeys({ model: "zcode/GLM-5.2", messages: [], stream: false }, ["tmp-key"]);
   assert.equal(seen[0], "Bearer tmp-key");
 });

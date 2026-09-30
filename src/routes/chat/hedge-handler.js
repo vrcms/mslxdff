@@ -22,6 +22,7 @@ export async function handleHedge({
   logError,
   mark,
   perf0,
+  attemptStartMs,
   stages,
   startedAt,
   plugins,
@@ -62,6 +63,7 @@ export async function handleHedge({
           handlerCtx,
           mark,
           perf0,
+          attemptStartMs,
           stages,
           startedAt,
         });
@@ -100,6 +102,7 @@ export async function handleHedge({
           handlerCtx: { ...handlerCtx, model: win.target },
           mark: (n) => mark(n),
           perf0,
+          attemptStartMs,
           stages,
           startedAt,
         });

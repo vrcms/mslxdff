@@ -25,6 +25,7 @@ export async function handleViaRoute({
   logError,
   mark,
   perf0,
+  attemptStartMs,
   stages,
   startedAt,
   plugins,
@@ -134,6 +135,7 @@ export async function handleViaRoute({
     handlerCtx: { ...handlerCtx, model },
     mark,
     perf0,
+    attemptStartMs,
     stages,
     startedAt,
     // 借道单路径无第二候选可比：按末位耐心档（默认 120s，MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS 可调/0=不限）

@@ -58,7 +58,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   let viaRouteLastErr = null;
   if (!useAuto && requested && requested.includes("/") && canForwardPeers && !lockModel && peers && shouldUseGroupForModel(requested)) {
     try {
-      const vr = await viaRoute({ model: requested, body, peers, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res, requested, useAuto, lockModel, auto });
+      const vr = await viaRoute({ model: requested, body, peers, handlerCtx, evt, logCall, logError, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res, requested, useAuto, lockModel, auto });
       if (vr.handled) return { done: true };
       if (vr.lastErr) viaRouteLastErr = vr.lastErr;
     } catch (e) {
@@ -161,14 +161,14 @@ export async function runSerialTrial(ctx, deps = {}) {
         const canUseGroup = shouldUseGroupForModel(model);
         const doHedge = canUseGroup && shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) && upRes.status === 200 && upRes.body;
         if (doHedge) {
-          const hr = await hedge({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res, hedgeDelayMs: d });
+          const hr = await hedge({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, logError, mark, perf0, attemptStartMs: tUp, stages, startedAt, plugins, res, hedgeDelayMs: d });
           if (hr.handled) return { done: true };
           if (hr.lastErr) lastErr = hr.lastErr;
           if (hr.upRes === null) upRes = null;
           else if (hr.upRes) upRes = hr.upRes;
         }
         if (upRes) {
-          const lr = await localRelay({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, handlerCtx, evt, logCall, logError, mark, perf0, stages, startedAt, plugins, res });
+          const lr = await localRelay({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, handlerCtx, evt, logCall, logError, mark, perf0, attemptStartMs: tUp, stages, startedAt, plugins, res });
           if (lr.handled) return { done: true };
           if (lr.lastErr && isEmptyTurnError(lr.lastErr) && emptyRetried < emptyCfg.max) {
             emptyRetried++;
@@ -188,7 +188,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (peer)` });
       } else {
-        const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, stages, startedAt, plugins, res });
+        const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res });
         if (pr.handled) return { done: true };
         if (pr.lastErr) lastErr = pr.lastErr;
       }
@@ -197,7 +197,7 @@ export async function runSerialTrial(ctx, deps = {}) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (broadband)` });
       } else {
-        const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, stages, res, startedAt, plugins });
+        const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, attemptStartMs: performance.now(), stages, res, startedAt, plugins });
         if (br.handled) return { done: true };
       }
     }

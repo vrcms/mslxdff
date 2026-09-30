@@ -2,7 +2,8 @@
 // 失败响应带 x-mslxdff-zcode-kind 标记，供 provider 工厂决定冷却策略。
 import { timeoutSignal } from "../../compat.js";
 import { ZCODE_MESSAGES_URL, canonicalZcodeModel, zcodeErrorKind } from "./const.js";
-import { buildZcodeHeaders } from "./headers.js";
+import { shapeZcodeWireRequest } from "./context-shape.js";
+import { buildZcodeModelHeaders } from "./headers.js";
 import { aggregateAnthropicToOpenAi, anthropicToOpenAiStream } from "./sse.js";
 
 const DEFAULT_MAX_TOKENS = 4096;
@@ -97,7 +98,7 @@ const ERROR_MAP = {
   auth: { status: 401, type: "auth_error", text: (f) => `zcode: 登录已失效（code ${f.code || 1006}）。请运行 mslxdff -provider zcode login 重新登录` },
   quota: { status: 429, type: "quota_exhausted", text: () => "zcode: 免费额度已用完（按日重置），请明日再试或添加账号" },
   rate_limit: { status: 429, type: "all_cooling", text: () => "zcode: 上游限流（账号冷却中），请稍后重试" },
-  security: { status: 403, type: "security_reject", text: (f) => `zcode: 安全校验拒绝（code ${f.code || 3007}）${f.message ? `：${f.message}` : ""} · 该额度走 Start Plan 验证码通道（每条请求需一次性 x-aliyun-captcha-verify-param；未启用验证码农场时必现），见 docs/adr/0038` },
+  security: { status: 403, type: "security_reject", text: (f) => `zcode: 安全校验拒绝（code ${f.code || 3007}）${f.message ? `：${f.message}` : ""} · v3.14.4 起模型请求已免验证码（仅 claim 通道仍需要），偶发请重试，见 docs/adr/0038` },
   param: { status: 400, type: "invalid_request", text: (f) => `zcode: 请求参数被上游拒绝（code ${f.code}）${f.message ? `：${f.message}` : ""}` },
   server: { status: 502, type: "upstream_error", text: (f) => `zcode: 上游服务异常${f.code ? `（code ${f.code}）` : ""}${f.message ? `：${f.message}` : ""}` },
   network: { status: 502, type: "upstream_error", text: (f) => `zcode: 网络错误 ${f.message || ""}`.trim() },
@@ -115,21 +116,21 @@ export function zcodeErrorResponse(fail = {}) {
   });
 }
 
-export async function forwardZcodeChat({ body, token, deviceMid, fetchImpl, version, timeoutMs = 120_000 } = {}) {
+export async function forwardZcodeChat({ body, token, deviceMid, fetchImpl, version, timeoutMs = 120_000, provider = "zai" } = {}) {
   const anthropicBody = toAnthropicRequest(body);
-  const modelId = anthropicBody.model;
-  const headers = {
-    ...buildZcodeHeaders({ token, deviceMid, version }),
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-  };
+  const modelId = anthropicBody.model; // 响应回显用 canonical id；出站另行归一
+  // 官方线形：小写模型 + system 身份块 + currentDate 前缀（缺任一 → 上游 3012）。
+  // deviceMid 入参保留签名兼容，但模型请求出站不带（官方 CLI 模型请求不带该头，实测）。
+  const wireBody = shapeZcodeWireRequest(anthropicBody, { provider });
+  const headers = { "content-type": "application/json", ...buildZcodeModelHeaders({ token, version }) };
+  void deviceMid;
 
   let res;
   try {
     res = await fetchImpl(ZCODE_MESSAGES_URL, {
       method: "POST",
       headers,
-      body: JSON.stringify(anthropicBody),
+      body: JSON.stringify(wireBody),
       signal: timeoutSignal(timeoutMs),
     });
   } catch (e) {
