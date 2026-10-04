@@ -108,7 +108,20 @@ export function appendError(entry, { file = errorsFile() } = {}) {
 // Structured debug event stream: one JSON line per request/error/forward
 // step, consumed live by `mslxdff -debug`.
 export function appendEvent(entry, { file = eventsFile() } = {}) {
-  appendLine(file, entry);
+  appendLine(file, dropTalk(entry));
+}
+
+// events.log 是 debug 流（1MB 环形），对话正文只准进 talk/*.log。
+// 单点剥掉 detail.talk：任何 relay 路径（含绕过 relay-pipeline 的 exhausted 收尾）都不会
+// 把整段问答灌进 debug 行；留 talkChars 计数，debug 时仍看得出这轮有没有出字。
+function dropTalk(entry) {
+  const t = entry?.detail?.talk;
+  if (!t) return entry;
+  const detail = { ...entry.detail };
+  delete detail.talk;
+  detail.talkChars = (t.content || []).join("").length;
+  detail.talkReasoningChars = (t.reasoning || []).join("").length;
+  return { ...entry, detail };
 }
 
 export function recentEvents(n = 100, { file = eventsFile() } = {}) {

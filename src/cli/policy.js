@@ -60,7 +60,7 @@ export function stopDaemonIfOutdated(VERSION) {
   const runningVersion = readPidVersion();
   if (!runningVersion) {
     console.log(`daemon version unknown — restarting with v${VERSION}...`);
-    stopDaemon();
+    stopDaemon({ reason: "upgrade" });
     return;
   }
   if (runningVersion === VERSION) return;
@@ -70,7 +70,7 @@ export function stopDaemonIfOutdated(VERSION) {
     return;
   }
   console.log(`daemon running v${runningVersion} — upgrading to v${VERSION}, restarting...`);
-  stopDaemon();
+  stopDaemon({ reason: "upgrade" });
 }
 
 export function refreshIntervalMs() {

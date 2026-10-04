@@ -2,6 +2,7 @@
 // 用途：防止"改了代码/加了功能，却忘了同步架构文档"。
 // 运行：npm run docs:check  （失败退出码 1）
 import { readFileSync, existsSync, readdirSync } from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -68,14 +69,15 @@ try {
   fail(`体积检查执行失败: ${String(e?.message || e)}`);
 }
 
-// 5. 功能树一致性：FEATURE_TREE.md ↔ src/ 双向锁定（引用存在 + 目录级孤儿 = 新增能力域漏登记）
+// 5. 功能树：四道门（前向引用/反向锚定/分支登记/预算）+ 摩擦账 —— 全局唯一脚本 ft-check.mjs（技能目录）
 try {
   const { spawnSync } = await import("node:child_process");
-  const r = spawnSync(process.execPath, [join(root, "scripts", "check-feature-tree.js")], { stdio: "inherit" });
-  if (r.status === 0) ok("功能树一致性检查通过");
-  else fail("功能树一致性检查失败 — 补 docs/FEATURE_TREE.md 叶子（见 check-feature-tree.js 顶部说明）");
+  const ft = process.env.FT_HOME ? join(process.env.FT_HOME, "resources", "ft-check.mjs") : join(os.homedir(), ".agents", "skills", "feature-tree", "resources", "ft-check.mjs");
+  const r = spawnSync(process.execPath, [ft, "check"], { stdio: "inherit" });
+  if (r.status === 0) ok("功能树检查通过（前向/反向锚定/分支登记/预算）");
+  else fail("功能树检查失败 — 按上方输出补叶或占位，改完跑 ft-check.mjs sync 刷新索引");
 } catch (e) {
-  fail(`功能树一致性检查执行失败: ${String(e?.message || e)}`);
+  fail(`功能树检查执行失败: ${String(e?.message || e)}`);
 }
 
 // 6. 指令文档分层：AGENTS.md 是每会话注入的常驻层，长内容必须下沉到 nested AGENTS.md / docs/

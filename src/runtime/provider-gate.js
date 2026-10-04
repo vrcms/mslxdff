@@ -4,7 +4,7 @@
 // Note: auth 号型不要求 baseUrl 是硬约束（旧门禁 baseUrl&&keys 曾静默跳过整家 qoder）— 见 .agents/notes/implemented/bug-fix/2026-09-21-auth-doc-provider-gate.md
 
 /** 凭证在 auth 目录、无需 baseUrl 的「auth 号型」定制供应商（端点由各自 constants 决定）。 */
-export const AUTH_DOC_PROVIDER_IDS = ["workbuddy", "traework", "qoder", "qwenwork"];
+export const AUTH_DOC_PROVIDER_IDS = ["workbuddy", "traework", "qoder", "qwenwork", "globalqwenwork"];
 
 /**
  * - auth 号型：keys 或 auths 或 auth 目录有号 → 启用（baseUrl 可空）
@@ -24,8 +24,9 @@ export async function loadAuthDocs(gid) {
         ? await import("../providers/traework/account-store.js")
         : gid === "qwenwork"
           ? await import("../providers/qwenwork/account-store.js")
-          : await import("../providers/qoder/account-store.js");
-    return store.listAccountDocs();
+          : gid === "globalqwenwork"
+            ? await import("../providers/globalqwenwork/account-store.js")
+            : await import("../providers/qoder/account-store.js");
     return store.listAccountDocs();
   } catch {
     return [];

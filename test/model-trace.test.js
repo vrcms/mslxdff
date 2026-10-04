@@ -119,3 +119,32 @@ test("model trace: relay-done/result 也带 upstream/account/pick（终局可追
   const bare = formatModelTrace({ type: "result", reqId: "r3", model: "m", data: { status: 200, via: "local" } });
   assert.ok(!bare.includes("upstream="), "无回显头时零变化");
 });
+
+test("model trace: 空转重试结局（重拉抬额/救回/用尽）各自成行且默认可见", () => {
+  assert.equal(shouldTraceModel("empty-turn-recovered"), true);
+  assert.equal(shouldTraceModel("empty-turn-exhausted"), true);
+  const r = formatModelTrace({ type: "empty-turn-retry", reqId: "r0", model: "m", data: { retry: 1, max: 2, delayMs: 2000, waitedMs: 2000, raiseFrom: 8192, raiseTo: 16384 } });
+  assert.match(r, /空转重试：retry 1\/2 delay=2000ms waited=2000ms max_tokens 8192→16384/);
+  const ok = formatModelTrace({ type: "empty-turn-recovered", reqId: "r1", model: "m", data: { retries: 1, max: 2, delayMs: 2000, waitedMs: 2000 } });
+  assert.match(ok, /空转重试成功：第 1\/2 次重拉/);
+  assert.match(ok, /白等 2000ms/);
+  const lost = formatModelTrace({ type: "empty-turn-exhausted", reqId: "r2", model: "m", data: { retries: 2, max: 2, waitedMs: 4000, reason: "EMPTY_MODEL_RESPONSE: finish_reason=length" } });
+  assert.match(lost, /空转重试已用尽：重试 2\/2/);
+  assert.match(lost, /累计等待 4000ms/);
+  assert.match(lost, /finish_reason=length/);
+});
+
+test("model trace: 空转判据原文落日志但凭据仍脱敏", () => {
+  const s = formatModelTrace({ type: "empty-turn-retry", reqId: "r1", model: "m", data: { retry: 1, max: 2, delayMs: 2000, reason: "upstream=api.example.com?token=SECRETABC authorization=SECRETDEF" } });
+  assert.ok(!s.includes("SECRETABC"), "reason 走 safeText 脱敏（URL 参数形）");
+  assert.ok(!s.includes("SECRETDEF"), "reason 走 safeText 脱敏（k=v 形）");
+});
+
+test("model trace: empty-turn-retry 的 step 必须出现在人读行（登记≠可见，本项目踩过）", () => {
+  const ladder = formatModelTrace({ type: "empty-turn-retry", reqId: "r1", model: "m", data: { retry: 2, step: 1, max: 3, delayMs: 8000, waitedMs: 10000, reason: "EMPTY_MODEL_RESPONSE: no content" } });
+  assert.match(ladder, /retry 2\/3 step=1/, "step 只进 DECISION_FIELDS 不够：本事件走自定义渲染串，字段会被短路吞掉");
+  assert.match(ladder, /delay=8000ms/);
+  assert.match(ladder, /waited=10000ms/);
+  const legacy = formatModelTrace({ type: "empty-turn-retry", reqId: "r1", model: "m", data: { retry: 1, step: 0, max: 2, delayMs: 2000, waitedMs: 2000 } });
+  assert.match(legacy, /step=0/, "逃生阀模式 step=0 也得可见，否则 grep step= 假阴性");
+});

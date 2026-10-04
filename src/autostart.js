@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node
 import { homedir, userInfo } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { daemonDir, readPid } from "./daemon.js";
+import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
 
 const TASK_NAME = "mslxdff";
 const SERVICE_NAME = "mslxdff";
@@ -203,6 +205,7 @@ async function linuxEnable() {
         }
         for (const p of pids) {
           if (p === process.pid) continue;
+          if (p === readPid()) { try { writeExitMarker(daemonDir(), { reason: "autostart-cleanup", prevPid: p, prevVersion: null, byPid: process.pid }); } catch {} }
           try { process.kill(p, "SIGTERM"); killed++; } catch {}
         }
         if (killed) await new Promise((r2) => setTimeout(r2, 400));

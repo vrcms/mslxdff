@@ -23,11 +23,11 @@ export async function handleRestart(args, VERSION) {
   const alive = pid ? isPidAlive(pid) : false;
   if (alive) {
     console.log(`restarting daemon (pid ${pid})...`);
-    stopDaemon();
+    stopDaemon({ reason: "restart" });
     await new Promise((r) => setTimeout(r, 300));
   } else if (pid) {
     console.log(`daemon pid ${pid} is stale (not running) — starting fresh...`);
-    try { stopDaemon(); } catch {}
+    try { stopDaemon({ reason: "restart" }); } catch {}
   } else {
     console.log(`daemon not running — starting...`);
   }
@@ -58,7 +58,7 @@ export async function handlePort(args) {
   setPort(port);
   const daemon = readPid();
   if (daemon) {
-    stopDaemon();
+    stopDaemon({ reason: "restart" });
     startDaemon(["-port", String(port)]);
     await waitForHealth(port, 4000);
     console.log(`mslxdff restarted on port ${port} (pid ${readPid()})`);
@@ -108,7 +108,7 @@ export async function handleDebug(args) {
       }
     } catch {}
   }
-  const { stopped, pid } = stopDaemon();
+  const { stopped, pid } = stopDaemon({ reason: "debug-takeover" });
   if (stopped) console.log(`[debug] stopped background daemon (pid ${pid})`);
   // 等旧 daemon 真正退出再抢端口（Windows 端口释放有延迟，否则 EADDRINUSE 会让 debug 立即崩）
   if (stopped && pid) {

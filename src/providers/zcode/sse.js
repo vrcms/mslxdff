@@ -1,5 +1,7 @@
 // Anthropic SSE → OpenAI 形状转换（流式 / 聚合两种出口）。
-// 承诺字段：文本增量、tool_use 增量（tool_calls）、usage、finish_reason；thinking 块丢弃（不入历史）。
+// 承诺字段：文本增量、thinking 增量（reasoning_content）、tool_use 增量（tool_calls）、usage、finish_reason。
+// thinking 跨轮回填：首个 thinking block 的 signature 随 reasoning_content 挂在 assistant 历史消息上（必须，
+// 上游要求 signature 与 thinking 原文一起回传；与 reasoning_content_signature 拼写不同的上游见下兼容）。
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
 const STOP_REASONS = { end_turn: "stop", max_tokens: "length", tool_use: "tool_calls", stop_sequence: "stop", pause_turn: "stop" };
@@ -26,6 +28,9 @@ export function createAnthropicTranslator({ model = "zcode", id = newId(), creat
   let inputTokens = null;
   let outputTokens = null;
   let text = "";
+  // thinking 全量文本（聚合出口回填 reasoning_content）与首个 signature（跨轮必需，见文件头）
+  let thinkingText = "";
+  let thinkingSig = null;
   let toolCount = 0;
   const toolIndexByBlock = new Map();
   const toolCalls = [];
@@ -55,7 +60,12 @@ export function createAnthropicTranslator({ model = "zcode", id = newId(), creat
       }
     } else if (evt.type === "content_block_start") {
       const block = evt.content_block || {};
-      if (block.type === "tool_use") {
+      if (block.type === "thinking") {
+        // 首个 thinking 块的 signature 留给聚合出口的跨轮回填（后续 thinking 块没有也必须回传空串占位——
+        // codearts 的 DeepSeek 同款要求，见 src/providers/codearts/chat.js）
+        if (thinkingSig === null && typeof block.signature === "string") thinkingSig = block.signature;
+        if (typeof block.thinking === "string" && block.thinking) thinkingText += block.thinking;
+      } else if (block.type === "tool_use") {
         const idx = toolCount++;
         toolIndexByBlock.set(Number(evt.index), idx);
         toolCalls.push({ id: String(block.id || `toolu_${idx}`), name: String(block.name || ""), args: "" });
@@ -66,6 +76,10 @@ export function createAnthropicTranslator({ model = "zcode", id = newId(), creat
       if (d.type === "text_delta" && typeof d.text === "string") {
         text += d.text;
         out.push(chunkLine({ content: d.text }));
+      } else if (d.type === "thinking_delta" && typeof d.thinking === "string") {
+        thinkingText += d.thinking;
+        if (typeof d.signature === "string" && d.signature && thinkingSig === null) thinkingSig = d.signature;
+        out.push(chunkLine({ reasoning_content: d.thinking }));
       } else if (d.type === "input_json_delta" && typeof d.partial_json === "string") {
         const idx = toolIndexByBlock.has(Number(evt.index)) ? toolIndexByBlock.get(Number(evt.index)) : Math.max(0, toolCount - 1);
         if (toolCalls[idx]) toolCalls[idx].args += d.partial_json;
@@ -113,6 +127,9 @@ export function createAnthropicTranslator({ model = "zcode", id = newId(), creat
 
   function result() {
     const message = { role: "assistant", content: text || null };
+    // thinking 聚合回填：跨轮必需的 signature 与原文一起带回（见文件头；codearts DeepSeek 同款）
+    if (thinkingText) message.reasoning_content = thinkingText;
+    if (thinkingSig !== null) message.reasoning_content_signature = thinkingSig;
     if (toolCalls.length) {
       message.tool_calls = toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args || "{}" } }));
       if (!text) message.content = null;

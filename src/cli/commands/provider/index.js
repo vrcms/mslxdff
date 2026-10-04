@@ -83,6 +83,8 @@ const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleQoderCheckin(id, sub, rest)) return true;
   const { handleQwenworkLogin } = await import("./qwenwork-login.js");
   if (await handleQwenworkLogin(id, sub, rest)) return true;
+  const { handleGlobalQwenworkLogin } = await import("./globalqwenwork-login.js");
+  if (await handleGlobalQwenworkLogin(id, sub, rest)) return true;
   const { handleZcodeLogin } = await import("./zcode-login.js");
   if (await handleZcodeLogin(id, sub, rest)) return true;
   const { handleZcodeQuota } = await import("./zcode-quota.js");

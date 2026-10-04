@@ -31,6 +31,14 @@ export const customProviders = [
     load: () => import("./qoder/index.js").then((m) => m.createQoderProvider),
   },
   {
+    // ⚠ 必须排在 qwenwork 之前：qwenwork 的 match 用 `includes("qwenwork")`，
+    // 而 "globalqwenwork" 与 "gateway.qwenwork.ai"/"globalqwenwork://native" 都含该子串，
+    // 若后置会被 cn 条目抢先命中（first-match-wins），把国际站 token 打到 cn 网关。
+    id: "globalqwenwork",
+    match: (id, baseUrl) => id === "globalqwenwork" || String(baseUrl).includes("qwenwork.ai"),
+    load: () => import("./globalqwenwork/index.js").then((m) => m.createGlobalQwenworkProvider),
+  },
+  {
     id: "qwenwork",
     match: (id, baseUrl) => id === "qwenwork" || String(baseUrl).includes("qwenwork"),
     load: () => import("./qwenwork/index.js").then((m) => m.createQwenworkProvider),

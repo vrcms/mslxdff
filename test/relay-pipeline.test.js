@@ -496,3 +496,25 @@ describe("relay-pipeline 深模块", () => {
     assert.ok(!out.lastErr.message.includes("EMPTY_MODEL_RESPONSE: upstream returned 200 with no content"));
   });
 });
+
+  test("US18 思考刷满 length 的零正文 → 报错直书成因（relay 不做\"可否重试\"判决）", async () => {
+    const probe = evtProbe();
+    const logErrCalls = [];
+    const { pipe } = makePipeline({
+      relayImpl: async () => ({ status: 200, ttfMs: 97, totalMs: 48580, aborted: false, interrupted: false, detail: { sawDone: true, sawFinishReason: "length", chars: 0, toolCalls: 0, chatShaped: true, reasoningChars: 28151, wroteChunks: 8195, wroteBytes: 2077103, wrotePayload: true, exitReason: "normal" } }),
+      evtFn: probe,
+      logError: (...a) => logErrCalls.push(a),
+    });
+    const out = await pipe.execute({
+      res: fakeRes(), upRes: { status: 200, headers: { get: () => null } }, body: { stream: true },
+      requested: "m", actual: "m", lastErr: null, via: "local", lockModel: "", useAuto: false,
+      handlerCtx: { reqId: "r18", hops: 0, model: "m" }, mark: () => {}, perf0: 0, stages: [], startedAt: 0,
+    });
+    assert.equal(out.handled, false);
+    assert.equal(out.lastErr.emptyRetryable, undefined, "空正文一律交上层重试，relay 不做可否判决");
+    assert.match(out.lastErr.message, /思考 28151 字刷满 max_tokens，正文 0 字/);
+    const ue = probe.list.find((e) => e.type === "upstream-error");
+    assert.equal(ue.data.retryable, undefined);
+    assert.equal(ue.data.reasoningChars, 28151);
+    assert.match(logErrCalls[0][2], /刷满 max_tokens/, "errors.log 写成因，不只写\"空转\"");
+  });

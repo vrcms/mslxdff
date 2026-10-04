@@ -23,3 +23,11 @@ test("timeline: 重试计数与空字段不抛错", () => {
   assert.match(s, /\[direct=-\]/);
   assert.match(s, /\[result=502 timedOut=1\]/);
 });
+
+test("timeline: 空转重试结局 win/lost 可直接 grep，未重试时不出现该字段", () => {
+  assert.match(formatTimeline({ reqId: "r", model: "m", retries: 1, retryResult: "ok", result: { status: 200, detail: { chars: 5 } } }), /\[retry=1\] \[retry_win=1\]/);
+  assert.match(formatTimeline({ reqId: "r", model: "m", retries: 2, retryResult: "lost", result: { status: 502 } }), /\[retry=2\] \[retry_lost=1\]/);
+  assert.match(formatTimeline({ reqId: "r", model: "m", retries: 2, result: { status: 502 } }), /\[retry=2\](?!_)/);
+  const none = formatTimeline({ reqId: "r", model: "m", result: { status: 200 } });
+  assert.ok(!none.includes("retry"), "没发生空转就不该刷屏");
+});

@@ -24,7 +24,9 @@ auths/
 AGENTS.md
 CLAUDE.md
 CONTEXT.md
-docs/
+docs/*
+!docs/feature-tree/
+!docs/FEATURE_TREE.md
 .scratch/
 .agents/
 .opencode/
@@ -45,3 +47,5 @@ test_*.mjs
 *.mjs
 !src/**/*.mjs
 .backup/
+
+.cache/

@@ -53,6 +53,9 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "qwenwork") {
       const { createQwenworkProvider } = await import("../../../providers/qwenwork/index.js");
       provider = createQwenworkProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "globalqwenwork") {
+      const { createGlobalQwenworkProvider } = await import("../../../providers/globalqwenwork/index.js");
+      provider = createGlobalQwenworkProvider({ id, apiKeys: keys, file: defaultStateFile() });
     } else if (id === "zcode") {
       const { createZcodeProvider } = await import("../../../providers/zcode/index.js");
       provider = createZcodeProvider({ id, apiKeys: keys, file: defaultStateFile() });

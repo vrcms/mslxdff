@@ -18,10 +18,26 @@ export function authorized(req, token) {
 }
 
 export function json(res, status, body) {
-  res.statusCode = status;
-  // 已发 headers（如 failover 时前一个候选写过 SSE 注释帧）不可再设，否则抛 ERR_HTTP_HEADERS_SENT
-  try { if (!res.headersSent) res.setHeader("Content-Type", "application/json"); } catch { /* ignore */ }
-  res.end(JSON.stringify(body));
+  // 幂等守卫：已收场的响应必须 no-op（空轮 hold 后多处共用收场出口，二次 end 会抛）
+  if (!res || res.writableEnded) return;
+  if (!res.headersSent) {
+    res.statusCode = status;
+    try { res.setHeader("Content-Type", "application/json"); } catch { /* ignore */ }
+    try { res.end(JSON.stringify(body)); } catch { /* ignore */ }
+    return;
+  }
+  // headers 已 flush（failover 前候选写过 SSE 注释帧、或空轮 hold 期间发过 keepalive）：
+  // 设 statusCode 会抛 ERR_HTTP_HEADERS_SENT，写 JSON 体更会把 application/json 混进 text/event-stream
+  // （客户端只会当噪声丢掉，等于悄悄吞掉错误）。SSE 一律改用 in-band 错误帧 + [DONE] 收场。
+  const ct = typeof res.getHeader === "function" ? String(res.getHeader("content-type") || "") : "";
+  if (ct.includes("text/event-stream")) {
+    try {
+      const msg = body && typeof body === "object" ? String(body.error ?? body.message ?? JSON.stringify(body)) : String(body ?? "error");
+      res.write(`data: ${JSON.stringify({ error: { message: msg, type: "mslxdff_error" } })}\n\n`);
+      res.write("data: [DONE]\n\n");
+    } catch { /* 下游已断 */ }
+  }
+  try { res.end(); } catch { /* ignore */ }
 }
 
 export function notFound(res) {

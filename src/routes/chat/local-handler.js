@@ -56,6 +56,8 @@ export async function handleLocalRelay({
     stages,
     startedAt,
   });
+  // wrotePayload 是「正文真到了下游」的送达证据：serial-trial 记 empty-turn-recovered 只认它，
+  // 不认 handled 本身（handled 也覆盖下游已断开等零输出路径，见 ADR-0043）。
   if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
-  return { handled: true };
+  return { handled: true, wrotePayload: r.wrotePayload === true };
 }

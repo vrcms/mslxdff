@@ -5,6 +5,8 @@ import { computeMetrics } from "../../metrics.js";
 import { recordChatUsage } from "../../usage/record.js"; // 窗口报表唯一写入点（canonical 名单记防双计）— 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
 import { recordOutput, computeOutputRow } from "../../providers/cline/usage.js"; // cline 专属旁路统计（账号×模型，流式也覆盖）
 import { upstreamEcho } from "../../model-trace.js"; // 回显头→日志字段（谁上的/哪个号/为什么/是否冷却）单一来源
+import { recordRelayTalk } from "../../talk-log.js"; // 环形对话日志（问答全文，最近 1 小时）：五段流水在此汇合，落盘点只这一个
+import { isEmptyTurnDetail } from "../stream-scan.js"; // 空轮判据单一真相（stream.js 用它决定封不封口，这里用它决定交不交回重试）
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -127,6 +129,10 @@ export function createRelayPipeline({
       detail: out.detail ?? null,
     });
 
+    // 环形对话日志：只记有真实输出的轮次（空轮交给下面的空转判定另行报错）。
+    // 纯旁路：不改闸门、不改计时、不改返回体；任何异常都吞掉，绝不影响转发。
+    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes) }); } catch {}
+
     // 5a0. 空转 200：流正常结束但零正文零工具调用 → 客户端会报 EMPTY_MODEL_RESPONSE
     // （"The model ended its turn without producing any output"）；转 failover 而不是
     // 把空轮递给客户端。chatShaped 是前置证据：只有看得出是 chat 轮才判空，
@@ -134,23 +140,29 @@ export function createRelayPipeline({
     // 工具轮豁免：tool_calls 无正文是合法 agent 形态；
     // finish=tool_calls/function_call 兜底豁免（防计数漏检误杀）；下游已断开不重试（写给谁看）。
     // 对标 dsh-cline-pass 的 EMPTY_RESPONSE 语义；不记 auto 冷却（空转≠模型坏，重试多半能好）。
+    // 判据单一真相在 stream-scan.js:isEmptyTurnDetail —— relay 侧「要不要封口」与这里「要不要重拉」必须同源，否则会出现留了口却不再救、或已终结却仍重拉的错拍
+    // heldOpen 也计入：非流式留口返回的是上游原状态码（2xx 变体或中继的 ≥400），只认 200 会漏判 → 没人收场，连接挂死
     const _d = out.detail || {};
-    const _emptyTurn = out.status === 200 && !out.timedOut && !out.interrupted && !_d.downstreamClosed &&
-      _d.chatShaped === true &&
-      (Number(_d.chars) || 0) === 0 && (Number(_d.toolCalls) || 0) === 0 &&
-      !["tool_calls", "function_call"].includes(_d.sawFinishReason);
+    const _emptyTurn = (out.status === 200 || out.heldOpen === true) && !out.timedOut && !out.interrupted && !_d.downstreamClosed && isEmptyTurnDetail(_d);
     if (_emptyTurn) {
       const _why = _d.sawFinishReason ? ` (finish_reason=${_d.sawFinishReason})` : " (no content, no tool calls)";
       // 错误包络暂扣后下游不再直观看到上游原文：把摘要带进最终报错（截断 200 字），排障不断线。
       const _err = _d.upstreamErrorText ? ` upstream=${String(_d.upstreamErrorText).slice(0, 200)}` : "";
-      try { _logError(actual, 502, `empty turn${_why}${_err}`); } catch {}
-      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null, ...upstreamEcho(upRes) });
+      // 零正文的成因直接写进报错（不只给现象）：finish_reason=length + 大量思考 = 额度被 reasoning 吃光
+      // （实测 cline-free deepseek reasoningChars=28151、completion_tokens=8192=max_tokens、chars=0）。
+      // 同参重拉必复现，故 serial-trial 的空转重试会顺手把 max_tokens 抬一档（见 emptyRaiseCap）。
+      const _lenCapped = _d.sawFinishReason === "length";
+      const _hint = _lenCapped && (Number(_d.reasoningChars) || 0) > 0
+        ? ` [思考 ${Number(_d.reasoningChars) || 0} 字刷满 max_tokens，正文 0 字]`
+        : "";
+      try { _logError(actual, 502, `empty turn${_why}${_err}${_hint}`); } catch {}
+      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null, finish: _d.sawFinishReason || null, reasoningChars: Number(_d.reasoningChars) || 0, wroteFrames: Number(_d.wroteChunks) || 0, heldOpen: out.heldOpen === true, ...upstreamEcho(upRes) });
       _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
-      let _errMsg = `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err} — retry or rephrase`;
+      let _errMsg = `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err}${_hint} — retry or rephrase`;
       if (_d.upstreamErrorText && _d.upstreamErrorText.includes("retryAfterSeconds")) {
         _errMsg = _d.upstreamErrorText;
       }
-      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg } };
+      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg, emptyTurn: true, heldOpen: out.heldOpen === true } };
     }
 
     // 上报锚点偏移：relay 入口之前消耗掉的等待（上游排队、建连、provider 为取判决预读的首帧）。
@@ -186,7 +198,7 @@ export function createRelayPipeline({
       _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, interrupted: true, ...upstreamEcho(upRes), detail: out.detail ?? null, fallback, requested, actual });
       _evt("client-response", { requested, actual, via, fallback, status: out.status, reqId, interrupted: true });
       if (plugins?.length) runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body?.stream), durationMs: Date.now() - curStartedAt, via, status: out.status, actual, interrupted: true, fallback }).catch(() => {});
-      return { handled: true };
+      return { handled: true, wrotePayload: out.detail?.wrotePayload === true };
     }
 
     // 5c. 慢速计分 + ok
@@ -257,7 +269,7 @@ export function createRelayPipeline({
     _evt("result", { reqId, model: actual, status: out.status, via, timing: upRes?._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, ...upstreamEcho(upRes), detail: out.detail ?? null, fallback, requested, actual });
     _evt("client-response", { requested, actual, via, fallback, status: out.status, reqId });
     if (plugins?.length) runHook(plugins, "request:completed", { reqId, requested, useAuto, hops, stream: Boolean(body?.stream), durationMs: Date.now() - curStartedAt, via, status: out.status, actual, fallback }).catch(() => {});
-    return { handled: true };
+    return { handled: true, wrotePayload: out.detail?.wrotePayload === true };
   }
 
   return { execute };

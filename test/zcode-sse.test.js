@@ -96,3 +96,25 @@ test("sse: 非流式聚合识别流内 error 事件", async () => {
   assert.ok(out.error, "错误被识别");
   assert.match(out.error.message, /busy/);
 });
+
+test("sse: thinking_delta → reasoning_content 增量 + 聚合回填 signature（跨轮必需）", async () => {
+  const THINK_SSE = [
+    evt("message_start", { type: "message_start", message: { id: "m3", usage: { input_tokens: 2 } } }),
+    evt("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "sig-abc" } }),
+    evt("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "先想" } }),
+    evt("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "一想" } }),
+    evt("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "答" } }),
+    evt("message_stop", { type: "message_stop" }),
+  ].join("");
+  // 流式：thinking 以 reasoning_content 增量下发（opencode 渲染 Thought）
+  const stream = anthropicToOpenAiStream(streamFromTexts([THINK_SSE]), { model: "GLM-5.3-Flash" });
+  const text = await readStreamText(stream);
+  const payloads = text.split("\n").filter((l) => l.startsWith("data: ")).filter((l) => !l.includes("[DONE]")).map((l) => JSON.parse(l.slice(6)));
+  const rc = payloads.flatMap((p) => [p.choices[0].delta.reasoning_content].filter(Boolean)).join("");
+  assert.equal(rc, "先想一想", "thinking 增量逐字透出");
+  // 聚合：message 带 reasoning_content + signature（上游跨轮要求原样回传）
+  const out = await aggregateAnthropicToOpenAi(THINK_SSE, { model: "GLM-5.3-Flash" });
+  assert.equal(out.error, null);
+  assert.equal(out.openAi.choices[0].message.reasoning_content, "先想一想");
+  assert.equal(out.openAi.choices[0].message.reasoning_content_signature, "sig-abc");
+});

@@ -27,7 +27,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     mark("parsed");
     if (aliasInfo) { try { res?.setHeader?.("x-mslxdff-alias", aliasInfo); } catch {} }
     // mslxdff/ 前缀或 alias 命中时，把 body.model 改写为还原后的模型（与原 gateway 语义一致）
-    const timeline = { direct: [], peers: [], retries: 0, result: null };
+    const timeline = { direct: [], peers: [], retries: 0, retryResult: null, result: null };
     if (aliasInfo && req?.body && req.body.model !== requested) {
       req.body = { ...req.body, model: requested };
     }
@@ -53,6 +53,9 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
         else timeline.peers.push({ peer: entry.peer, ok: false, status: entry.status, message: entry.message || entry.error || "" });
       }
       if (type === "empty-turn-retry") timeline.retries += 1;
+      // 空转重试必须交代结局：只记次数的话，"重试后救回来"和"重试到死"在日志里长得一模一样
+      if (type === "empty-turn-recovered") timeline.retryResult = "ok";
+      if (type === "empty-turn-exhausted") timeline.retryResult = timeline.retryResult || "lost";
       if (type === "result" || (type === "client-response" && !timeline.result)) {
         timeline.result = { status: entry.status, detail: entry.detail || null };
         try { logs?.appendTimeline?.(formatTimeline({ reqId, model: entry.model || requested, ...timeline, totalMs: Date.now() - startedAt })); } catch {}

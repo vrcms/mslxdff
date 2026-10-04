@@ -46,6 +46,12 @@ export function fmtEvent(e) {
       return `${head} upstream ok   ${m(e.model)} HTTP ${e.status}${e.timing ? ` total=${e.timing.totalMs}ms` : ""}`;
     case "upstream-error":
       return `${head} upstream err  ${m(e.model)} ${e.status ? `HTTP ${e.status}` : "network"}: ${m(e.message)}`;
+    case "empty-turn-retry":
+      return `${head} 空转重试    模型零输出 model=${m(e.model)} 第 ${e.retry || "?"}/${e.max || "?"} 次，暂停 ${e.delayMs || 0}ms 后同模型重拉${e.raiseTo ? `（max_tokens ${e.raiseFrom}→${e.raiseTo}）` : ""}${e.nudged ? "（末次已追问）" : ""} reqId=${e.reqId || ""}`;
+    case "empty-turn-recovered":
+      return `${head} 空转救回    重试成功 model=${m(e.model)} 第 ${e.retries || "?"}/${e.max || "?"} 次拿到输出，本轮多花 ${e.waitedMs || 0}ms reqId=${e.reqId || ""}`;
+    case "empty-turn-exhausted":
+      return `${head} 空转耗尽    重试无用 model=${m(e.model)} 已重试 ${e.retries || 0}/${e.max || "?"} 次仍零输出（等 ${e.waitedMs || 0}ms）→ 换候选/报错${e.reason ? ` ${String(e.reason).slice(0, 90)}` : ""} reqId=${e.reqId || ""}`;
     case "upstream-preheat":
       if (e.skipped) return `${head} preheat       跳过 (MSLXDFF_PREHEAT disabled)`;
       return `${head} preheat       预热 opencode models ${e.ok ? "ok" : "fail"} ${e.status ? `HTTP ${e.status}` : e.error || ""} ${e.ms ? `${e.ms}ms` : ""}`;

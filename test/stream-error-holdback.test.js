@@ -47,8 +47,12 @@ test("纯错误轮：错误包络暂扣，下游看不到 400 原文", async () 
   const out = res.wrote.join("");
   assert.ok(!out.includes("Failed to create stream"), "错误原文不得写下游");
   assert.ok(!out.includes("400"), "400 不得写下游");
-  assert.equal(r.detail.wroteChunks, 1, "只写出 DONE 终止帧（错误帧不计写出）");
-  assert.ok(out.includes("[DONE]"), "DONE 终止帧必须照常发出");
+  // 契约变更（ADR-0043 决定 ①）：纯错误轮不再提前发 [DONE] 把自己封口——那样客户端只能拿到一次空答案，
+  // 而重拉/换候选的正文就再也写不进这条连接。[DONE] 属「可撤销前缀」被暂扣；全部救不回来时
+  // 由收场出口补「错误帧 + [DONE]」（断言见 test/stream-empty-turn-hold.test.js 的终局用例）。
+  assert.equal(r.heldOpen, true, "零产出 + 下游活着 → 留口，而不是回一个空的 200");
+  assert.equal(r.detail.wroteChunks, 0, "错误帧与 [DONE] 都不下沉：这一发一字节都没提交");
+  assert.equal(out, "", "下游收不到任何字节（等重拉/换候选，或等终局收场）");
   assert.equal(r.detail.heldErrorChunks, 2, "两帧错误都暂扣");
   assert.ok(String(r.detail.upstreamErrorText).includes("Failed to create stream"), "摘要留 detail 供排障");
   assert.equal(r.detail.sawFinishReason, "error", "结束原因照常识别（供空转判定）");

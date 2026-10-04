@@ -2,7 +2,9 @@ import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
 import { json } from "./helpers.js";
 import { extractUsageFromSseText } from "../metrics.js";
-import { scanSseChunk, scanNonStreamBody, preflightMs } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 上报锚点偏移（纯函数）
+import { scanSseChunk, scanNonStreamBody, preflightMs, createTalkBucket, captureTalkFallback, isEmptyTurnDetail, holdableChunk, extractRetryAfterSec, isTrivialFrame } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数全在 stream-scan）
+import { talkLogEnabled } from "../talk-log.js"; // 环形对话日志开关（默认开）
+import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
 // SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
 // 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
 function chunkText(chunk) {
@@ -28,79 +30,6 @@ function hasPayload(text) {
     return true;
   }
   return false;
-}
-
-// 错误包络 chunk 判定（纯函数）：data 行 JSON 含顶层 .error 对象、或只有 finish_reason=error
-// 的空帧，且整 chunk 无任何 content/tool_calls/reasoning 输出 → 返回错误摘要（建议暂扣），
-// 否则返回 null（透传）。解析失败一律透传（默认保安全）。
-// 背景：网关把上游失败包成 HTTP 200 SSE；暂扣后下游流式 UI 不再展示瞬时错误
-//（如 Vertex 503 + google fallback 400），本轮走空转重试，客户端只看到最终结果。
-// Note: 流内错误包络捕获与 retryAfterSeconds 错误直出 — 见 .agents/notes/implemented/bug-fix/2026-09-28-retry-after-surfacing-error.md
-function extractRetryAfterSec(obj) {
-  if (!obj) return null;
-  if (typeof obj === "number") return obj;
-  if (typeof obj === "string") {
-    const m = obj.match(/"retryAfterSeconds"\s*:\s*(\d+)/i) || obj.match(/\bretryAfterSeconds\s*[:=]\s*(\d+)/i);
-    if (m) return Number(m[1]);
-    try {
-      const parsed = JSON.parse(obj);
-      return extractRetryAfterSec(parsed);
-    } catch {}
-  }
-  if (typeof obj === "object") {
-    if (Number.isFinite(obj.retryAfterSeconds)) return Number(obj.retryAfterSeconds);
-    if (obj.message) {
-      const r = extractRetryAfterSec(obj.message);
-      if (r != null) return r;
-    }
-  }
-  return null;
-}
-
-function holdableChunk(txt) {
-  if (typeof txt !== "string" || !txt.includes("data:")) return null;
-  let sawData = false;
-  let sawEventError = false;
-  let retrySec = null;
-  const errs = [];
-  for (const rawLine of txt.split("\n")) {
-    const t = rawLine.trim();
-    if (t.startsWith("event:") && t.slice(6).trim() === "error") {
-      sawEventError = true;
-      continue;
-    }
-    if (!t.startsWith("data:")) continue;
-    const d = t.slice(5).trim();
-    if (!d || d === "[DONE]") continue;
-    let j = null;
-    try { j = JSON.parse(d); } catch { return null; }
-    if (!j || typeof j !== "object") return null;
-    sawData = true;
-    const c0 = (Array.isArray(j.choices) && j.choices[0]) || {};
-    const delta = c0.delta || {};
-    const msg = c0.message || {};
-    const out = delta.content || msg.content || delta.tool_calls || msg.tool_calls || delta.reasoning || msg.reasoning;
-    if (out && !(Array.isArray(out) && out.length === 0)) return null;
-
-    const r = extractRetryAfterSec(j);
-    if (r != null) {
-      retrySec = r;
-      continue;
-    }
-    if (j.error && typeof j.error === "object") {
-      const m = j.error.message || j.error.code || "";
-      if (m) errs.push(String(m).slice(0, 300));
-    } else if (sawEventError && j.message) {
-      errs.push(String(j.message).slice(0, 300));
-    } else if (c0.finish_reason === "error") {
-      errs.push("finish_reason=error 空帧");
-    }
-  }
-  if (!sawData) return null;
-  if (retrySec != null) return `上游供应商触发 retryAfterSeconds: ${retrySec} ，请等候重试`;
-  if (errs.length) return errs.join(" | ");
-  if (sawEventError) return "event: error 空帧";
-  return null;
 }
 
 // 自持 reader 优先：for-await 会锁定 ReadableStream，使 body.cancel() 必 reject（真流上等于空操作），
@@ -156,23 +85,29 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const contentType = upRes.headers.get("content-type") || "";
   // 需同时满足：客户端要流 + 上游真的是 SSE；避免 muse-spark 聚合 JSON 被误判为流式，或 workbuddy SSE 被聚合
   const isStream = Boolean(body?.stream) && contentType.includes("text/event-stream");
-  res.statusCode = upRes.status;
-  // propagate workbuddy uid / allowlist headers
-  try {
-    const uid = upRes.headers.get("x-mslxdff-workbuddy-uid");
-    if (uid) res.setHeader("x-mslxdff-workbuddy-uid", uid);
-    const reason = upRes.headers.get("x-mslxdff-workbuddy-reason");
-    if (reason) res.setHeader("x-mslxdff-workbuddy-reason", reason);
-    const allow = upRes.headers.get("x-mslxdff-allowlist");
-    if (allow) res.setHeader("x-mslxdff-allowlist", allow);
-    const engine = upRes.headers.get("x-mslxdff-upstream-engine");
-    if (engine) res.setHeader("x-mslxdff-upstream-engine", engine);
-  } catch {}
-  if (fallback) applyFallbackHeaders(res, fallback);
+  // 重入同一条连接（空轮留口后同模型重拉 / 换候选）时 headers 可能已 flush（前一发发过 keepalive 注释帧）：
+  // 此时 statusCode 与自定义头都不可再设，否则 setHeader 抛 ERR_HTTP_HEADERS_SENT，重拉直接炸在半路
+  if (!res.headersSent) {
+    res.statusCode = upRes.status;
+    // propagate workbuddy uid / allowlist headers
+    try {
+      const uid = upRes.headers.get("x-mslxdff-workbuddy-uid");
+      if (uid) res.setHeader("x-mslxdff-workbuddy-uid", uid);
+      const reason = upRes.headers.get("x-mslxdff-workbuddy-reason");
+      if (reason) res.setHeader("x-mslxdff-workbuddy-reason", reason);
+      const allow = upRes.headers.get("x-mslxdff-allowlist");
+      if (allow) res.setHeader("x-mslxdff-allowlist", allow);
+      const engine = upRes.headers.get("x-mslxdff-upstream-engine");
+      if (engine) res.setHeader("x-mslxdff-upstream-engine", engine);
+    } catch {}
+    if (fallback) applyFallbackHeaders(res, fallback);
+  }
 
   let ttf = null;
   let interrupted = false;
   let finishedNormally = false;
+  let commitPendingPrefix = () => {};
+  let flushHeldTail = () => {}; // 把暂扣的 [DONE] 补写出去（错误帧必须能先站在它前面）
   const detail = {
     receivedChunks: 0,
     receivedBytes: 0,
@@ -192,9 +127,11 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     reasoningChars: 0, // 思考内容字符数（与 chars 分列，相加会重复计数）
     toolCalls: 0,
     chatShaped: false,
+    talk: talkLogEnabled() ? createTalkBucket() : null, // 环形对话日志正文桶（关闭时为 null，零开销）
     heldErrorChunks: 0,
     upstreamErrorText: null,
     recoveries: 0,
+    wrotePayload: false, // 是否已向下游写出真实数据帧（注释帧不算）：决定空转还能不能靠重试救
   };
   let prevChunkAt = t0;
   // 断下游即掐上游：流式分支装配真实取消，非流式保持 no-op
@@ -207,6 +144,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     }
   };
   res.on("close", onClose);
+  // 入口即已断开/已收场：先落账，否则这一发会把留口当成「下游还活着」，重拉写给消失的读者
+  if (res.writableEnded || res.destroyed) detail.downstreamClosed = true;
 
   if (isStream) {
     // failover 重入时 headers 可能已发（前一个候选只发过 keepalive 注释帧就被掐）——已发则不可再设
@@ -227,6 +166,12 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       let first = true;
       let wroteAny = false;
       let wrotePayload = false; // 真实数据帧（注释帧不算）：决定能否安全 failover
+      const revocableHold = holdEndEnabled(); // HOLD_END=0 时连缓冲都不做（逐字节复现旧行为，含时机）
+      // 可撤销前缀缓冲（策略见 stream-hold.js）：模型产出出现前，空 delta 帧与 [DONE] 先不入下游，
+      // 这样同模型重拉 / 换候选的正文还能顺着同一条连接送出去；上限兜底防异常形状囤内存。
+      const prefix = createRevocablePrefix(res, detail);
+      commitPendingPrefix = () => prefix.commit();
+      flushHeldTail = () => prefix.flushTail();
       let timedOut = false;
       let stalled = false;
       let tooLong = false;
@@ -292,7 +237,11 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             if (!detail.upstreamErrorText) detail.upstreamErrorText = String(holdErr).slice(0, 500);
           }
           const isPayload = hasPayload(txt);
+          const prevChars = detail.chars, prevTools = detail.toolCalls, prevReason = detail.reasoningChars;
           scanSseChunk(detail, txt);
+          // 「模型产出」＝正文/工具调用/思考三者本轮有新增。思考也算：已发出的思考撤不回，
+          // 从它出现的那刻起这次尝试就提交了（现网空轮多数正是「思考刷满、正文为零」）。
+          const gained = Number(detail.chars) > prevChars || Number(detail.toolCalls) > prevTools || Number(detail.reasoningChars) > prevReason;
           // 首块/空闲超时后上游仍吐出了真实数据 → 只是慢，不是死：撤销超时判定，照常转发
           //（cancel 是异步的，竞态窗口内已到达的数据是纯收益；丢掉是纯损失）
           // 注释帧（keepalive）不算：否则对端只要在发心跳，闸门就永远解除
@@ -324,11 +273,24 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             } catch {}
           }
           if (!holdErr) {
-            wroteAny = true;
-            if (isPayload) wrotePayload = true;
-            detail.wroteChunks += 1;
-            detail.wroteBytes += Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
-            try { res.write(outChunk); } catch { /* 下游已断开：onClose 已掐上游 */ }
+            const size = Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
+            if (!isPayload) {
+              // 注释帧等非数据帧：与改前一致直写（客户端视作噪声，不影响可撤销性）
+              wroteAny = true;
+              prefix.writeNow(outChunk, size);
+            } else if (gained || !revocableHold || !isTrivialFrame(txt)) {
+              // 有模型产出（正文/工具/思考）、留口已关、或看不懂的异形帧：按序补写暂扣前缀 + 本帧，
+              // 这条流就此提交不可撤销（透传契约要求解析失败的帧必须原样走，绝不为救空轮扣下）
+              wroteAny = true;
+              wrotePayload = true; detail.wrotePayload = true;
+              prefix.submit(outChunk, size);
+            } else if (!prefix.hold(outChunk, size, txt.includes("[DONE]"))) {
+              // 可撤销前缀：空 delta 暂扣（判为空轮时整段撤销，留给重拉的正文）；
+              // [DONE] 无论是否已提交都进 tail 槽 —— 错误帧必须能排在它前面，否则客户端一见 [DONE] 就收尾
+              wroteAny = true;
+              wrotePayload = true; detail.wrotePayload = true;
+              prefix.submit(outChunk, size); // 暂扣超上限（异常形状）→ 被迫提交，退回旧行为
+            }
           }
           armStall();
         }
@@ -353,7 +315,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       if ((stalled || tooLong) && wrotePayload) {
         interrupted = true;
         detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
-        res.removeListener("close", onClose);
+        flushHeldTail(); // 断流收场也要把 [DONE] 按序补上，别让客户端等一个不存在的终止符
         try { res.end(); } catch { /* ignore */ }
         return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, preflightMs: preflight, detail };
       }
@@ -363,9 +325,30 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     const totalMs = Math.round(performance.now() - t0);
     if (!detail.exitReason) detail.exitReason = "normal";
     finishedNormally = true;
-    res.removeListener("close", onClose);
-    try { res.end(); } catch { /* ignore */ }
-    return { status: 200, timedOut: false, ttfMs: ttf, totalMs, aborted: false, interrupted: false, preflightMs: preflight, detail };
+    // 留口期间不摘 close 监听（close 只发一次，摘了客户端窗口内断开就永久盲窗、照烧额度）
+    const heldOpen = holdEndEnabled() && detail.wrotePayload !== true && !detail.downstreamClosed && isEmptyTurnDetail(detail);
+    if (!heldOpen) res.removeListener("close", onClose);
+    let terminalForm = null;
+    if (heldOpen) {
+      detail.exitReason = "empty-turn-hold";
+    } else {
+      if (!detail.downstreamClosed) {
+        commitPendingPrefix(); // 不留口 = 补写暂扣前缀（HOLD_END=0 时逐字节复现改前行为）
+        // 思考刷满 max_tokens、正文为零（现网主流）：思考撤不回，错误帧必须排在 [DONE] 之前才看得见
+        const reasoningOnly = Number(detail.chars) === 0 && Number(detail.toolCalls) === 0 && Number(detail.reasoningChars) > 0;
+        if (reasoningOnly && holdEndEnabled()) {
+          detail.exitReason = "reasoning-only";
+          terminalForm = "sse-error-tail";
+          endEmptyTurnStream(res, `EMPTY_MODEL_RESPONSE: 只产出思考 ${detail.reasoningChars} 字、正文为零（额度被思考吃满），已重试仍无正文 — raise max_tokens or rephrase`, () => flushHeldTail());
+        } else {
+          flushHeldTail(); // 没有错误帧要插队，[DONE] 按原序发出
+          try { res.end(); } catch { /* ignore */ }
+        }
+      } else {
+        try { res.end(); } catch { /* ignore */ }
+      }
+    }
+    return { status: 200, timedOut: false, ttfMs: ttf, totalMs, aborted: false, interrupted: false, heldOpen, terminalForm, preflightMs: preflight, detail };
   }
 
   finishedNormally = true;
@@ -373,21 +356,31 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const text = await upRes.text();
   detail.receivedBytes = Buffer.byteLength(text);
   detail.exitReason = "normal-non-stream";
-  // 非流式 usage 与 chars 提取（口径与流式分支共用 metrics.js）
+  // 非流式同样「先判后写」：此刻 headers 还没 flush，body 一写下去就再无退路。
+  let enriched = null;
   try {
     const parsed = JSON.parse(text);
     scanNonStreamBody(detail, parsed);
-    const enriched = enrichNonStreamJson(parsed, fallback);
-    json(res, upRes.status, enriched);
-  } catch {
-    res.statusCode = upRes.status;
-    res.setHeader("Content-Type", contentType || "text/plain");
-    res.end(text);
+    enriched = enrichNonStreamJson(parsed, fallback);
+  } catch { /* 上游给的不是可解析 JSON：走下面的原文透传 */ }
+  if (enriched === null) {
     // 纯文本时按长度估 chars；若文本其实是 SSE（client 未要流但上游给流）仍尝试提 usage
     try { detail.chars = text.length; } catch {}
     try { const u = extractUsageFromSseText(text); if (u) detail.usage = u; } catch {}
+    try { if (detail.talk) captureTalkFallback(detail.talk, text); } catch {}
+  } else if (holdEndEnabled() && !detail.downstreamClosed && isEmptyTurnDetail(detail)) {
+    detail.exitReason = "empty-turn-hold";
+    return { status: upRes.status, timedOut: false, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted: false, heldOpen: true, preflightMs: preflight, detail };
+  }
+  detail.wrotePayload = true; // 真写下去了：从此撤不回，也不再判空轮
+  const nsTotalMs = Math.round(performance.now() - t0);
+  if (enriched !== null) {
+    json(res, upRes.status, enriched);
+  } else {
+    res.statusCode = upRes.status;
+    res.setHeader("Content-Type", contentType || "text/plain");
+    res.end(text);
   }
   // 非流式 ttf 视为 total（一次性返回）
-  const totalMs = Math.round(performance.now() - t0);
-  return { status: upRes.status, timedOut: false, ttfMs: totalMs, totalMs, aborted: false, interrupted: false, preflightMs: preflight, detail };
+  return { status: upRes.status, timedOut: false, ttfMs: nsTotalMs, totalMs: nsTotalMs, aborted: false, interrupted: false, heldOpen: false, preflightMs: preflight, detail };
 }

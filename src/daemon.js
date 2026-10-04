@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFil
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
 
 export function daemonDir() {
   return process.env.MSLXDFF_DAEMON_DIR || join(os.homedir(), ".config", "mslxdff");
@@ -73,15 +74,19 @@ export function isPidAlive(pid) {
   }
 }
 
-export function stopDaemon() {
+export function stopDaemon({ reason = "stop" } = {}) {
   const pid = readPid();
   if (!pid) return { stopped: false, reason: "no pid file" };
+  // 杀者牌（验尸官的另一半证据）：动手前写、自带死者身份。只给在世者留牌——给尸体留牌
+  // 会让下次验尸把"早已静默死亡"误判成"被本次杀死"。
+  const victimAlive = isPidAlive(pid);
   // 杀者留痕（写 daemon.log）：Windows 的 SIGTERM 是 TerminateProcess 强杀，被杀的 daemon
   // 在 JS 层收不到任何事件（无法自记），故由"杀者"记录调用方 pid——
   // 没有这行 = 非我方所杀（外部 taskkill/任务管理器/崩溃），配合最后一条 heartbeat 定位死亡时刻。
   try {
     appendFileSync(logFile(), `[lifecycle] stopDaemon called by pid=${process.pid} — killing daemon pid=${pid}\n`);
   } catch {}
+  if (victimAlive) { try { writeExitMarker(daemonDir(), { reason, prevPid: pid, prevVersion: readPidVersion(), byPid: process.pid }); } catch {} }
   try {
     process.kill(pid, "SIGTERM");
   } catch (err) {
@@ -92,5 +97,5 @@ export function stopDaemon() {
   } catch {
     // already gone
   }
-  return { stopped: true, pid };
+  return { stopped: true, pid, stale: !victimAlive };
 }

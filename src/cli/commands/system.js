@@ -58,7 +58,7 @@ export async function handleUpdate(args, VERSION) {
   const daemon = readPid();
   if (daemon) {
     console.log("restarting daemon on the new version…");
-    stopDaemon();
+    stopDaemon({ reason: "restart" });
     startDaemon([]);
     await waitForHealth(resolvePort(), 4000);
     console.log(`restarted (pid ${readPid()})`);
@@ -82,7 +82,7 @@ export async function handleShowToken(args) {
 
 export async function handleUninstall(args) {
   if (!(args.includes("-uninstall") || args.includes("--uninstall"))) return false;
-  const { stopped, pid } = stopDaemon();
+  const { stopped, pid } = stopDaemon({ reason: "uninstall" });
   if (stopped) console.log(`mslxdff daemon stopped (pid ${pid})`);
   else console.log("mslxdff daemon not running");
   const stateFile = defaultStateFile();

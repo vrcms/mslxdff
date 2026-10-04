@@ -1304,8 +1304,13 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS` | `120000` | 末位/唯一候选与借道（via-route）的耐心档：首块未到才放弃（`0`=不限，慢上游可调大） |
 | `MSLXDFF_SDK_HEADERS_TIMEOUT_MS` | `120000` (2m) | AI SDK 通道 headers 超时：`doStream` 到点仍未返回响应头即判挂死并抛错（由调用方回退/换路；`0`=关闭）；防上游连接半死导致请求永不返回，**错误文案不含 "timed out"**（否则 cline runChat 会按文案重试 3 次放大挂死） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
-| `MSLXDFF_EMPTY_TURN_RETRIES` | `2` | 空转 200（模型无输出）同模型自动重试次数（`0`=关闭回旧行为；仅 `EMPTY_MODEL_RESPONSE`，429/403/500 与 fetch 异常不重试） |
-| `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `1000` | 空转重试前暂停 ms（给上游 1s 喘息再重拉同模型） |
+ | `MSLXDFF_EMPTY_TURN_RETRIES` | 跟随阶梯档数（默认 `3`） | 空转 200（模型零正文）同模型自动重试次数（`0`=关闭回旧行为；仅 `EMPTY_MODEL_RESPONSE`，429/403/500 与 fetch 异常不重试）。结局事件必留痕：`empty-turn-retry`（暂停重拉，带 `step/delayMs/waitedMs`）/`empty-turn-recovered`（救回）/`empty-turn-exhausted`（用尽） |
+ | `MSLXDFF_EMPTY_TURN_RETRY_STEPS` | `[2000,8000,30000]` | **空转重试阶梯**（JSON 数组，单位 ms）：第 N 次重拉按第 N 档暂停，超出档数取模复用。默认 2s→8s→30s 是给差网/限流用的（实测固定 2s 撞 `retryAfterSeconds=30` 会连空到死）；上游报了 `retryAfterSeconds` 时本次等待自动抬到不低于该窗口；非法值每进程告警一次并回落默认阶梯（绝不因手滑把重试清零）；显式 `[]`=逃生阀，回退旧式固定延迟 |
+ | `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `2000` | 旧式固定延迟档，**仅当 `MSLXDFF_EMPTY_TURN_RETRY_STEPS=[]` 时生效**（回退路径；阶梯模式下由 STEPS 接管） |
+ | `MSLXDFF_EMPTY_TURN_RAISE_TOKENS` | `16384` | 空转重试前把 `max_tokens`/`max_completion_tokens` 翻倍抬到的上限（思考刷满额度致零正文是主因，同参重拉必复现；`0`=关闭抬额；事件带 `raiseFrom/raiseTo` 可查） |
+ | `MSLXDFF_EMPTY_TURN_MIN_RAISE_TO` | `16384` | **客户端没设额度时的兜底**：空转重试给请求发明一次 `max_tokens`（现网主流空轮正是「思考吃满 max_tokens、正文为零」，客户端不设额度时同参重拉必然复现）；`0`=关，回旧口径「绝不替客户端发明上限」 |
+ | `MSLXDFF_EMPTY_TURN_HOLD_END` | 开 | **空轮留口**（默认开）：一次尝试在「出现任何模型产出」前写下去的只有空 delta 帧与 `[DONE]`（可撤销前缀），先暂扣不写、流结束也不 `res.end()`，把这次尝试交回同模型重拉/换候选——让后面那发的正文还能顺着同一条连接送出去。**`0`/`off`/`false`=关**：立即补写前缀并封口，逐字节复现旧行为（代价：之后的重拉写的是一次已终结的响应，只省额度、救不回正文）；「思考已刷出、正文为零」撤不回，故不留口，改在流尾补一帧 `EMPTY_MODEL_RESPONSE` SSE 错误 + `[DONE]`，客户端不再看到莫名空白 |
+ | `MSLXDFF_EMPTY_TURN_BUDGET_MS` | `45000` | **请求级**空轮等待预算（跨所有候选累计，非每候选各一份）：到点即停止重拉开新发，按终局收场返回。防「N 个候选 × 整条阶梯」把一次请求吊在 N×40s 的白等里 |
 | `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |
 | `MSLXDFF_MODELS_DEV_TTL_MS` | `86400000` (24h) | 能力目录缓存 TTL（过期重拉；`0`=每请求拉） |
 | `MSLXDFF_MODELS_DEV_CACHE` | `~/.config/mslxdff/models-dev.json` | 能力目录磁盘缓存路径（fetch 失败回退旧缓存） |

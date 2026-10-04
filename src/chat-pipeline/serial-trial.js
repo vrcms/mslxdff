@@ -12,19 +12,9 @@ import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhaust
 import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from "../state/schemas/use-group.js";
 import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
+import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// 空转重试档位（每次请求读取 env，单测可覆盖）：默认同模型最多重试 2 次、间隔 1s；
-// MSLXDFF_EMPTY_TURN_RETRIES=0 关闭（回旧行为：空转直接换候选/终结）。
-function emptyRetryCfg() {
-  const r = Number(process.env.MSLXDFF_EMPTY_TURN_RETRIES);
-  const d = Number(process.env.MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS);
-  return {
-    max: Number.isInteger(r) && r >= 0 ? r : 2,
-    delayMs: Number.isFinite(d) && d >= 0 ? d : 1000,
-  };
-}
 
 function groupSkipReason(model) {
   if (isHardLocalOnly(model)) return "provider local-only（禁组员，仅本机直连）";
@@ -69,6 +59,8 @@ export async function runSerialTrial(ctx, deps = {}) {
   }
 
   let lastErr = viaRouteLastErr;
+  // 请求级空轮等待累计（跨候选）：阶梯是「每发候选」各算的，不设顶就会 N×(2+8+30) 把客户端吊在门外
+  let requestWaitedMs = 0;
   candidate: for (let idx = 0; idx < order.length; idx++) {
     const model = order[idx];
     handlerCtx.model = model;
@@ -94,10 +86,13 @@ export async function runSerialTrial(ctx, deps = {}) {
     // reqId = 本次客户端请求的身份：供应商据此"同请求粘号"（重试不换号，只有 401/403/429/5xx 冷却才换）
     if (reqId) chatOpts.reqId = reqId;
     const chatOptsArg = Object.keys(chatOpts).length ? chatOpts : undefined;
-    // 空转 200（模型无输出）同模型暂停重试：默认 2 次、间隔 1s；仅 EMPTY_MODEL_RESPONSE，
+    // 空转 200（模型无输出）同模型暂停重试：默认 3 次、阶梯 [2s,8s,30s]；仅 EMPTY_MODEL_RESPONSE，
     // 429/403/500 与 fetch 异常走原有切号/failover（防烧额度）。MSLXDFF_EMPTY_TURN_RETRIES=0 关闭。
     const emptyCfg = emptyRetryCfg();
+    const raiseCap = emptyRaiseCap();
+    const nudgeCfg = emptyNudgeCfg();
     let emptyRetried = 0;
+    let emptyWaitedMs = 0;
     for (;;) {
       const tUp = performance.now();
       evt("upstream-try", { reqId, model, attempt: idx + 1, emptyRetry: emptyRetried, payload: summarizeRequest(forwarded) });
@@ -169,13 +164,52 @@ export async function runSerialTrial(ctx, deps = {}) {
         }
         if (upRes) {
           const lr = await localRelay({ upRes, model, body, order, idx, lastErr, requested, useAuto, lockModel, auto, handlerCtx, evt, logCall, logError, mark, perf0, attemptStartMs: tUp, stages, startedAt, plugins, res });
-          if (lr.handled) return { done: true };
-          if (lr.lastErr && isEmptyTurnError(lr.lastErr) && emptyRetried < emptyCfg.max) {
-            emptyRetried++;
-            // 带上"刚空转的是哪个号/哪个站"：切号是重试驱动的，日志必须能自证
-            evt("empty-turn-retry", { reqId, model, retry: emptyRetried, max: emptyCfg.max, delayMs: emptyCfg.delayMs, ...upstreamEcho(upRes) });
-            await sleep(emptyCfg.delayMs);
-            continue;
+          if (lr.handled) {
+            // 空转重试后真拿到输出 = 降级但成功（WARN 语义）：必须交代"第几次救回来的、白等了多久"，
+            // 否则用户只看到"这一发变慢了"，无从判断是重试在兜底还是上游真的死了。
+            // 「救回」必须有送达证据：handled:true 也可能来自下游已断开/零输出路径（见 ADR-0043），
+            // 只认 relay 报上来的 wrotePayload —— 没有正文到下游就不许记成功，否则日志在骗排障的人。
+            if (emptyRetried > 0 && lr.wrotePayload === true) {
+              evt("empty-turn-recovered", { reqId, model, retries: emptyRetried, max: emptyCfg.max, waitedMs: emptyWaitedMs, ...upstreamEcho(upRes) });
+            }
+            return { done: true };
+          }
+          if (lr.lastErr && isEmptyTurnError(lr.lastErr)) {
+            // 空转判据原文（finish_reason / 零正文 / 上游错误摘要）随事件落盘，排障不必再翻第二个文件
+            const _why = String(lr.lastErr.message || "").replace(/\s+/g, " ").trim().slice(0, 220);
+            const budgetMs = emptyTurnBudgetMs();
+            const budgetLeftMs = budgetMs - requestWaitedMs;
+            if (emptyRetried < emptyCfg.max && budgetLeftMs > 0) {
+              // 口径（用户定）：正文为空就重试，最多 emptyCfg.max 次——不设"能不能送达"的前提，
+              // 大不了两次都空，反正不是无限重试。抬额度只加不减且有顶（默认 16384）：
+              // 思考刷满 max_tokens 是零正文的主因，同参重拉必然复现，抬一次才算换了打法。
+              emptyRetried++;
+              const _before = Number(forwarded.max_tokens ?? forwarded.max_completion_tokens) || null;
+              // 客户端没设额度也兜底发明一次：现网主流空轮就是「思考吃满 max_tokens、正文为零」，同参重拉必复现
+              const _raised = withRaisedMaxTokens(forwarded, raiseCap, emptyTurnMinRaiseTo());
+              let _after = null;
+              if (_raised !== forwarded) { forwarded = _raised; _after = Number(forwarded.max_tokens ?? forwarded.max_completion_tokens); }
+              const _isLast = emptyRetried >= emptyCfg.max;
+              let _nudged = false;
+              if (nudgeCfg.enabled && _isLast) {
+                const _next = withEmptyNudge(forwarded, nudgeCfg.text);
+                if (_next !== forwarded) { forwarded = _next; _nudged = true; }
+              }
+              // 事件在 sleep **之前**发：对着日志能立刻看到"正在暂停 Nms 重拉"，而不是等结果
+              // 带上"刚空转的是哪个号/哪个站"：切号是重试驱动的，日志必须能自证
+              const stepIdx = emptyCfg.steps ? (emptyRetried - 1) % emptyCfg.steps.length : 0;
+              const rawDelayMs = computeNextDelay(emptyRetried - 1, emptyCfg.steps, lr.lastErr);
+              const delayMs = Math.min(rawDelayMs, budgetLeftMs); // 末次等待不越过请求级预算
+              emptyWaitedMs += delayMs;
+              requestWaitedMs += delayMs;
+              evt("empty-turn-retry", { reqId, model, retry: emptyRetried, step: stepIdx, max: emptyCfg.max, delayMs, waitedMs: emptyWaitedMs, requestWaitedMs, budgetMs, nudged: _nudged ? 1 : undefined, raiseFrom: _after != null ? _before : undefined, raiseTo: _after ?? undefined, reason: _why, ...upstreamEcho(upRes) });
+              await sleep(delayMs);
+              continue;
+            }
+            // 次数用尽（或被 MSLXDFF_EMPTY_TURN_RETRIES=0 关掉）→ 记一行"不再重试"再交回 failover
+            const _budgetOut = emptyRetried < emptyCfg.max && emptyTurnBudgetMs() - requestWaitedMs <= 0;
+            evt("empty-turn-exhausted", { reqId, model, retries: emptyRetried, max: emptyCfg.max, waitedMs: emptyWaitedMs, requestWaitedMs, budgetMs: emptyTurnBudgetMs(), budgetOut: _budgetOut ? 1 : undefined, reason: _why, ...upstreamEcho(upRes) });
+            try { logError(model, 502, `空转重试 ${emptyRetried}/${emptyCfg.max} 后仍无输出${emptyCfg.max === 0 ? "（MSLXDFF_EMPTY_TURN_RETRIES=0 已关闭重试）" : _budgetOut ? `（请求级等待预算 ${emptyTurnBudgetMs()}ms 用尽）` : ""}：${_why}`); } catch {}
           }
           if (lr.lastErr) { lastErr = lr.lastErr; continue candidate; }
           return { done: true };
