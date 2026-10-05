@@ -78,7 +78,7 @@ const DECISION_FIELDS = [
   "winPeer", "winTarget", "peer", "peers", "peerLabel", "routeBest", "at",
   "latencyMs", "ttfMs", "hedged", "hops", "hasShare", "elapsedMs", "threshold",
   "stallHits", "maxGapMs", "interrupted", "providers", "via",
-  "retry", "step", "max", "delayMs", "upstream", "account", "pick", "cooled", "nudged", "retries", "waitedMs", "raiseFrom", "raiseTo",
+  "retry", "step", "max", "delayMs", "upstream", "account", "pick", "cooled", "queued", "nudged", "retries", "waitedMs", "raiseFrom", "raiseTo",
   "heldOpen", "terminalForm", "requestWaitedMs", "budgetMs", "budgetOut",
 ];
 
@@ -92,7 +92,7 @@ function decisionKv(data = {}) {
   return out.join(" ");
 }
 
-// provider 回显头 → 日志字段（谁上的 / 打哪个站 / 为什么选它 / 是否被冷却）：
+// provider 回显头 → 日志字段（谁上的 / 打哪个站 / 为什么选它 / 是否被冷却 / 是否被判排队）：
 // 单一来源，防各处重复写法漂移；取不到时返回空对象（其它供应商零变化）。
 export function upstreamEcho(res) {
   const h = res?.headers;
@@ -103,6 +103,7 @@ export function upstreamEcho(res) {
     account: pick("x-mslxdff-workbuddy-uid") || pick("x-mslxdff-qoder-region"),
     pick: pick("x-mslxdff-qoder-account"),
     cooled: pick("x-mslxdff-qoder-cooldown"),
+    queued: pick("x-mslxdff-qoder-queued"),
   };
 }
 
@@ -115,7 +116,7 @@ export function formatModelTrace({ type, reqId, model, data = {}, request = null
   else if (type === "alias") detail = `rawModel=${data.rawModel || "-"} requested=${data.requested || model || "-"}`;
   else if (type === "exhausted-local" || type === "exhausted-all") detail = `last=${data.lastModel || model || "-"} status=${data.lastStatus ?? "-"} order=${(data.order || []).join(" | ")}`;
   else if (type === "upstream-try") detail = `target=${data.model || model || "-"} attempt=${data.attempt ?? "-"} payload=${kv(data.payload || {})}`;
-  else if (type === "upstream-done" || type === "upstream-error") detail = `upstream status=${data.status ?? "-"} timing=${data.timing?.totalMs ?? "-"}ms${data.upstream ? ` via=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.cooled ? ` cooled=${data.cooled}` : ""} ${safeText(data.message || data.error || "")}`;
+  else if (type === "upstream-done" || type === "upstream-error") detail = `upstream status=${data.status ?? "-"} timing=${data.timing?.totalMs ?? "-"}ms${data.upstream ? ` via=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.cooled ? ` cooled=${data.cooled}` : ""}${data.queued ? ` queued=1` : ""} ${safeText(data.message || data.error || "")}`;
   else if (type === "empty-turn-retry") detail = `空转重试：retry ${data.retry ?? "-"}/${data.max ?? "-"}${data.step != null ? ` step=${data.step}` : ""} delay=${data.delayMs ?? "-"}ms${data.waitedMs ? ` waited=${data.waitedMs}ms` : ""}${data.requestWaitedMs != null ? ` 请求级累计=${data.requestWaitedMs}ms/预算${data.budgetMs ?? "-"}ms` : ""}${data.raiseTo ? ` max_tokens ${data.raiseFrom}→${data.raiseTo}` : ""}${data.upstream ? ` after=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.nudged ? ` nudged=1` : ""} reason=empty turn${data.reason ? ` :: ${safeText(data.reason, 120)}` : ""}`;
   else if (type === "empty-turn-recovered") detail = `空转重试成功：第 ${data.retries ?? "-"}/${data.max ?? "-"} 次重拉拿到真实输出，本轮共白等 ${data.waitedMs ?? "-"}ms${data.upstream ? ` via=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
   else if (type === "empty-turn-exhausted") detail = `空转重试已用尽：重试 ${data.retries ?? 0}/${data.max ?? "-"} 次仍零输出（累计等待 ${data.waitedMs ?? 0}ms${data.budgetOut ? `，请求级等待预算 ${data.budgetMs ?? "-"}ms 用尽` : ""}），交回换候选${data.heldOpen ? "（响应仍开着，换过去的正文还能送达）" : "（响应已封口，重拉只为省额度）"}${data.upstream ? ` after=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.reason ? ` :: ${safeText(data.reason, 120)}` : ""}`;

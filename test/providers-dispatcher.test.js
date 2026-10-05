@@ -161,34 +161,49 @@ test("dispatcher uses chatWithKeys when shareKeys hit the provider (no local key
   } finally { await d.close(); if (prev) process.env.MSLXDFF_STATE_FILE = prev; else delete process.env.MSLXDFF_STATE_FILE; }
 });
 
-test("dispatcher preheat calls only the default provider (opencode)", async () => {
-  const calls = [];
-  const mk = (id) => ({
-    id,
-    preheat: async () => { calls.push(id); return { ok: true, status: 200, ms: 1 }; },
-    listModels: async () => [],
-    chat: async () => new Response(""),
-  });
-  const d = createProviderDispatcher([mk("opencode"), mk("workbuddy"), mk("cline"), mk("aihubmix")]);
-  const r = await d.preheat();
-  assert.deepEqual(calls, ["opencode"], "only the default provider may be preheated");
-  assert.equal(r.ok, true);
-  assert.equal(r.status, 200);
-});
+ test("dispatcher preheat warms custom providers + opencode, skips generic", async () => {
+   const calls = [];
+   const mk = (id) => ({
+     id,
+     preheat: async () => { calls.push(id); return { ok: true, status: 200, ms: 1 }; },
+     listModels: async () => [],
+     chat: async () => new Response(""),
+   });
+   const d = createProviderDispatcher([mk("opencode"), mk("workbuddy"), mk("cline"), mk("qoder"), mk("openrouter"), mk("aihubmix")]);
+   const r = await d.preheat();
+   assert.deepEqual([...calls].sort(), ["cline", "opencode", "qoder", "workbuddy"], "custom registry + opencode preheated, generic skipped");
+   assert.equal(r.ok, true);
+   assert.equal(r.okCount, 4);
+   assert.equal(r.total, 4);
+ });
 
-test("dispatcher preheat degrades safely when default provider missing", async () => {
-  const calls = [];
-  const mk = (id) => ({
-    id,
-    preheat: async () => { calls.push(id); return { ok: true }; },
-    listModels: async () => [],
-    chat: async () => new Response(""),
-  });
-  const d = createProviderDispatcher([mk("workbuddy"), mk("cline")]);
-  const r = await d.preheat();
-  assert.deepEqual(calls, [], "non-default providers must not be preheated");
-  assert.equal(r.skipped, true);
-});
+ test("dispatcher preheat degrades safely when no warmable provider present", async () => {
+   const calls = [];
+   const mk = (id) => ({
+     id,
+     preheat: async () => { calls.push(id); return { ok: true }; },
+     listModels: async () => [],
+     chat: async () => new Response(""),
+   });
+   const d = createProviderDispatcher([mk("openrouter"), mk("aihubmix")]);
+   const r = await d.preheat();
+   assert.deepEqual(calls, [], "generic providers must not be preheated");
+   assert.equal(r.skipped, true);
+ });
+
+ test("dispatcher preheat isolates single-provider failure", async () => {
+   const mk = (id, fail) => ({
+     id,
+     preheat: async () => { if (fail) throw new Error("boom"); return { ok: true }; },
+     listModels: async () => [],
+     chat: async () => new Response(""),
+   });
+   const d = createProviderDispatcher([mk("opencode", false), mk("cline", true)]);
+   const r = await d.preheat();
+   assert.equal(r.ok, true);
+   assert.equal(r.okCount, 1);
+   assert.equal(r.total, 2);
+ });
 
 test("dispatcher ignores shareKeys for providers that opt out (chatWithKeys absent)", async () => {
   const d = createProviderDispatcher([

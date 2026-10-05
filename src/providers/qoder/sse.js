@@ -18,7 +18,11 @@ export function extractDelta(dataLine) {
     // 当普通 403；显式扫各层信号才能可靠命中（排队 10605 无 110 信号，天然不误判）。
     const quota = findQuotaSignal(wrapper);
     if (quota) return { err: { kind: "quota", status: 429, detail: quota.slice(0, 300) } };
-    return { err: { kind: "upstream", status: Number(wrapper.statusCodeValue) || 502, detail } };
+    // 排队与额度共用 10605 容器 → 判序必须「先额度、后排队」。命中排队只在既有 upstream 上挂旗标，
+    // 不新增 kind：errorStatus 与流内 error 的 type 字段一律不变（对外契约零改动），
+    // 门面据 x-mslxdff-qoder-queued 走队列档冷却 + 同请求换号。
+    const queued = findQueueSignal(wrapper);
+    return { err: { kind: "upstream", status: Number(wrapper.statusCodeValue) || 502, detail, ...(queued ? { queued: true, code: queued.code } : {}) } };
   }
   const inner = wrapper.body;
   if (!inner || typeof inner !== "string") {
@@ -70,6 +74,8 @@ export function isQuotaError(code, message) {
 // 显式额度信号扫描：信封各层里找 code 110 / Billing 明确措辞。
 // 限深 4 层（实测 3 层足够，留一层余量），字符串层自动尝试 JSON.parse 后继续下钻。
 // 排队 10605（isQueued/serviceAvailable）无 110 信号 → 返回 null，天然不误判为额度。
+// 排队容器码（实测与额度错共用同一容器：外层 403 → code 10605 → 内层才分额度/排队）
+const QUEUE_CODE = "10605";
 const MAX_ENVELOPE_DEPTH = 4;
 export function findQuotaSignal(value, depth = 0) {
   if (value == null || depth > MAX_ENVELOPE_DEPTH) return null;
@@ -87,6 +93,38 @@ export function findQuotaSignal(value, depth = 0) {
   if (isQuotaError(value.code, value.message)) return String(value.message || value.code || "");
   for (const v of Object.values(value)) {
     const hit = findQuotaSignal(v, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** 排队识别（与额度共用 10605 容器 → 判序必须先额度、后排队的纯函数）：
+ *  命中条件 = 容器码 10605，或内层显式 isQueued:true / serviceAvailable:false。
+ *  实测形态：403 信封 → code 10605 → message 里带 isQueued:true、retryAfterSeconds:30。 */
+export function isQueueSignal(code, message) {
+  if (String(code || "").trim() === QUEUE_CODE) return true;
+  const s = String(message || "");
+  if (!s) return false;
+  return /"isQueued"\s*:\s*true/.test(s) || /"serviceAvailable"\s*:\s*false/.test(s);
+}
+
+/** 排队信号扫描：与 findQuotaSignal 同构（同限深、字符串层自动 parse 下钻），命中返回 { code }。 */
+export function findQueueSignal(value, depth = 0) {
+  if (value == null || depth > MAX_ENVELOPE_DEPTH) return null;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return null;
+    if (isQueueSignal("", s)) return { code: QUEUE_CODE };
+    try {
+      return findQueueSignal(JSON.parse(s), depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "object") return null;
+  if (isQueueSignal(value.code, value.message)) return { code: String(value.code || QUEUE_CODE) };
+  for (const v of Object.values(value)) {
+    const hit = findQueueSignal(v, depth + 1);
     if (hit) return hit;
   }
   return null;

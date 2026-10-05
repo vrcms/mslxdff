@@ -54,6 +54,7 @@ export function fmtEvent(e) {
       return `${head} 空转耗尽    重试无用 model=${m(e.model)} 已重试 ${e.retries || 0}/${e.max || "?"} 次仍零输出（等 ${e.waitedMs || 0}ms）→ 换候选/报错${e.reason ? ` ${String(e.reason).slice(0, 90)}` : ""} reqId=${e.reqId || ""}`;
     case "upstream-preheat":
       if (e.skipped) return `${head} preheat       跳过 (MSLXDFF_PREHEAT disabled)`;
+      if (Array.isArray(e.results)) return `${head} preheat       定制 ${e.okCount}/${e.total} ok${(e.results || []).filter((x) => !x.ok).map((x) => x.id).join(",") ? ` fail:${(e.results || []).filter((x) => !x.ok).map((x) => x.id).join(",")}` : ""}`;
       return `${head} preheat       预热 opencode models ${e.ok ? "ok" : "fail"} ${e.status ? `HTTP ${e.status}` : e.error || ""} ${e.ms ? `${e.ms}ms` : ""}`;
     case "peer-race-start":
       return `${head} peer race     开始并发给组员 model=${m(e.model)} peers=${e.peers}`;

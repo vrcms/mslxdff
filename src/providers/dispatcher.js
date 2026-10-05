@@ -1,6 +1,14 @@
-import { appendEvent } from "../logs.js";
-import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
-import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
+ import { appendEvent } from "../logs.js";
+ import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
+ import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
+ // 定制预热名单：registry customProviders 8 家 + 默认 opencode；openrouter/自配 generic 不预热（按需自拉）
+ const CUSTOM_PREHEAT_IDS = new Set(["opencode", "workbuddy", "traework", "cline", "codearts", "qoder", "globalqwenwork", "qwenwork", "zcode"]);
+ function isPreheatDisabled() {
+   const raw = process.env.MSLXDFF_PREHEAT;
+   if (raw === undefined || raw === null || raw === "") return false;
+   const s = String(raw).trim().toLowerCase();
+   return s === "0" || s === "off" || s === "false" || s === "no" || s === "disable" || s === "disabled";
+ }
 
 // 多供应商 dispatcher：把多个 Provider 聚合成一个 `upstream` 形状（chat/preheat/close），
 // 按 body.model 的前缀路由到对应供应商，转发上游前剥掉前缀只发原始 id。
@@ -111,18 +119,22 @@ export function createProviderDispatcher(providers = [], opts = {}) {
     return out;
   }
 
-  // 只预热默认供应商（opencode）：连接池与模型缓存预热是其主链路收益；
-  // 其他供应商按需在首次请求时自拉（10min 缓存）。不再逐家预热，避免 daemon 每次启动
-  // 对所有上游各发一次 GET；MSLXDFF_PREHEAT=0 的关闭由唯一被调的 opencode preheat 自行尊重。
-  // 见 .agents/notes/implemented/simplification/2026-09-16-preheat-opencode-only.md
+  // 预热定制供应商 + 默认供应商（opencode）：registry 名单 8 家 + opencode 共 9 家并发各打一次；
+  // openrouter/用户自配 generic 不在此列（按需首次请求自拉）。单家失败静默，不拖累启动。
   async function preheat() {
-    const p = byId.get(DEFAULT_PROVIDER);
-    if (!p || typeof p.preheat !== "function") return { ok: false, skipped: true };
-    try {
-      return await p.preheat();
-    } catch {
-      return { ok: false, error: "preheat failed" };
-    }
+    if (isPreheatDisabled()) return { ok: true, skipped: true };
+    const targets = providers.filter((p) => p && typeof p.preheat === "function" && CUSTOM_PREHEAT_IDS.has(p.id));
+    if (!targets.length) return { ok: false, skipped: true };
+    const settled = await Promise.all(targets.map(async (p) => {
+      try {
+        const r = await p.preheat();
+        return { id: p.id, ...(r && typeof r === "object" ? r : { ok: false }) };
+      } catch {
+        return { id: p.id, ok: false, error: "preheat failed" };
+      }
+    }));
+    const okCount = settled.filter((r) => r && r.ok).length;
+    return { ok: okCount > 0, results: settled, okCount, total: settled.length };
   }
 
   async function close() {

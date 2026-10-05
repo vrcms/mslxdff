@@ -1258,7 +1258,9 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_WORKBUDDY_CHECKIN` | `1` | daemon 每日自动签到开关（`0` 关；开则每天本地时 `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 全号签到+过期 token 续期，code 10001 幂等，落盘 `workbuddyCheckin {date}` 防重复，启动时过期补签） |
 | `MSLXDFF_WORKBUDDY_CHECKIN_HOUR` | `9` | 自动签到小时（0~23 本地时，非法回退 9） |
 | `WORKBUDDY_AUTH_DIR` | `<state 目录>/auths`（默认 `~/.config/mslxdff/auths`） | WorkBuddy token 落盘目录（`workbuddy-*.json`，`0600`）。**跟随 state 文件走，不再用 cwd 兜底**；旧 `./auths` 降级为只读兜底（ADR-0025） |
-| `MSLXDFF_QODER_COOLDOWN_MS` | `30000` | qoder 多号冷却（401/403/429/5xx 与 fetch 异常——流式路径的真实状态码经内部头 `x-mslxdff-qoder-upstream-status` 带出后才判定，400 等业务错不冷却） |
+| `MSLXDFF_QODER_COOLDOWN_MS` | `30000` | qoder 多号短冷却（401/403/429/5xx 与 fetch 异常——流式路径的真实状态码经内部头 `x-mslxdff-qoder-upstream-status` 带出后才判定，400 等业务错不冷却） |
+| `MSLXDFF_QODER_QUOTA_COOLDOWN_MS` | `3600000` | qoder 额度耗尽（内层 `code 110` / Billing 措辞）长冷却——额度按天重置，短冷却等于反复撞死号；该号在同请求内当场换掉（ADR-0036/0044） |
+| `MSLXDFF_QODER_QUEUE_COOLDOWN_MS` | `300000` | qoder **排队判决**（`10605` + `isQueued:true`，裹在 HTTP 200 的 SSE 信封里）长冷却：队列没放行前不再把请求送回该号，同时**同请求内当场换号**（ADR-0044）。注意 `envInt` 只认正整数：`=0` 会被忽略并回落默认值，不是关闭 |
 | `MSLXDFF_QODER_TIMEOUT_MS` | `120000` | qoder 上游连接超时（COSY 会话请求的 `timeoutSignal`） |
 | `MSLXDFF_QODER_STICKY_MS` | `600000` | qoder 同请求粘号 TTL（同一次客户端请求内复用同一个号，仅冷却才换，ADR-0036；`0`=关，退回每次调用 round-robin） |
 | `MSLXDFF_QODER_CHECKIN` | `1` | qoder 每日自动签到开关（`0` 关；开启则每日本地时 `_CHECKIN_HOUR` 全号签到，按每号 region 选域名，落盘 `state.qoderCheckin`） |
@@ -1322,7 +1324,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_OPENCODE_UA` | `opencode/1.18.31` | opencode 上游身份 `User-Agent`（zen 免费层门禁要求 `opencode/<semver>`，缺版本即 403；2026-09-18 起还要求 ≥ `1.18.0`，低版本 `426 UpgradeRequired`；配了就以配置为准，用于跟随官方版本升级） |
 | `MSLXDFF_FREE_LANE` | `1` | 免费层 agent 形状注入（ADR-0020）：zen 免费模型自动补 `stream:true` + 核心五工具（bash/edit/glob/grep/read），非流式调用聚合回 JSON；`0`/关闭词=完全不动（上游撤门禁时的逃生阀） |
 | `MSLXDFF_FREE_LANE_DEBUG` | — | `1` 时 `daemon.log` 打 `[free-lane]` 发送/响应摘要（模型/URL/stream/tools 数/UA/状态），排障 403/426 用 |
-| `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；仅预热 opencode 的连接池与模型缓存，其他供应商按需首次请求自拉）；cline free 自检独立于此开关（daemon 启动时对比快照报增删，写 `daemon.log` + 更新 `logDir/cline-free.json`） |
+ | `MSLXDFF_PREHEAT` | `1` | 上游预热开关（`0` 关闭；预热 registry 定制 8 家 + opencode 共 9 家，并发各打一次、单家失败静默；openrouter/用户自配 generic 不预热、按需首次请求自拉；cline 走 checkFreeUpdates 对比快照报增删，写 `daemon.log` + 更新 `logDir/cline-free.json`） |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_TIMEOUT` | `30000` | opencode 上游 keepAlive 超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_MAX_TIMEOUT` | `60000` | keepAlive 最大超时 |
 | `MSLXDFF_UPSTREAM_KEEPALIVE_CONNECTIONS` | `20` | keepAlive 连接数 |

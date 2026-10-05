@@ -37,6 +37,9 @@ export function createQoderProvider({
   cooldownMs = envInt("MSLXDFF_QODER_COOLDOWN_MS", 30_000),
   // 额度耗尽（code 110）按天重置：短冷却等于反复撞死号，故单独配长冷却（默认 1h）
   quotaCooldownMs = envInt("MSLXDFF_QODER_QUOTA_COOLDOWN_MS", 3600_000),
+  // 排队（10605/isQueued）单独一档：队列没放行前反复送回就是白烧（实测跨小时不恢复），默认 5min。
+  // 上游口播的 retryAfterSeconds=30 只当参考值，不当本档上限——按 30s 回池等于回到旧行为。
+  queueCooldownMs = envInt("MSLXDFF_QODER_QUEUE_COOLDOWN_MS", 300_000),
   connectTimeoutMs = Number(process.env.MSLXDFF_QODER_TIMEOUT_MS) || 120_000,
 } = {}) {
   const keys = (() => {
@@ -127,15 +130,21 @@ export function createQoderProvider({
       // 否则坏号（401/403/429/5xx）永不冷却，粘号还会把重试继续粘在这个坏号上。
       const ust = Number(res?.headers?.get?.("x-mslxdff-qoder-upstream-status")) || 0;
       const isQuota = res?.headers?.get?.("x-mslxdff-qoder-quota") === "1";
+      const isQueued = res?.headers?.get?.("x-mslxdff-qoder-queued") === "1";
       const bad = badAuth(st) ? st : (badAuth(ust) ? ust : 0);
+      // 冷却三档：额度（按天重置，最长）> 排队（队列没放行前别再送回，默认 5min）> 其它（普通短冷却）。
+      // 排队单独成档的依据：现网 31h 窗口 global 区 176 发被判决 129 发且跨小时不复现恢复，
+      // 30s 短冷却等于每 30s 白烧一发；但它不是「今天没了」，到点必须自动回池，故不得并入额度档。
       if (bad) {
-        try { ring.onError(pickedKey, isQuota ? quotaCooldownMs : cooldownMs); } catch {}
+        const coolMs = isQuota ? quotaCooldownMs : (isQueued ? queueCooldownMs : cooldownMs);
+        try { ring.onError(pickedKey, coolMs); } catch {}
         if (isQuota) exhaustedByQuota.add(pickedKey);
         // 冷却是个决定：钉在响应上，管线写进模型日志（cooled=<status>）
         try { res.headers?.set?.("x-mslxdff-qoder-cooldown", String(bad)); } catch {}
       }
-      // 额度耗尽：本号已废（长冷却），若还有别的号就立刻换号重发，别把空流递给客户端
-      if (isQuota) {
+      // 额度耗尽 / 排队：本号这一发已废，只要还有别的号就当场换号重发，别把空流或排队判决递给客户端。
+      // （跨请求那侧不用改：长冷却让 sticky 下次因 isCooling 自动 switch。）
+      if (isQuota || isQueued) {
         lastRes = res;
         if (ring.available() > 0) continue;
         break;
@@ -223,7 +232,7 @@ export function createQoderProvider({
 
   async function close() {}
   async function chatWithKeys(body, keysOverride, opts) {
-    const tmp = createQoderProvider({ id, apiKeys: keysOverride, file, fetchImpl, cooldownMs, connectTimeoutMs });
+    const tmp = createQoderProvider({ id, apiKeys: keysOverride, file, fetchImpl, cooldownMs, queueCooldownMs, connectTimeoutMs });
     return tmp.chat(body, opts);
   }
 

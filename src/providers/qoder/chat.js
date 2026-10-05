@@ -29,14 +29,15 @@ const PEEK_MAX_FRAMES = 8;
 // 返回 { res, status, frames }：res 是把预读帧回灌后的等价上游响应，frames 交回灌用。
 // 任何异常都降级为「无判决」（status=0）：排障手段不得变成故障源。
 async function peekEnvelopeVerdict(upRes, cdbg) {
-  if (!upRes?.body) return { res: upRes, status: 0, quota: false, frames: [] };
+  if (!upRes?.body) return { res: upRes, status: 0, quota: false, queued: false, frames: [] };
   let reader;
-  try { reader = upRes.body.getReader(); } catch { return { res: upRes, status: 0, quota: false, frames: [] }; }
+  try { reader = upRes.body.getReader(); } catch { return { res: upRes, status: 0, quota: false, queued: false, frames: [] }; }
   const dec = new TextDecoder();
   const frames = [];
   let text = "";
   let status = 0;
   let quota = false;
+  let queued = false;
   let decided = false;
   try {
     for (let i = 0; i < PEEK_MAX_FRAMES && !decided; i++) {
@@ -50,14 +51,14 @@ async function peekEnvelopeVerdict(upRes, cdbg) {
         const p = line.slice(5).trim();
         if (!p || p === "[DONE]") continue;
         const d = extractDelta(p);
-        if (d.err) { status = Number(d.err.status) || 0; quota = d.err.kind === "quota"; decided = true; break; }
+        if (d.err) { status = Number(d.err.status) || 0; quota = d.err.kind === "quota"; queued = d.err.queued === true; decided = true; break; }
         if (d.content || d.reasoning || d.toolCalls || d.usageIn || d.usageOut) { decided = true; break; }
       }
     }
   } catch (e) {
     cdbg(`[peek-throw] ${String(e?.message || e).slice(0, 160)}`);
   }
-  cdbg(`[peek] frames=${frames.length} verdict=${status || "none(正常流)"}`);
+  cdbg(`[peek] frames=${frames.length} verdict=${status || "none(正常流)"} quota=${quota} queued=${queued}`);
   // 回灌：已读帧先按原样吐出，再接续同一个 reader 的剩余部分
   const body = new ReadableStream({
     start(ctrl) {
@@ -74,7 +75,7 @@ async function peekEnvelopeVerdict(upRes, cdbg) {
       })();
     },
   });
-  return { res: new Response(body, { status: upRes.status, headers: upRes.headers }), status, quota, frames };
+  return { res: new Response(body, { status: upRes.status, headers: upRes.headers }), status, quota, queued, frames };
 }
 export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
   if (!fetchImpl) fetchImpl = compatFetch;
@@ -103,6 +104,12 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
   // 额度耗尽标记（内部交接，不落日志）：门面据此换号（长冷却该号）而非普通短冷却
   const withQuota = (res) => {
     try { res.headers.set("x-mslxdff-qoder-quota", "1"); } catch {}
+    return res;
+  };
+  // 排队标记（内部交接，不落日志）：与额度同为「换号」信号但冷却档不同——
+  // 排队是「稍后再来」，长冷却到点自动回池；额度是「今天没了」，按天重置才回。
+  const withQueued = (res) => {
+    try { res.headers.set("x-mslxdff-qoder-queued", "1"); } catch {}
     return res;
   };
 
@@ -167,6 +174,8 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
       // 只在真有判决时挂状态码：正常流不写这个头（index.js 靠它区分"要不要冷却"）
       if (peek.status) shaped = withUpstreamStatus(shaped, peek.status);
       if (peek.quota) shaped = withQuota(shaped);
+      // 排队旗标（内部交接）：门面据此走队列档冷却并在同一请求内换号，别把排队号送回客户端
+      if (peek.queued) shaped = withQueued(shaped);
       return shaped;
     }
     try {
@@ -175,7 +184,8 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
       return echo(new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } }));
     } catch (e) {
       const out = echo(errRes(errorStatus(e), String(e?.detail || e?.message || e).slice(0, 300), e?.kind || "upstream_error"));
-      return e?.kind === "quota" ? withQuota(out) : out;
+      const marked = e?.kind === "quota" ? withQuota(out) : out;
+      return e?.queued ? withQueued(marked) : marked;
     }
   }
 
