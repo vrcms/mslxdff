@@ -1,4 +1,4 @@
-// `-stats` 模型用量报表：近 N 小时每模型 token 消耗 + 首字/总耗时/速度。
+// `-stats` 模型用量报表：每窗口每模型 token 消耗 + 首字/总耗时/速度。默认窗口 = 今日 0 点至现在，--hours N 切近 N 小时滚动。
 // 数据来自 src/usage/（逐请求 JSONL），不是 state.json 的终生 EMA —— 见 .scratch/stats-report/SPEC.md
 import { usageReport } from "../../usage/report.js";
 import { usageEnabled, usageKeepDays } from "../../usage/record.js";
@@ -9,10 +9,18 @@ export function isStatsFlag(args) {
   return FLAGS.some((f) => args.includes(f));
 }
 
+// 默认窗口起点 = 本地当日 0 点（setHours 归零，随系统本地时区）。
+export function startOfTodayMs(now = Date.now()) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 export function parseStatsArgs(args) {
   const hoursIdx = args.findIndex((a) => a === "--hours" || a === "-hours");
   const rawHours = hoursIdx >= 0 ? Number(args[hoursIdx + 1]) : NaN;
-  const hours = Number.isFinite(rawHours) && rawHours > 0 ? Math.min(168, Math.floor(rawHours)) : 24;
+  // null = 默认「今日 00:00 至今」窗口；显式但非法（非数/≤0）的 --hours 同样视为 null，不再回退 24h
+  const hours = Number.isFinite(rawHours) && Math.floor(rawHours) >= 1 ? Math.min(168, Math.floor(rawHours)) : null; // 0<N<1 折成 0 会造成「近 0h 标签配 24h 数据」，与非法同路走当日窗口
   const modelIdx = args.findIndex((a) => a === "--model" || a === "-model");
   const rawModel = modelIdx >= 0 && args[modelIdx + 1] && !String(args[modelIdx + 1]).startsWith("-") ? args[modelIdx + 1] : null;
   return { hours, model: rawModel, json: args.includes("--json") };
@@ -80,11 +88,12 @@ function performanceRow(id, r) {
   return [id, ttfb, fmtMs(r.avgTotalMs), fmtTps(r.avgTps), `${Number(r.ttfSamples) || 0}/${samples}`];
 }
 
-export function renderStats(report, { hours = 24, model = null } = {}) {
+export function renderStats(report, { hours = null, model = null } = {}) {
+  const rangeLabel = hours == null ? "今日 00:00 至今" : `近 ${hours}h`;
   const lines = [];
   const { models, totals } = report;
   if (!models.length) {
-    lines.push(`暂无用量记录（近 ${hours}h${model ? ` · 模型 ${model}` : ""}）— 经 8989 网关发一次请求后出现`);
+    lines.push(`暂无用量记录（${rangeLabel}${model ? ` · 模型 ${model}` : ""}）— 经 8989 网关发一次请求后出现`);
     lines.push("提示：mslxdff -status 看当前体检 · mslxdff -log 20 看最近事件");
     lines.push("说明：-chat 直连 mimo/big-pickle 不经网关，不计入本表");
     return lines.join("\n");
@@ -93,7 +102,7 @@ export function renderStats(report, { hours = 24, model = null } = {}) {
   const right = "right";
   const tokenRows = [...models.map((m) => tokenRow(m.id, m)), tokenRow("合计", totals)];
   const performanceRows = [...models.map((m) => performanceRow(m.id, m)), performanceRow("合计", totals)];
-  lines.push(`模型用量报告（近 ${hours}h${model ? ` · 筛选 ${model}` : ""}）`);
+  lines.push(`模型用量报告（${rangeLabel}${model ? ` · 筛选 ${model}` : ""}）`);
   lines.push(`成功请求：${totals.requests} 次 · 模型：${models.length} 个`);
   lines.push("");
   lines.push("Token 用量");
@@ -109,14 +118,15 @@ export function renderStats(report, { hours = 24, model = null } = {}) {
   lines.push("口径差异：-status / -model stats 的首字仍取自 state 的终生 EMA（按转发入口量），与本表**不同源**。");
   lines.push("范围：只含经 8989 网关的成功请求；不含失败请求和 -chat 直连。");
   const keepDays = usageKeepDays();
-  if (hours > keepDays * 24) {
-    lines.push(`警告：查询 ${hours}h 超过数据保留 ${keepDays} 天，历史可能不完整。`);
+  if (hours != null && hours > keepDays * 24) {
+    lines.push(`警告：查询窗口 ${hours}h 超过数据保留 ${keepDays} 天，历史可能不完整。`);
   } else {
     lines.push(`数据保留 ${keepDays} 天；更早的历史已删除。`);
   }
   lines.push("明细口径：本表按模型聚合，不展开 via、interrupted 和单次 tps。");
   lines.push("数值使用 k/M 缩写；需要精确值或机器处理请加 --json。");
-  lines.push("可调：mslxdff -stats --hours 1 | --model <id> | --json");
+  lines.push("可调：默认统计今日 0 点至现在 · mslxdff -stats --hours N（近 N 小时滚动，上限 168）| --model <id> | --json");
+  lines.push("时区：「今日 0 点」按系统本地时区计，与用量日文件的日切同源。");
   return lines.join("\n");
 }
 
@@ -127,7 +137,9 @@ export async function handleStats(args) {
     console.log("用量记录已关闭（MSLXDFF_USAGE_LOG=0）—— 去掉该 env 后重启 daemon 即可恢复采集。");
     return true;
   }
-  const report = await usageReport({ hours, model, now: Date.now() });
+  const now = Date.now();
+  const since = hours == null ? startOfTodayMs(now) : null; // 缺省/非法 --hours → 当日 0 点起，毫秒精确不漂移
+  const report = await usageReport({ hours, since, model, now });
   if (json) {
     console.log(JSON.stringify(report, null, 2));
     return true;

@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, existsSync, rmSync, utimesSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { talkLogName, talkLogFile, recordRelayTalk, formatTalkEntry, appendTalkEntry, trimTalkLog, recentBlocks, listRecentFiles, maskText, resetTalkLogCache, talkLogEnabled } from "../src/talk-log.js";
+import { talkLogName, talkLogFile, recordRelayTalk, formatTalkEntry, appendTalkEntry, trimTalkLog, recentBlocks, listRecentFiles, maskText, resetTalkLogCache, talkLogEnabled, splitEntries } from "../src/talk-log.js";
 import { createTalkBucket, captureTalkSse, captureTalkMessage, captureTalkFallback, scanSseChunk } from "../src/routes/stream-scan.js";
 import { createRelayPipeline } from "../src/routes/chat/relay-pipeline.js";
 import { buildFallbackInfo } from "../src/routes/fallback.js";
@@ -233,4 +233,113 @@ test("talk log: 列目录给调研入口（按最近活跃排序）", () => {
     utimesSync(f2, new Date(now), new Date(now));
     assert.deepEqual(listRecentFiles().map((f) => f.name), ["p2-m2-talk.log", "p1-m1-talk.log"]);
   });
+});
+
+// —— 截断必须显式，不得静默断尾（tasks 3.2）——
+test("talk log: 桶撞顶 → 头部行带 truncated=1 cap= chars=，且一眼写明内容可能不完整", () => {
+  withTalkDir(() => {
+    const talk = createTalkBucket(10);
+    captureTalkSse(talk, frame({ reasoning_content: "思考很长很长远超十个字" }));
+    captureTalkSse(talk, frame({ content: "后半截没了" }));
+    assert.equal(talk.capped, true, "前置条件：确实撞顶");
+    const chars = talk.n; // 撞顶时刻的已捕获字符数（分片整块进桶，可略超 cap）
+    assert.equal(recordRelayTalk({ reqId: "rc1", model: "cap/trim", via: "local", hops: 0, body: { messages: [{ role: "user", content: "问" }] }, out: { status: 200, detail: { talk } }, echo: {} }), true);
+    const text = readFileSync(talkLogFile("cap/trim"), "utf8");
+    const lines = text.split("\n");
+    const head = lines[0];
+    assert.match(head, /truncated=1/, "头部行必须显式标截断");
+    assert.match(head, /cap=10/, "上限读数必须在场");
+    assert.ok(head.includes(`chars=${chars}`), `已捕获字符数必须在场，实际头部行：${head}`);
+    assert.ok(lines[1].includes("不完整"), "紧跟头部行的人类可读提醒：思考/正文可能不完整");
+  });
+});
+
+test("talk log: 未撞顶的条目不得多出 truncated/封顶噪音字段", () => {
+  withTalkDir(() => {
+    const talk = createTalkBucket();
+    captureTalkSse(talk, frame({ reasoning_content: "想一想", content: "答一答" }));
+    assert.equal(talk.capped, false);
+    recordRelayTalk({ reqId: "rc2", model: "cap/keep", via: "local", hops: 0, body: { messages: [{ role: "user", content: "问" }] }, out: { status: 200, detail: { talk } }, echo: {} });
+    const text = readFileSync(talkLogFile("cap/keep"), "utf8");
+    assert.ok(!text.includes("truncated"), "没截断就不许多这一项");
+    assert.ok(!text.includes("封顶"), "没到字节上限就不许多这一项");
+    assert.ok(!text.includes("…[已截断]"));
+  });
+});
+
+test("talk log: 段正文被 maskText 字节封顶砍掉时，标签行必须体现封顶（不许看着像完整）", () => {
+  const capped = formatTalkEntry({ reqId: "t1", model: "m", question: "问".repeat(9000), answer: "短答" });
+  const label = capped.split("\n").find((l) => l.startsWith("[我问"));
+  assert.match(label, /^\[我问 · \d+ 字 · 已封顶\]$/, `标签行要带封顶标记，实际：${label}`);
+  assert.ok(capped.includes("…[已截断]"), "正文尾标保持原样（向后兼容）");
+  const clean = formatTalkEntry({ reqId: "t2", model: "m", question: "短问", answer: "短答", thinking: "短想" });
+  assert.ok(!clean.includes("已封顶"), "未封顶时标签行逐字如旧");
+  assert.ok(clean.includes("[我问 · 2 字]"), `[我问 · N 字] 旧格式不得变形：${clean.split("\n").find((l) => l.startsWith("[我问"))}`);
+});
+
+// —— default-on-agent-loop-capture §2.3/§3.2：finish= 头行、零正文显式标注、attemptMs/relayMs 读数（红灯先行）——
+test("talk log: 只调工具零正文轮 → 头行 finish=tool_calls 且回答段明写「本轮无正文」（不再静默跳块）", () => {
+  withTalkDir(() => {
+    const talk = createTalkBucket();
+    captureTalkSse(talk, frame({ tool_calls: [{ index: 0, id: "c1", function: { name: "get_time", arguments: "{}" } }] }));
+    assert.equal(talk.content.length, 0, "前置条件：正文零");
+    assert.equal(recordRelayTalk({ reqId: "f1", model: "fin/tool", via: "local", hops: 0, body: { messages: [{ role: "user", content: "几点" }] }, out: { status: 200, totalMs: 88, detail: { talk, sawFinishReason: "tool_calls" } }, echo: {} }), true, "零正文工具轮不再整条不落（既有判据里有 tools 就该落）");
+    const text = readFileSync(talkLogFile("fin/tool"), "utf8");
+    assert.match(text, /^#talk-entry ts=\d+ .*finish=tool_calls/, "头行必须带 finish=<值>");
+    assert.ok(text.includes("[回答 · 0 字 · 本轮无正文（finish=tool_calls）]"), "零正文必须写出来，不能靠缺块暗示");
+    assert.ok(!text.includes("----8<----\n\n---->8----"), "无正文标注不套 CUT 围栏");
+    assert.ok(text.includes("[工具调用"), "工具调用块照旧呈现");
+    assert.ok(text.includes("[END]"), "[END] 结构不破");
+    assert.equal(splitEntries(text).length, 1, "splitEntries 分块结构不破");
+  });
+});
+
+test("talk log: 传 attemptMs → 头行 elapsed= 取本次尝试墙钟、relayMs= 保留 relay 内部 totalMs；有正文段与改动前逐字一致", () => {
+  withTalkDir(() => {
+    const talk = createTalkBucket();
+    captureTalkSse(talk, frame({ content: "缓冲重放的正文" }));
+    recordRelayTalk({ reqId: "f2", model: "fin/elapsed", via: "local", hops: 0, body: { messages: [{ role: "user", content: "q" }] }, out: { status: 200, totalMs: 2, detail: { talk } }, echo: {}, attemptMs: 7207 });
+    const text = readFileSync(talkLogFile("fin/elapsed"), "utf8");
+    const head = text.split("\n")[0];
+    assert.match(head, /elapsed=7207ms/, "elapsed= 取本次上游尝试墙钟（hedge 重放不再报 2ms）");
+    assert.match(head, /relayMs=2ms/, "relay 内部计时另列（两值不同才出现）");
+    assert.ok(!text.includes("本轮无正文"), "有正文时不得出现无正文标注");
+    assert.ok(text.includes("缓冲重放的正文"));
+  });
+});
+
+test("talk log: 未传 attemptMs → elapsed= 回退 totalMs 且不打 relayMs（同值不重复）；缺 finish 落 finish=-", () => {
+  withTalkDir(() => {
+    const talk = createTalkBucket();
+    captureTalkSse(talk, frame({ content: "普通一次尝试" }));
+    recordRelayTalk({ reqId: "f3", model: "fin/plain", via: "local", hops: 0, body: { messages: [{ role: "user", content: "q" }] }, out: { status: 200, totalMs: 200, detail: { talk } }, echo: {} });
+    const head = readFileSync(talkLogFile("fin/plain"), "utf8").split("\n")[0];
+    assert.match(head, /elapsed=200ms/, "回退 relay 内部计时");
+    assert.ok(!head.includes("relayMs="), "与 elapsed 同值时头行不打印 relayMs（克制噪音，grill Q3）");
+    assert.match(head, /finish=-/, "上游没给 finish_reason → 缺值占位，不得省略字段");
+  });
+});
+
+// —— P1-B 防回归（零正文判据漏空白）：只调工具 + 吐个换行是真实 agent 形态，
+// 判据 `answer === ""` 放过 " "/" \n" 后 pushBlock 的 !m.trim() 会把块整个跳过 →
+// 「本轮无正文」与「正文丢盘」再度同形。判据必须看 trim，不看长度。
+test("talk log: 正文只有空白（两个空格/一个换行）→ 仍判「本轮无正文」，头行 finish 值原样", () => {
+  for (const blank of ["  ", "\n", " \n\t "]) {
+    const entry = formatTalkEntry({ reqId: "b1", model: "x/y", status: 200, ts: 1700000000000, question: "问", answer: blank, finishReason: "tool_calls" });
+    assert.match(entry, /^#talk-entry ts=\d+ .*finish=tool_calls/, `头行 finish=${JSON.stringify(blank)} 形态下仍须带真值`);
+    assert.ok(entry.includes("[回答 · 0 字 · 本轮无正文（finish=tool_calls）]"), `空白正文 ${JSON.stringify(blank)} 必须落「本轮无正文」标注，不得静默丢块：${entry}`);
+    assert.ok(!entry.includes("----8<----\n \n---->8----"), "空白不得伪装成正文块落盘");
+    assert.ok(!entry.includes("[回答 · 2 字]") && !entry.includes("[回答 · 1 字]"), "空白字数不得被当成正文字数");
+  }
+});
+
+test("talk log: 有正文（非空白）时整条目逐字不变（判据收紧只影响空白态）", () => {
+  const golden = "#talk-entry ts=1700000000000 time=2023-11-15 06:13:20 req=g1 model=x/y via=local hops=0 status=200 stream=1 elapsed=5ms finish=tool_calls\n\n[我问 · 2 字]\n----8<----\n问题\n---->8----\n\n[思考 · 2 字]\n----8<----\n在想\n---->8----\n\n[回答 · 3 字]\n----8<----\n有正文\n---->8----\n\n[工具调用 · 13 字]\n----8<----\n[{\"id\":\"c1\"}]\n---->8----\n\n[END]\n\n";
+  const got = formatTalkEntry({
+    reqId: "g1", model: "x/y", via: "local", hops: 0, status: 200, stream: true, elapsedMs: 5,
+    ts: 1700000000000, question: "问题", thinking: "在想", answer: "有正文",
+    tools: '[{"id":"c1"}]', finishReason: "tool_calls",
+  });
+  assert.equal(got, golden, "有正文路径的字节序列必须与改动前一致");
+  assert.ok(!got.includes("本轮无正文"), "有正文时不得出现无正文标注");
 });

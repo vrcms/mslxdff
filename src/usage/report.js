@@ -118,11 +118,15 @@ function fold(acc, r) {
 }
 
 // 纯函数：只做过滤 + 归并，不碰磁盘。
-export function aggregateUsage(rows, { hours = 24, now = Date.now(), model = null } = {}) {
-  const windowHours = Number.isFinite(Number(hours)) && Number(hours) > 0 ? Number(hours) : 24;
+export function aggregateUsage(rows, { hours = 24, since: sinceOpt = null, now = Date.now(), model = null } = {}) {
   const untilN = Number(now);
   const until = Number.isFinite(untilN) ? untilN : Date.now();
-  const since = until - windowHours * HOUR_MS;
+  // since（绝对窗口起点，毫秒）优先于 hours：CLI 默认窗口「今日 0 点 → 现在」靠它精确落在 0 点，不随查询时刻漂移
+  const sinceMs = sinceOpt == null ? NaN : Number(sinceOpt);
+  const hasSince = Number.isFinite(sinceMs);
+  const hoursN = Number(hours);
+  const windowHours = hasSince ? (until - sinceMs) / HOUR_MS : Number.isFinite(hoursN) && hoursN > 0 ? hoursN : 24;
+  const since = hasSince ? sinceMs : until - windowHours * HOUR_MS;
   const byModel = new Map();
   const sum = blank(null);
   let scanned = 0;
@@ -156,8 +160,10 @@ export function aggregateUsage(rows, { hours = 24, now = Date.now(), model = nul
 }
 
 // 读保留期内的日文件并只留窗口内的行（保留期默认 2 天，文件数很少，全读即可）。
-export async function readUsageRows({ dir, hours = 24, now = Date.now() } = {}) {
-  const since = Number(now) - (Number(hours) > 0 ? Number(hours) : 24) * HOUR_MS;
+export async function readUsageRows({ dir, hours = 24, since: sinceOpt = null, now = Date.now() } = {}) {
+  const sinceMs = sinceOpt == null ? NaN : Number(sinceOpt);
+  const hoursN = Number(hours);
+  const since = Number.isFinite(sinceMs) ? sinceMs : Number(now) - (Number.isFinite(hoursN) && hoursN > 0 ? hoursN : 24) * HOUR_MS;
   let files = [];
   try {
     files = (await readdir(usageDir({ dir }))).filter((f) => f.endsWith(".jsonl")).sort();
@@ -183,7 +189,7 @@ export async function readUsageRows({ dir, hours = 24, now = Date.now() } = {}) 
   return rows;
 }
 
-export async function usageReport({ dir, hours = 24, now = Date.now(), model = null } = {}) {
-  const rows = await readUsageRows({ dir, hours, now });
-  return aggregateUsage(rows, { hours, now, model });
+export async function usageReport({ dir, hours = 24, since = null, now = Date.now(), model = null } = {}) {
+  const rows = await readUsageRows({ dir, hours, since, now });
+  return aggregateUsage(rows, { hours, since, now, model });
 }

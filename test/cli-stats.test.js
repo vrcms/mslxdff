@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isStatsFlag, parseStatsArgs, renderStats, handleStats } from "../src/cli/commands/stats.js";
+import { isStatsFlag, parseStatsArgs, renderStats, handleStats, startOfTodayMs } from "../src/cli/commands/stats.js";
 
 function tmpDir() {
   return mkdtempSync(join(tmpdir(), "mslxdff-test-clistats-"));
@@ -19,14 +19,29 @@ test("isStatsFlag 只认 -stats/--stats，不误触 -status / -model stats", () 
   assert.equal(isStatsFlag([]), false);
 });
 
-test("parseStatsArgs：默认 24h，--hours 生效并封顶 168，--model/--json", () => {
-  assert.deepEqual(parseStatsArgs(["-stats"]), { hours: 24, model: null, json: false });
+test("parseStatsArgs：默认当日窗口（hours null），--hours 生效并封顶 168，--model/--json", () => {
+  assert.deepEqual(parseStatsArgs(["-stats"]), { hours: null, model: null, json: false });
   assert.deepEqual(parseStatsArgs(["-stats", "--hours", "1"]), { hours: 1, model: null, json: false });
   assert.equal(parseStatsArgs(["-stats", "--hours", "999"]).hours, 168);
-  assert.equal(parseStatsArgs(["-stats", "--hours", "abc"]).hours, 24, "非法值回退 24");
-  assert.equal(parseStatsArgs(["-stats", "--hours", "0"]).hours, 24);
+  assert.equal(parseStatsArgs(["-stats", "--hours", "abc"]).hours, null, "非法值回退默认当日窗口");
+  assert.equal(parseStatsArgs(["-stats", "--hours", "0"]).hours, null);
+  assert.equal(parseStatsArgs(["-stats", "--hours", "0.5"]).hours, null, "0<N<1 不落『近0h标签配24h数据』第三态");
   assert.equal(parseStatsArgs(["-stats", "--model", "a/b"]).model, "a/b");
   assert.equal(parseStatsArgs(["-stats", "--json"]).json, true);
+});
+
+test("startOfTodayMs：本地当日 0 点，时分秒毫秒归零", () => {
+  const t = new Date(2026, 8, 19, 13, 45, 30, 123).getTime();
+  assert.equal(startOfTodayMs(t), new Date(2026, 8, 19, 0, 0, 0, 0).getTime());
+});
+
+test("renderStats：hours 为 null 时表头与空态显示当日窗口", () => {
+  const empty = renderStats({ models: [], totals: { requests: 0 } }, { hours: null });
+  assert.match(empty, /暂无用量记录（今日 00:00 至今/);
+  const report = { windowHours: 13.5, models: [mkModel("m/a")], totals: mkModel("合计") };
+  const text = renderStats(report, { hours: null });
+  assert.match(text, /模型用量报告（今日 00:00 至今）/);
+  assert.doesNotMatch(text, /近 24h/);
 });
 
 test("renderStats 空状态给人话引导，不是空表", () => {
@@ -110,7 +125,38 @@ test("handleStats 端到端：写 usage 文件后打印报表", async () => {
       return out.join("\n");
     })();
     assert.match(text, /opencode\/big-pickle/);
+    assert.match(text, /模型用量报告（近 1h）/, "显式 --hours 表头仍是近 Nh 滚动");
     assert.match(text, /成功请求：2 次/);
+  } finally {
+    if (prevDir === undefined) delete process.env.MSLXDFF_DAEMON_DIR; else process.env.MSLXDFF_DAEMON_DIR = prevDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("handleStats 默认：昨日行不进当日窗口、表头注明当日", async () => {
+  const dir = tmpDir();
+  const prevDir = process.env.MSLXDFF_DAEMON_DIR;
+  try {
+    process.env.MSLXDFF_DAEMON_DIR = dir;
+    const u = join(dir, "usage");
+    mkdirSync(u, { recursive: true });
+    const now = Date.now();
+    const midnight = startOfTodayMs(now);
+    const ymd = (ts) => {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    writeFileSync(join(u, `${ymd(now)}.jsonl`), JSON.stringify({ ts: now, model: "opencode/big-pickle", prompt_tokens: 10, completion_tokens: 20, total_tokens: 30, ttfbMs: 100, totalMs: 200 }) + "\n");
+    writeFileSync(join(u, `${ymd(midnight - 60_000)}.jsonl`), JSON.stringify({ ts: midnight - 60_000, model: "opencode/big-pickle", prompt_tokens: 900, completion_tokens: 900, total_tokens: 1800 }) + "\n");
+    const text = await (async () => {
+      const out = [];
+      const orig = console.log;
+      console.log = (...a) => out.push(a.join(" "));
+      try { await handleStats(["-stats"]); } finally { console.log = orig; }
+      return out.join("\n");
+    })();
+    assert.match(text, /模型用量报告（今日 00:00 至今）/);
+    assert.match(text, /合计：1 次|成功请求：1 次/, "昨日行 MUST NOT 进当日窗口");
   } finally {
     if (prevDir === undefined) delete process.env.MSLXDFF_DAEMON_DIR; else process.env.MSLXDFF_DAEMON_DIR = prevDir;
     rmSync(dir, { recursive: true, force: true });
@@ -130,7 +176,8 @@ test("handleStats --json 输出可解析的报表对象", async () => {
       return out.join("\n");
     })();
     const parsed = JSON.parse(text);
-    assert.equal(parsed.windowHours, 24);
+    assert.equal(parsed.since, startOfTodayMs(parsed.until), "默认窗口起点 = 本地当日 0 点");
+    assert.equal(typeof parsed.windowHours, "number", "windowHours 仍是数字（如实时长）");
     assert.deepEqual(parsed.models, []);
   } finally {
     if (prevDir === undefined) delete process.env.MSLXDFF_DAEMON_DIR; else process.env.MSLXDFF_DAEMON_DIR = prevDir;

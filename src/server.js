@@ -1,5 +1,6 @@
 import { createServer as httpCreateServer } from "node:http";
 import { DEFAULT_PORT, getPort } from "./state.js";
+import { flushAgentLoop } from "./talk-full.js"; // 关停收尾：talk/full 捕获是异步队列落盘，退出前排空（空队列时近似 O(1)，且自身不抛）
 
 export function startServer({ router, signals = true, host, onBeforeClose }, port = resolvePort()) {
   const listenHost = host ?? resolveHost();
@@ -19,6 +20,10 @@ export function startServer({ router, signals = true, host, onBeforeClose }, por
     });
 
   const close = async () => {
+    // 关停序列里唯一的新增步：先排空 agent 回路捕获（talk/full）的异步写队列，再走既有顺序
+    // （server:stop hook → server.close/closeAllConnections）。既有关停顺序语义一字未动；
+    // 队列空时 flush 即刻返回，且 flushAgentLoop 自身不抛（外层 try 只为兜住 import 侧意外）。
+    try { await flushAgentLoop(); } catch {}
     // 插件 hook：server:stop — 关闭前触发（fire-and-forget，不阻塞关停）
     try { await onBeforeClose?.(); } catch {}
     await new Promise((resolve) => {

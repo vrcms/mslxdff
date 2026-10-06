@@ -49,3 +49,10 @@ test_*.mjs
 .backup/
 
 .cache/
+
+# 本地检索缓存（websearch 插件落盘，删了可重建，绝不入库）
+.websearch/
+
+# WorkBuddy 国际版手工探针：根目录一次性验证脚本，无任何代码引用
+/global-hi.js
+/global-login.js

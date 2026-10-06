@@ -3,15 +3,19 @@
 // 纯函数契约：只读写传入的 detail，不碰 res / 定时器 / 闸门 / 网络，因此可离线单测。
 // 语义钉子：detail.chars 只算正文，思考内容另计（reasoningChars）——两者相加会重复计数。
 import { extractUsageFromJson } from "../metrics.js";
+import { talkLogEnabled } from "../talk-log.js"; // 建桶判据之一（两模块都是按调用读 env，无 import 期冻结）
+import { agentLoopEnabled, talkCapChars } from "../talk-full.js"; // 上限单一真相：本文件不得再写第二份数字
 
-// 环形对话日志（talk log）的正文捕获：只有 relay 建了 detail.talk 才累积，未开启时零开销。
+// 响应正文捕获桶（talk log + agent 回路共用一只）：只有 relay 建了 detail.talk 才累积，未开启时零开销。
 // 口径与 chars/reasoningChars 同源（读 delta，不读聚合帧），区别是这里存原文而不是只计数。
 // 同样的边界：SSE 帧被 chunk 切断时该帧内容丢失（JSON.parse 失败即跳过）—— 研究用途可接受。
-const TALK_CAP_CHARS = 400_000;
+// 上限真相是 talkCapChars()（MSLXDFF_TALK_CAP_CHARS ＞ full 开 200 万 ＞ full 关 40 万）；
+// 下面的常数只是 createTalkBucket 未传 cap 时的历史缺省，必须与「full 关」档逐字相同（有测试锁死）。
+const TALK_CAP_DEFAULT = 400_000;
 
 function talkPush(talk, dst, v) {
   if (typeof v !== "string" || !v) return;
-  if (talk.n >= TALK_CAP_CHARS) { talk.capped = true; return; }
+  if (talk.n >= (talk.cap ?? TALK_CAP_DEFAULT)) { talk.capped = true; return; } // 撞顶只置位不静默：读侧靠它标 truncated
   talk.n += v.length;
   talk[dst].push(v);
 }
@@ -30,8 +34,21 @@ function talkMergeToolCalls(talk, tcs) {
   }
 }
 
-/** 新建累积桶（n/capped 防超长生成把内存吃穿）。 */
-export function createTalkBucket() { return { reasoning: [], content: [], tools: [], n: 0, capped: false }; }
+/** 新建累积桶（n/capped 防超长生成把内存吃穿）。cap = 字符上限，未传/非法 → 400_000（现状逐字不变）。 */
+export function createTalkBucket(cap) {
+  const c = Math.floor(Number(cap));
+  const use = Number.isFinite(c) && c > 0 ? c : TALK_CAP_DEFAULT;
+  return { reasoning: [], content: [], tools: [], n: 0, capped: false, cap: use };
+}
+
+/**
+ * 「该不该建桶 + 建多大」的唯一判据，收在这里是为了给 stream.js 让体积（20KB 硬门）。
+ * talk.log 与 agent 回路任一开启都必须建桶：只认 talkLogEnabled() 会让「talk.log 关 + full 开」
+ * 的响应正文全丢（detail.talk 为 null，capture 全程记到空气）。上限取 talkCapChars() 单一真相。
+ */
+export function createTalkBucketIfEnabled() {
+  return talkLogEnabled() || agentLoopEnabled() ? createTalkBucket(talkCapChars()) : null;
+}
 
 /** 逐 chunk 累积一轮对话的思考/正文/工具调用。talk 为空 = 未开启，直接返回。 */
 export function captureTalkSse(talk, txt) {

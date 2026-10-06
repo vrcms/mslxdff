@@ -6,7 +6,9 @@ import { recordChatUsage } from "../../usage/record.js"; // 窗口报表唯一�
 import { recordOutput, computeOutputRow } from "../../providers/cline/usage.js"; // cline 专属旁路统计（账号×模型，流式也覆盖）
 import { upstreamEcho } from "../../model-trace.js"; // 回显头→日志字段（谁上的/哪个号/为什么/是否冷却）单一来源
 import { recordRelayTalk } from "../../talk-log.js"; // 环形对话日志（问答全文，最近 1 小时）：五段流水在此汇合，落盘点只这一个
+import { recordAgentLoop } from "../../talk-full.js"; // agent 回路全量语料（talk/full JSONL，缺省开）：与 talk.log 并排各调一次，见 openspec default-on-agent-loop-capture D3
 import { isEmptyTurnDetail } from "../stream-scan.js"; // 空轮判据单一真相（stream.js 用它决定封不封口，这里用它决定交不交回重试）
+import { performance } from "node:perf_hooks"; // attemptMs 相减必须与 attemptStartMs 的创建点同钟（performance.now 原钟），不得走 :61 的 _perfNow —— 那个位置容得下测试桩钟（P0 混钟回归）
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
 // （参考 opencode：zen 通道不设超时；openai responses 硬编码 300s headerTimeout）
@@ -53,7 +55,10 @@ export function createRelayPipeline({
   const _mark = mark || (() => {});
   const _logCall = logCall || (() => {});
   const _logError = logError || (() => {});
-  const _perfNow = perfNow || (() => Date.now());
+  // 兜底即真实钟（P1-A）：生产无任何调用方传 perfNow（只有测试传桩）→ 缺省必须与 perf0（chat-pipeline/index.js:21）、
+  // attemptStartMs 同钟。曾兜底 Date.now，:118 的 client-abort.totalMs = Date.now − performance.now ≈ 1.79e12 的假值；
+  // 注入 perfNow 仍可覆盖（测试桩钟）。防回归见 test/agent-loop-wiring.test.js 真钟三例（含 client-abort 那条）。
+  const _perfNow = perfNow || (() => performance.now());
 
   async function execute({
     res,
@@ -129,9 +134,20 @@ export function createRelayPipeline({
       detail: out.detail ?? null,
     });
 
+    // 本次上游尝试墙钟（design D3）：attemptStartMs 的全部创建点都在 performance.now 钟上 ——
+    // serial-trial.js:51（viaRoute）、:97（tUp → hedge/localRelay）、:225（peerRelay）、:234（broadbandRelay）、auto-race.js:56（raceStart → localRelay）；
+    // relay 内部 totalMs/preflight 同钟（stream.js:81 t0=performance.now）。相减必须用 performance.now 原钟，不得走 _perfNow：
+    // 生产 5 个 handler 构造本管线都不传 perfNow → 兜底一旦退回 Date.now，一相减就是 Date.now − performance.now ≈ epoch 天文数字
+    //（P0 回归实锤：落盘 elapsedMs=1791249258686；测试喂了同钟 perfNow 桩才把混钟掩盖住 —— 防回归见 test/agent-loop-wiring.test.js 真时钟两例）。
+    // attemptStartMs 非有限（调用方未给该 ctx，如管线直调）→ 回退 out.totalMs，此时 elapsed 与 relayMs 同值（spec 降级 scenario），不伪造。
+    const attemptMs = Number.isFinite(attemptStartMs) ? Math.round(performance.now() - attemptStartMs) : out.totalMs;
     // 环形对话日志：只记有真实输出的轮次（空轮交给下面的空转判定另行报错）。
     // 纯旁路：不改闸门、不改计时、不改返回体；任何异常都吞掉，绝不影响转发。
-    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes) }); } catch {}
+    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, finishReason: out.detail?.sawFinishReason }); } catch {}
+    // 回路语料（talk/full）另起一条独立 try，不与上面合并：talk.log 是人读环形稿、capture 是机读全量语料，
+    // 两者生死独立 —— 一边不落另一边照落，判据也不同（capture 只认 hops=0，且要带 sessionKey/clientIp 供分组与来源核对）。
+    // 纯旁路同上：不改闸门、不改计时、不改返回体；out.detail.talk 是原桶（logs.js 的 dropTalk 剥的是副本），这里不再剥。
+    try { recordAgentLoop({ reqId, model: actual, via, hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp, echo: upstreamEcho(upRes), attemptMs, relayMs: out.totalMs }); } catch {}
 
     // 5a0. 空转 200：流正常结束但零正文零工具调用 → 客户端会报 EMPTY_MODEL_RESPONSE
     // （"The model ended its turn without producing any output"）；转 failover 而不是

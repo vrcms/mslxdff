@@ -92,7 +92,8 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const canForwardPeers = Boolean(peers) && hops < (maxHops ?? 3);
     mark("ordered");
 
-    evt("request", { reqId, hops, ip: clientIp(req), stream: Boolean(req?.body?.stream), prompt: summarizePrompt(req?.body), rawModel: policy.rawModel, requested, lockModel: lockModel || null });
+    const reqIp = clientIp(req); // 一次解析两处用：request 事件的 ip 字段 + 回路语料的 clientIp（routes/helpers.js 取 x-forwarded-for 首段）
+    evt("request", { reqId, hops, ip: reqIp, stream: Boolean(req?.body?.stream), prompt: summarizePrompt(req?.body), rawModel: policy.rawModel, requested, lockModel: lockModel || null });
     if (aliasInfo) evt("alias", { reqId, alias: aliasInfo, rawModel: policy.rawModel, requested });
     if (Object.keys(shareKeys).length) evt("share-keys", { reqId, providers: Object.keys(shareKeys) });
     evt("ordered", { reqId, order, canFallback, canForwardPeers, useAuto, statuses: auto?.statuses?.() ?? null });
@@ -110,7 +111,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     // 客户端会话标识（opencode 插件 chat.headers 注入）→ 透传上游做粘性路由/缓存亲和；
     // 无头时由 upstream.js 按对话首两条消息哈希兜底（不再每请求随机）
     const clientSession = String(req?.headers?.["x-session-affinity"] || req?.headers?.["x-session-id"] || "").trim() || null;
-    const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession };
+    const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp };
     if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
     await engine.run({

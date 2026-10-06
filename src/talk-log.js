@@ -43,12 +43,14 @@ const MASKS = [
   [/\b(token|accessToken|refreshToken|api[_-]?key|apiKey|secret|password|cookie|client_secret|authorization)\s*[:=]\s*[\w./+-]{12,}/gi, "$1=[已脱敏]"],
 ];
 
-/** 脱敏 + 按字节封顶截断（中文 3 字节/字，逐字累加才不会超预算）。 */
-export function maskText(v, cap = 100000) {
+const CUT_MARK = "\n…[已截断]";
+
+/** 脱敏 + 按字节封顶截断（中文 3 字节/字，逐字累加才不会超预算），并报告这一刀是否真的落下。 */
+function maskCut(v, cap = 100000) {
   let s = String(v ?? "");
   for (const [re, repl] of MASKS) s = s.replace(re, repl);
-  if (Buffer.byteLength(s, "utf8") <= cap) return s;
-  const tail = Buffer.from("\n…[已截断]", "utf8");
+  if (Buffer.byteLength(s, "utf8") <= cap) return { text: s, capped: false };
+  const tail = Buffer.from(CUT_MARK, "utf8");
   const budget = Math.max(0, cap - tail.length);
   let bytes = 0, i = 0;
   for (const ch of s) {
@@ -57,8 +59,11 @@ export function maskText(v, cap = 100000) {
     bytes += n;
     i += ch.length;
   }
-  return s.slice(0, i) + "\n…[已截断]";
+  return { text: s.slice(0, i) + CUT_MARK, capped: true };
 }
+
+/** 脱敏 + 按字节封顶截断（对外口径与改前逐字一致；要知道是否砍过用 maskCut/pushBlock）。 */
+export function maskText(v, cap = 100000) { return maskCut(v, cap).text; }
 
 function textOf(content) {
   if (typeof content === "string") return content;
@@ -78,26 +83,44 @@ export function lastUserQuestion(body) {
 
 const CUT_IN = "----8<----", CUT_OUT = "---->8----";
 
+// 标签行的「N 字」在字节封顶之后只是**已落盘**的字数；不带封顶标记，就会被读成「模型只说了这么多」。
 function pushBlock(out, label, text, cap) {
-  const m = maskText(text, cap);
-  if (!m.trim()) return;
-  out.push(`[${label} · ${m.length} 字]`, CUT_IN, m, CUT_OUT, "");
+  const { text: m, capped } = maskCut(text, cap);
+  if (!m.trim()) return false;
+  out.push(`[${label} · ${m.length} 字${capped ? " · 已封顶" : ""}]`, CUT_IN, m, CUT_OUT, "");
+  return capped;
 }
 
-/** 一条对话 = 一个可读块：头部一行元信息（ts= 是环形淘汰的唯一依据），正文三段。 */
-export function formatTalkEntry({ reqId, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts } = {}) {
+// 撞捕获上限时紧跟头部行的人类可读提醒：不必先认识 truncated=1 这个键名也能一眼看出「可能不完整」。
+const TRUNC_NOTE = "[!] 本轮已撞捕获上限（truncated=1）：思考/正文后半段未落盘，内容可能不完整 —— 别当成模型的完整回答";
+
+/** 一条对话 = 一个可读块：头部一行元信息（ts= 是环形淘汰的唯一依据），正文三段。elapsed= 取本次尝试墙钟（design D3），finish=/relayMs= 为 ADR-0046 新读数。 */
+export function formatTalkEntry({ reqId, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts, talkCapped = false, talkChars, talkCap, finishReason, relayMs } = {}) {
+  const fval = finishReason || "-"; // 缺值占位（grill Q5）：「没给 finish」不得被读成 stop；字段恒在场
   const now = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+  const trunc = talkCapped === true;
   const head = [
     `${MARK} ts=${now}`, `time=${fmtShanghaiYMDHMS(new Date(now))}`, `req=${reqId || "-"}`, `model=${model || "-"}`,
     via ? `via=${via}` : "", hops != null ? `hops=${hops}` : "", `status=${status ?? "-"}`,
     stream ? "stream=1" : "stream=0", Number.isFinite(elapsedMs) ? `elapsed=${Math.round(elapsedMs)}ms` : "",
+    // 尝试墙钟与 relay 内部计时同值时不重复打印（头行噪音克制，grill Q3）；两值不同（hedge/缓冲重放）才另列 relayMs
+    Number.isFinite(relayMs) && Number.isFinite(elapsedMs) && Math.round(relayMs) !== Math.round(elapsedMs) ? `relayMs=${Math.round(relayMs)}ms` : "",
+    `finish=${fval}`,
     usage ? `usage(prompt=${usage.prompt_tokens ?? "-"},completion=${usage.completion_tokens ?? "-"})` : "",
     upstream ? `upstream=${upstream}` : "", account ? `account=${account}` : "", pick ? `pick=${pick}` : "",
+    // 截断读数只在真截断时出现（未截断不得新增噪音字段）：cap= 上限、chars= 已捕获字符数
+    trunc ? `truncated=1 cap=${Number.isFinite(talkCap) && talkCap > 0 ? talkCap : "-"} chars=${Number.isFinite(talkChars) ? talkChars : "-"}` : "",
   ].filter(Boolean).join(" ");
-  const out = [head, ""];
+  const out = [head];
+  if (trunc) out.push(TRUNC_NOTE);
+  out.push("");
   pushBlock(out, "我问", question, 20000);
   pushBlock(out, "思考", thinking, 100000);
-  pushBlock(out, "回答", answer, 200000);
+  // 零正文不再静默跳块（spec「零输出轮必须可判读」/grill Q4）：缺块与「正文该有却没落盘」同形，缺席必须是可读读数。
+  // 只落一行标注 + 空行（没有内容可围，不套 CUT 围栏）；有真实正文的字符串照旧走 pushBlock，该段与改动前逐字节一致。
+  // 判据看 trim 不看长度（P1-B）：" "/"\n" 进 pushBlock 也会被 !m.trim() 整块跳过 → 与「正文丢盘」再度同形，而「只调工具 + 吐个换行」是真实 agent 形态。
+  if (!String(answer ?? "").trim()) out.push(`[回答 · 0 字 · 本轮无正文（finish=${fval}）]`, "");
+  else pushBlock(out, "回答", answer, 200000);
   const t = tools == null || tools === "" ? "" : String(tools);
   pushBlock(out, "工具调用", t, 20000);
   out.push("[END]", "");
@@ -177,8 +200,10 @@ export function trimTalkLog(file, nowTs = Date.now()) {
 /**
  * relay 落盘的唯一入口：把 relay() 累积的 detail.talk（思考/正文/工具分片）拼成一条对话。
  * 空轮（零正文零思考零工具）不占环形窗口 —— 那是 relay-pipeline 已经另行报错的场景。
+ * 桶的 capped/n/cap 必须一路传到 formatTalkEntry：撞顶的那条要能看出「后半截没了」。
+ * attemptMs（本次上游尝试墙钟）由调用点传入；未传（拿不到尝试起点）回退 out.totalMs —— 此时 elapsed 与 relayMs 同值（spec 降级 scenario）。
  */
-export function recordRelayTalk({ reqId, model, via, hops, body, out, echo = {} } = {}) {
+export function recordRelayTalk({ reqId, model, via, hops, body, out, echo = {}, attemptMs, finishReason } = {}) {
   if (!talkLogEnabled()) return false;
   try {
     const talk = out?.detail?.talk;
@@ -190,9 +215,11 @@ export function recordRelayTalk({ reqId, model, via, hops, body, out, echo = {} 
     if (!answer && !thinking && !tools) return false;
     const ts = Date.now();
     const block = formatTalkEntry({
-      reqId, model, via, hops, status, stream: Boolean(body?.stream),
-      elapsedMs: out?.totalMs, question: lastUserQuestion(body || {}),
+      reqId, model, via, hops, status, stream: Boolean(body?.stream), finishReason: finishReason ?? out?.detail?.sawFinishReason,
+      elapsedMs: Number.isFinite(Number(attemptMs)) ? Number(attemptMs) : out?.totalMs, // 新口径：本次尝试墙钟优先（design D3）
+      relayMs: out?.totalMs, question: lastUserQuestion(body || {}),
       thinking, answer, tools, usage: out?.detail?.usage, ...echo, ts,
+      talkCapped: talk?.capped === true, talkChars: talk?.n, talkCap: talk?.cap,
     });
     appendTalkEntry({ file: talkLogFile(model), block, atMs: ts });
     return true;

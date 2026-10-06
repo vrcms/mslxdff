@@ -270,3 +270,41 @@ test("速度恒等：首字与总耗时同加常数偏移，avgTps 不变（本�
   assert.ok(Math.abs(before.avgTps - after.avgTps) <= 0.1, `重锚前后速度必须一致：${before.avgTps} vs ${after.avgTps}`);
   assert.ok(after.avgTtfbMs - before.avgTtfbMs >= 11_900, "首字列变诚实（这才是本次要修的）");
 });
+
+test("since 优先于 hours：当日 0 点窗口只聚合 0 点后的行（CLI 默认窗口的引擎表达）", () => {
+  const midnight = new Date(2026, 8, 19, 0, 0, 0).getTime();
+  const rows = [
+    { ts: midnight - 1, model: "m/a", completion_tokens: 999, total_tokens: 999 },
+    row("m/a", -23, { completion_tokens: 500, total_tokens: 500 }),
+    { ts: midnight, model: "m/a", completion_tokens: 1, total_tokens: 1 },
+    { ts: NOW, model: "m/a", completion_tokens: 2, total_tokens: 2 },
+  ];
+  const r = aggregateUsage(rows, { hours: 24, since: midnight, now: NOW });
+  assert.equal(r.since, midnight);
+  assert.equal(r.rows, 2, "0 点前的行 MUST NOT 计入");
+  assert.equal(r.models[0].completionTokens, 3);
+  assert.equal(r.windowHours, 12, "windowHours 如实反映 0 点→12 点的 12h");
+});
+
+test("readUsageRows/usageReport 带 since：跨日文件只取窗口起点后的行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-test-usage-since-"));
+  try {
+    const u = usageDir({ dir });
+    mkdirSync(u, { recursive: true });
+    const midnight = new Date(2026, 8, 19, 0, 0, 0).getTime();
+    const ymd = (ts) => {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    writeFileSync(join(u, `${ymd(midnight - HOUR)}.jsonl`), JSON.stringify({ ts: midnight - HOUR, model: "old", total_tokens: 999 }) + "\n");
+    writeFileSync(join(u, `${ymd(midnight + 60_000)}.jsonl`), JSON.stringify({ ts: midnight + 60_000, model: "fresh", total_tokens: 5 }) + "\n");
+    const rows = await readUsageRows({ dir, since: midnight, now: NOW });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].model, "fresh");
+    const rep = await usageReport({ dir, since: midnight, now: NOW });
+    assert.equal(rep.models[0].id, "fresh");
+    assert.equal(rep.since, midnight);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

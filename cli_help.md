@@ -222,12 +222,12 @@
 ### `-stats` / `--stats`（模型用量报表）
 
 - **语法**：`mslxdff -stats [--hours N] [--json] [--model <id>]`
-- **作用**：打印近 `N` 小时（默认 24，上限 168）的模型用量。默认分成 `Token 用量` 与 `响应性能` 两张自适应边框表：`Token 用量` 每行 `模型 / 请求 / 输入 / 输出 / 思考 / 合计`，`响应性能` 每行 `模型 / 首字 / 总耗时 / 速度 / 首字样本`，两张表均含 `合计`；长模型 id 自动扩列，不截断、不挤乱其他列。
+- **作用**：默认打印**今日 0 点至现在**（系统本地时区，与 usage 文件日切同源）的模型用量；带 `--hours N`（正整数，上限 168）时切为近 `N` 小时滚动窗口；`--hours` 非法/≤0/0<N<1 等同缺省（当日窗口）。默认分成 `Token 用量` 与 `响应性能` 两张自适应边框表：`Token 用量` 每行 `模型 / 请求 / 输入 / 输出 / 思考 / 合计`，`响应性能` 每行 `模型 / 首字 / 总耗时 / 速度 / 首字样本`，两张表均含 `合计`；长模型 id 自动扩列，不截断、不挤乱其他列。
 - **首字口径**：首字 = **本次上游尝试开始 → 网关转发首个真实数据帧**，含上游排队、建连、等响应头，以及网关为取流内判决对首帧做的预读（qoder 等 provider 会预读，见 ADR-0036/0039）。`0ms` 是有效样本（本机/内存桩级路径），非流式请求不进首字的分子与分母；`首字样本 n/N` = 有首字样本数/流式请求数，`N=0` 时首字显示 `—`，N 很小时别把均值当真值。**注意**：`-status` / `-model stats` 的首字仍取自 state 终生 EMA（按转发入口量），与本表**不同源**（ADR-0039）。
 - **思考列四态**：上游报了就用地道值（无标注）；未上报但有思考内容 → 按 `思考字符 ÷ 4` 向上取整**估算**并带 `~`（沿用 cline 用量口径）；明确上报 0 且无思考内容 → `0`；两者皆无 → `—`，**不再拿 0 冒充「不思考」**。估算逐行收敛到不超过该行 `completion_tokens`；上报与估算混在同一模型时合计整列标 `~`。
-- **口径**：速度 = 输出 tokens ÷ 生成耗时（总耗时 − 首字），**按窗口加权**（`Σ输出 ÷ Σ生成耗时`），不是每请求速度的算术平均（短回答会把算术均值拉飞）；只统计成功请求（status 200）。普通表格中的大 token 用 `k/M` 缩写，`--json` 保留精确整数。
+- **口径**：速度 = 输出 tokens ÷ 生成耗时（总耗时 − 首字），**按窗口加权**（`Σ输出 ÷ Σ生成耗时`），不是每请求速度的算术平均（短回答会把算术均值拉飞）；只统计成功请求（status 200）。普通表格中的大 token 用 `k/M` 缩写；`--json` 保留精确整数，其 `since`/`until` 为毫秒时间戳——默认窗口下 `since` 恒等于当日 0 点（本地时区）、`windowHours` 为实际小数时长。
 - **数据来源**：`<logDir>/usage/YYYY-MM-DD.jsonl` 逐请求 JSONL（写 `src/usage/record.js`，聚合 `src/usage/report.js`；首字/总耗时由 `relay` 的 `preflightMs` 锚点偏移补全，见 ADR-0039）。**与 `state.json` 的 `modelStats` 终生 EMA 是两套数据**——EMA 服务排序与 `-status`/`-model stats`，本报表服务时间窗口。行按**只增字段**演进（新增 `reasoning_chars`/`reasoning_reported`/`stream`），旧行缺字段按「未知」读而非 0，已有的真实上报值不会因缺标记而降级。
-- **保留期**：默认 2 天（覆盖 24h 窗口 + 跨天边界），按日删旧文件；`MSLXDFF_USAGE_KEEP_DAYS=N` 调整。查询窗口超过保留期时会显示“历史可能不完整”警告。
+- **保留期**：默认 2 天（覆盖默认当日窗口 + 跨天边界），按日删旧文件；`MSLXDFF_USAGE_KEEP_DAYS=N` 调整。显式 `--hours` 查询窗口超过保留期时会显示“历史可能不完整”警告（默认当日窗口 ≤24h，恒在保留期内）。
 - **开关**：`MSLXDFF_USAGE_LOG=0` 完全关闭采集（此时 `-stats` 只打印关闭提示）。
 - **不含/未展开**：`-chat` 直连 `mimo-v2.5-free`/`big-pickle` 不经 8989 网关，不计入；失败请求（非 200）无 usage 也不计入，所以“请求数”是成功请求数。表格展示当前聚合层的全部字段，但不展开逐请求 `via`、`interrupted` 和单次 `tps` 明细。
 - **示例**：`mslxdff -stats` · `mslxdff -stats --hours 1` · `mslxdff -stats --json`（脚本用）· `mslxdff -stats --model opencode/big-pickle`
@@ -241,6 +241,7 @@
   - `timeline.log` 同步显示最近 N 条人读时间线（每请求一行：直连、组员、重试、最终结果、总耗时）
   - 按模型链路日志在同一个日志目录：`<provider>-<model>.log`（如 `ocgo-muse-spark-1.3-contributor.log`），每个请求逐阶段记录 request/route/upstream/peer/relay/result/client-response 与安全摘要；**事件面用黑名单**（默认全部可见，只排除噪声 `peer-health`/`heartbeat` 与敏感面 `client-session`/`upstream-probe*`），决定类事件只渲染登记过的标量字段（`status`/`reason`/`pick`/`cooled` 等），payload 与正文一律不落；上游回显 `upstream=<host>`/`account=<uid|region>`/`pick=new|sticky|switch|forced`/`cooled=<status>`；不落 prompt/响应正文/凭据
   - 当 `count <= 10` 时额外提示 `hint: mslxdff -log 100 | calls: ... errors: ... daemon: ...`
+  - **回路语料（第四条通道，缺省开）**：未设 `MSLXDFF_TALK_FULL` 即捕获（**只有显式关闭词 `0`/`off`/`false`/`no`/`disable`（trim+lowercase）才停写**，且关闭态连目录都不建；旧姿势 `=1` 继续有效），另有 `<日志根>/talk/full/<供应商>-<模型>-talkfull.jsonl`（机读全量：`system prompt` 全文 + 工具定义 + 完整历史含往轮 tool 结果 + 思考/正文/工具调用，`0600`、按字节轮转 50MB 留 3 份），人读入口是 `node scripts/talkfull-view.js`（见下节），**不是 mslxdff 子命令**；**只捕 `hops=0` 本机自发**（组员 `forwardToPeer` 转进来的对话不落盘，别当成抓到了全部流量）；同批改读数：`talk/*.log` 头行新增 `finish=<值>`（缺值 `finish=-`）与条件性 `relayMs=`（仅当 ≠`elapsed` 时出现），`elapsed=` 取**本次上游尝试墙钟**（hedge 胜者走缓冲重放不再报 2ms），零正文轮显式落 `[回答 · 0 字 · 本轮无正文（finish=…）]`，语料侧恒写 `meta.relayMs`；`events.log`（写前 `dropTalk` 剥正文）、`<provider>-<model>.log`（不落正文）两条口径逐字不变。ADR-0045 + ADR-0046
 - **参数解析**：`args[ idx+1 ]` 转 `Number`，仅当整数且 `>0` 时取用，否则默认 10。
 - **示例**：
   ```bash
@@ -279,6 +280,29 @@
   无插件时提示：`(no plugins — drop *.mjs files into a dir above, see docs/plugins.md)`。
 - **目录解析**：`resolvePluginDirs({ pkgRoot })` 返回 `[pkg/plugins, userPlugins]`；若 `MSLXDFF_PLUGINS_DIR` 设了则只扫该目录。
 - **示例**：`mslxdff -plugins`
+
+### 回路语料视图 `node scripts/talkfull-view.js`（只读脚本，**非** mslxdff 子命令）
+
+- **是什么**：agent 回路捕获（ADR-0045，缺省值与读数口径修订见 ADR-0046）的只读视图。语料 = `<日志根>/talk/full/<供应商>-<模型>-talkfull.jsonl`，一行 = 一次上游尝试的全量请求与响应（`system prompt` 全文、工具定义、完整历史含往轮 tool 结果、思考/正文/合并后的工具调用）。**缺省开**：什么都不设就在落盘（未设 `MSLXDFF_TALK_FULL` 即捕）；想停写得设显式关闭词 `0`/`off`/`false`/`no`/`disable` 并重启（关闭态连目录都不建）。**红线不变项**：`0600`（新建带 mode、存量补 `chmodSync`）、只落日志根下的 `talk/full/`（**MUST NOT 在仓库工作树内、MUST NOT 入 git**）、凭据写前**双层脱敏**（字段黑名单 + `maskText`）、按**字节**轮转 50MB × 留 3 份、单条超 16MB 降级不丢记录、**只捕 `hops=0`**；本视图仍是**只读脚本，不是 mslxdff 子命令**。
+- **语法**：`node scripts/talkfull-view.js [--file <path>] [--model <供应商/模型id>] [--session <key>] [--tail N] [--all]`
+- **日志根口径**（与网关同源，脚本内独立实现）：`MSLXDFF_DAEMON_DIR` ＞ state.json 同目录（`MSLXDFF_STATE_FILE`）＞ `~/.config/mslxdff/`。
+- **开关与阈值**（单一真相 `src/talk-full.js`；逐行说明见 [附录 A 环境变量](#附录-a-环境变量)）：`MSLXDFF_TALK_FULL`（**缺省开**——未设即捕，只有显式关闭词 `0`/`off`/`false`/`no`/`disable`（trim+lowercase）停写且不建目录；`1`/`true`/`on`/`yes` 与任意其它取值=开，旧 `=1` 姿势继续有效；**只捕 `hops=0`**，组员 `forwardToPeer` 转进来的对话**不落盘**）、`MSLXDFF_TALK_CAP_CHARS`（缺省开 2000000／显式关 400000，正数 env 覆盖优先）、`MSLXDFF_TALK_FULL_MAX_MB`（50，按字节轮转）、`MSLXDFF_TALK_FULL_KEEP`（3，`0` 合法=不留旧份）、`MSLXDFF_TALK_FULL_MAX_LINE_MB`（16，超限降级不丢记录）。改 env 生效姿势：`cmd /c .\restart-daemon.bat` + 三件套验收。
+- **参数**：
+  - 无参数：列出日志根 `talk/full/` 下候选文件（mtime 倒序 + 各自字节数），**首行先打印目录总占用**（含 `.1/.2` 轮转旧份；单模型上界 `(KEEP+1)×MAX_MB`，默认最坏 200MB）——**缺省开 ⇒ 这份账每台都会真实产生**，「它涨了多少」是一眼读数，不是猜测
+  - `--file <path>`：直接渲染指定文件（可以是轮转旧份 `…jsonl.2`）
+  - `--model <id>`：按 `talkLogName` 同规则算出文件名再渲染（`qoder/qfmodel` → `qoder-qfmodel-talkfull.jsonl`）
+  - `--session <key>`：只渲染该 `sessionKey`（先精确匹配，落空再子串匹配；未给 `--file`/`--model` 时按 mtime 取最新文件）；键形态 = `sha1尾12-原值前8`（客户端 `x-session-id`/`x-session-affinity` ＞ 首条 system+首条 user 派生 ＞ 进程兜底）
+  - `--tail N`：每会话只渲染末 N 条（缺省 50；**体检读数同样只算被渲染的这些轮**）；`--all`：全部记录 + 单段正文不截断（默认单段剪 2000 字符、工具 description 剪 200 字符）
+- **输出顺序**：`[成本]` 占用读数 → `[解析]` 行数/坏行数 → `[分组]` 会话数与 `hops`/`clientIp` 取值 → 每个会话先「**回路体检**」五项读数（逐项打印判据与阈值，缺判据不下结论）再逐轮正文（首条完整呈现 system 与工具清单，后续轮只打与上一条前缀 diff 的新增尾巴）。五项＝① 上下文膨胀曲线（逐轮 `requestBytes`/历史字符/本轮新增 + 点名涨幅最大轮）② 重复工具调用（同 name + 同 arguments 归一后的 sha1 尾 8，累计 ≥3 次点名并给轮号）③ 连续零输出轮（`toolCalls=0` 且正文=0 连续 ≥2 轮；思考非空也算零输出）④ 思考循环信号（reasoning 命中「继续/重试/再试一次/再来一次/重新尝试/上一次失败/还是失败/换个思路/again/retry/previous attempt」，同会话命中 ≥3 轮才给结论）⑤ 额度吃光形态（`finishReason=length` 且 思考/(思考+正文) ≥ 0.9，带 `max_tokens` 读数）。逐轮耗时读 `elapsed` = **本次上游尝试墙钟**（ADR-0046）；旧记录缺该值时回落 `meta.relayMs` 并标注——别拿 relay 内部计时当上游耗时
+- **防坑**：轮次标题行标 `⚠truncated`（内容触顶，后半截没了）与 `⚠降级`（请求体只剩结构摘要、前缀 diff 不可用）——**别把断尾当完整**；零正文轮会被**明写**成「本轮无正文」（`talk/*.log` 里是 `[回答 · 0 字 · 本轮无正文（finish=…）]`，头行带 `finish=<值>`、缺值 `finish=-`），不是「正文本该有却没落盘」；坏行（多进程交错）跳过并计数，不整体报错。
+- **只读契约**：全程只用 `readFileSync`/`statSync`/`readdirSync` —— 不建目录、不写文件、不改权限、不 import `src/`。
+- **示例**：
+  ```bash
+  node scripts/talkfull-view.js                                     # 有哪些文件 + 目录总占用
+  node scripts/talkfull-view.js --model qoder/qfmodel --tail 5      # 该模型末 5 轮 + 体检
+  node scripts/talkfull-view.js --session 3f9a1c2b4d6e-ses_ --all   # 一个会话拼成完整回路
+  ```
+- **止血与收尾**：不想再落盘就设 `MSLXDFF_TALK_FULL=0`（或 `off`/`false`/`no`/`disable`）并重启（`cmd /c .\restart-daemon.bat` + 三件套验收）即停写且不建目录，`rm -r <日志根>/talk/full` 清已落材料；`events.log`（写前剥正文）与 `<provider>-<model>.log`（不落正文）两条口径逐字不受影响，`talk/*.log` 除头行新字段（`finish=`/`relayMs=`）与 `elapsed=` 口径外不变（仍 1h 环形 + 5MB、只留末条 user）。决策与红线例外见 `docs/adr/0045-agent-loop-capture-lane.md`，**缺省开与两处读数修订**见 `docs/adr/0046-agent-loop-capture-default-on.md`。
 
 ---
 
@@ -1337,6 +1361,11 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_CODEARTS_REFRESH_SKEW_MS` | `1800000` | STS 临时凭证提前刷新窗口（默认提前 30min） |
 | `MSLXDFF_CODEARTS_AUTO_CLAIM` | `1` | 福利模型自动领取（`benefit claim`，幂等；`0` 关） |
 | `MSLXDFF_CODEARTS_BASE_URL` | — | codearts 上游地址覆盖（state `providerConfigs.codearts.baseUrl` 优先） |
+| `MSLXDFF_TALK_FULL` | **开**（未设置即捕获，缺省就写、就建目录） | agent 回路捕获总开关（ADR-0045 立通道，**ADR-0046 把缺省值翻成开并改写其红线例外第①条**）：**缺省开（opt-out）**——只有显式关闭词 `0`/`off`/`false`/`no`/`disable`（trim+lowercase）才停写，关闭态连目录都不建；`1`/`true`/`on`/`yes` 与任意其它取值一律=开（旧姿势 `=1` 继续有效，写错的值不得静默变关）。开关与全部默认阈值的单一真相 = `src/talk-full.js`；改 env 生效姿势 = 重启 daemon（`cmd /c .\restart-daemon.bat` + 三件套验收），无热加载。**只捕 `hops=0` 的本机自发流量**：组员 `forwardToPeer` 转进来的请求（`hops>0`）不落盘——别把它当「全部流量」；`mslxdff -chat` 属 `hops=0` 会被捕。**新读数（ADR-0046）**：`talk/*.log` 头行 `finish=<值>`（缺值 `finish=-`）与条件性 `relayMs=`（仅当 ≠`elapsed` 时出现），`elapsed=` 取**本次上游尝试墙钟**；语料恒写 `meta.relayMs`，零正文轮显式落 `[回答 · 0 字 · 本轮无正文（finish=…）]`。详见本节末「回路语料视图」 |
+| `MSLXDFF_TALK_CAP_CHARS` | 缺省开 `2000000` / 显式关 `400000` | 响应正文桶上限（思考+正文+工具分片累计字符数）：`talkCapChars()` 单一真相 = env 覆盖 ＞ 开关开着 200 万 ＞ 显式关闭 40 万（须为正数才覆盖；**缺省档随 `MSLXDFF_TALK_FULL` 连动**，ADR-0046）。**复用同一个 `detail.talk` 桶**，不为捕获另建第二份；桶只要 `MSLXDFF_TALK_LOG` 或 `MSLXDFF_TALK_FULL` 任一开着就建（缺省开即默认建，在途请求内存上界 200 万字符；要旧内存档就显式 `MSLXDFF_TALK_CAP_CHARS=400000`）。撞顶必须看得见 → 语料行落 `meta.truncated`+`meta.cap`+`meta.responseChars`，`talk/*.log` 块头行落 `truncated=1 cap=… chars=…` 并紧跟一行 `[!]` 人话提醒 |
+| `MSLXDFF_TALK_FULL_MAX_MB` | `50` | 回路语料单文件轮转阈值（MB）：按**字节** rename 轮转 `.jsonl`→`.jsonl.1`…（不按时间环形，调试要看几天前的会话）。`envInt` 只认正数：`0`/非法 **回落默认而非关闭** |
+| `MSLXDFF_TALK_FULL_KEEP` | `3` | 回路语料保留旧份数（**`0` 合法** = 超限直接删当前文件、不留旧份，与上面两个 MB 档的语义相反）。单模型占用上界 `(KEEP+1)×MAX_MB` = 默认最坏 200MB |
+| `MSLXDFF_TALK_FULL_MAX_LINE_MB` | `16` | 回路语料单条记录上限（MB）：超限**不丢记录**，`request.messages` 原地降级为 `{i,role,chars,hash,head}` 结构摘要并置 `meta.truncated=true`（极端体量再二级剪 `tools` 与思考/正文）；`envInt` 同上一条（只认正数） |
 
 > 注：`-port`/`-provider` 等 CLI 写入的 state 优先级高于同名 env（如 `MSLXDFF_PORT`），但 `MSLXDFF_<ID>_KEY` 单值 env 优先于 state 的多 key（便于容器/CI 临时覆盖）。
 

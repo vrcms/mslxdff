@@ -2,8 +2,7 @@ import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
 import { json } from "./helpers.js";
 import { extractUsageFromSseText } from "../metrics.js";
-import { scanSseChunk, scanNonStreamBody, preflightMs, createTalkBucket, captureTalkFallback, isEmptyTurnDetail, holdableChunk, extractRetryAfterSec, isTrivialFrame } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数全在 stream-scan）
-import { talkLogEnabled } from "../talk-log.js"; // 环形对话日志开关（默认开）
+import { scanSseChunk, scanNonStreamBody, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, extractRetryAfterSec, isTrivialFrame } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
 import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
 // SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
 // 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
@@ -127,7 +126,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
     reasoningChars: 0, // 思考内容字符数（与 chars 分列，相加会重复计数）
     toolCalls: 0,
     chatShaped: false,
-    talk: talkLogEnabled() ? createTalkBucket() : null, // 环形对话日志正文桶（关闭时为 null，零开销）
+    talk: createTalkBucketIfEnabled(), // 正文桶：talk.log 或回路捕获任一开就建，上限单一真相 talkCapChars()
     heldErrorChunks: 0,
     upstreamErrorText: null,
     recoveries: 0,
