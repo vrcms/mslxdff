@@ -34,6 +34,7 @@ export function createQoderProvider({
   file,
   region,
   fetchImpl,
+  sharedModelsSvc, // chatWithKeys 等临时门面复用主实例目录快照（评审路1 P1#3：冷缓存否则恒 false）
   cooldownMs = envInt("MSLXDFF_QODER_COOLDOWN_MS", 30_000),
   // 额度耗尽（code 110）按天重置：短冷却等于反复撞死号，故单独配长冷却（默认 1h）
   quotaCooldownMs = envInt("MSLXDFF_QODER_QUOTA_COOLDOWN_MS", 3600_000),
@@ -88,9 +89,18 @@ export function createQoderProvider({
   }
   const region0 = region; // 构造参数优先
 
-  const chatSvc = createChatService({ id, fetchImpl, timeoutMs: connectTimeoutMs });
+  const chatSvc = createChatService({
+    id,
+    fetchImpl,
+    // 目录驱动请求（只读 peekModels 缓存，chat 路径恒 0 额外上游调用；preheat 负责灌缓存）
+    getModelMeta: (sess2, reg, key) => {
+      const list = modelsSvc.peekModels(reg);
+      return list ? list.find((m) => m.id === `${id}/${key}` || m.id === key) || null : null;
+    },
+    timeoutMs: connectTimeoutMs,
+  });
   // models 服务按号选区：构造时无固定 region，listModels(sess, region) 动态传
-  const modelsSvc = createModelsService({ id, fetchImpl });
+  const modelsSvc = sharedModelsSvc || createModelsService({ id, fetchImpl });
 
   // 失败冷却：401/403/429/5xx 冷却当前号（cooldownMs，默认 30s），坏号不再参与轮换。
   // 额度耗尽（quota）走长冷却（quotaCooldownMs，默认 1h）——额度按天重置，短冷却等于反复撞死号。
@@ -232,7 +242,7 @@ export function createQoderProvider({
 
   async function close() {}
   async function chatWithKeys(body, keysOverride, opts) {
-    const tmp = createQoderProvider({ id, apiKeys: keysOverride, file, fetchImpl, cooldownMs, queueCooldownMs, connectTimeoutMs });
+    const tmp = createQoderProvider({ id, apiKeys: keysOverride, file, fetchImpl, cooldownMs, queueCooldownMs, connectTimeoutMs, sharedModelsSvc: modelsSvc });
     return tmp.chat(body, opts);
   }
 

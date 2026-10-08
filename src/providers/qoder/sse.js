@@ -40,7 +40,10 @@ export function extractDelta(dataLine) {
     usageOut = Math.trunc(Number(j.usage.completion_tokens) || 0);
   }
   const choices = Array.isArray(j.choices) ? j.choices : [];
+  let finishReason = "";
   for (const ch of choices) {
+    const fr = ch?.finish_reason;
+    if (typeof fr === "string" && fr) finishReason = fr;
     const delta = ch?.delta;
     if (!delta) continue;
     const role = typeof delta.role === "string" ? delta.role : "";
@@ -48,7 +51,7 @@ export function extractDelta(dataLine) {
     const reasoning = typeof delta.reasoning_content === "string" ? delta.reasoning_content : "";
     const toolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length ? delta.tool_calls : null;
     if (role || content || reasoning || toolCalls) {
-      return { role, content, reasoning, toolCalls, usageIn, usageOut };
+      return { role, content, reasoning, toolCalls, usageIn, usageOut, ...(finishReason ? { finishReason } : {}) };
     }
   }
   if (typeof j.code === "string" && j.code && j.code !== "0") {
@@ -58,6 +61,7 @@ export function extractDelta(dataLine) {
     if (isQuotaError(j.code, msg)) return { err: { kind: "quota", status: 429, code: j.code, detail: msg || `code=${j.code}` } };
     return { err: { kind: /inappropriate|DataInspection|Sensitive|ContentFilter/i.test(msg) ? "content_policy" : "business", code: j.code, detail: msg } };
   }
+  if (finishReason) return { finishReason, usageIn, usageOut };
   if (usageIn > 0 || usageOut > 0) return { usageIn, usageOut };
   // 走到这里 = 帧既无 content/tool_calls、也无业务错、也无 usage。空轮排查的关键取证点：
   // 把内层 JSON 的顶层键与 choices 原样打出来，一眼看出上游改了什么字段名。

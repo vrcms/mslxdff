@@ -2,6 +2,9 @@
 // 真流式走 stream.js；本模块只服务 stream:false（行为与旧 callQoder 聚合同）。
 import { extractDelta } from "./sse.js";
 
+// 与 stream.js 同限：未完结行超 2MiB 即中断（内存保护）。
+const MAX_BUFFER_CHARS = 2 * 1024 * 1024;
+
 export async function aggregateQoderStream(upstreamRes) {
   const reader = upstreamRes.body.getReader();
   const dec = new TextDecoder();
@@ -10,6 +13,7 @@ export async function aggregateQoderStream(upstreamRes) {
   let content = "";
   let reasoning = "";
   const toolCalls = [];
+  let finishReason = "";
   let sawContent = false;
   for (;;) {
     const { done, value } = await reader.read();
@@ -23,6 +27,7 @@ export async function aggregateQoderStream(upstreamRes) {
       if (!payload || payload === "[DONE]") continue;
       const d = extractDelta(payload);
       if (d.err) throw d.err;
+      if (d.finishReason) finishReason = d.finishReason;
       if (d.usageIn > 0 || d.usageOut > 0) {
         usage = { prompt_tokens: d.usageIn, completion_tokens: d.usageOut, total_tokens: d.usageIn + d.usageOut };
       }
@@ -30,13 +35,17 @@ export async function aggregateQoderStream(upstreamRes) {
       if (d.reasoning) { reasoning += d.reasoning; sawContent = true; }
       if (d.toolCalls) { toolCalls.push(...d.toolCalls); sawContent = true; }
     }
+    // 完整行消费完毕后再判越限：leftover 超大不得把同 chunk 里的合法帧连坐丢弃（评审路1 P1#4）
+    if (buf.length > MAX_BUFFER_CHARS) {
+      throw { kind: "upstream", status: 502, detail: "qoder SSE buffer exceeded 2MiB limit" };
+    }
     if (done) break;
   }
   if (!sawContent && !usage) throw { kind: "upstream", status: 502, detail: "empty upstream stream" };
-  return { usage, content, reasoning, toolCalls };
+  return { usage, content, reasoning, toolCalls, finishReason };
 }
 
-export function toCompletionJson({ model, chatId, content, reasoning, toolCalls, usage }) {
+export function toCompletionJson({ model, chatId, content, reasoning, toolCalls, usage, finishReason }) {
   const msg = { role: "assistant", content: content || (toolCalls.length ? null : "") };
   if (reasoning) msg.reasoning_content = reasoning;
   if (toolCalls.length) msg.tool_calls = toolCalls;
@@ -45,7 +54,7 @@ export function toCompletionJson({ model, chatId, content, reasoning, toolCalls,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message: msg, finish_reason: toolCalls.length ? "tool_calls" : "stop" }],
+    choices: [{ index: 0, message: msg, finish_reason: finishReason || (toolCalls.length ? "tool_calls" : "stop") }],
     usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
 }

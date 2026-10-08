@@ -119,6 +119,11 @@ export function buildQoderBody({ template, userType, model, messages, tools, max
     body.model_config.key = model;
     if (isReasoning) body.model_config.is_reasoning = true;
   }
+  // 推理标志两处镜像写（对齐官方 CLI 请求形状），只写 model_config 上游不吐 reasoning_content
+  if (isReasoning && body.chat_context?.extra?.modelConfig) {
+    body.chat_context.extra.modelConfig.is_reasoning = true;
+    body.chat_context.extra.modelConfig.key = model; // 与 model_config.key 同步，不留模板 "auto"（评审路1 P1#5）
+  }
   if (maxTokens > 0 && body.parameters) body.parameters.max_tokens = maxTokens;
   const prompt = extractLatestUserPrompt(messages);
   if (body.business) {
@@ -131,7 +136,8 @@ export function buildQoderBody({ template, userType, model, messages, tools, max
     if (body.chat_context.extra?.originalContent) body.chat_context.extra.originalContent.text = prompt;
   }
   body.messages = messages;
-  if (tools != null) body.tools = tools;
+  // tools 空数组契约：模板内嵌的 14 个 Qoder CLI 工具永不出门；无工具时上游官方亦发 []
+  body.tools = Array.isArray(tools) && tools.length ? tools : [];
   return { body, prompt, mcSource: body.model_config?.source || "system" };
 }
 

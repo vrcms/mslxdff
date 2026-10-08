@@ -3,6 +3,9 @@
 // usage 只在尾帧出现：收到即记，附在 finish chunk 上一次发出（与旧回放语义一致）。
 import { extractDelta } from "./sse.js";
 
+// SSE 缓冲上限：未完结行超 2MiB 立即中断（内存保护，对齐外部参照实现 defaultMaxSseBufferChars）
+const MAX_BUFFER_CHARS = 2 * 1024 * 1024;
+
 // 空轮排障用的临时日志开关：QODER_DEBUG_STREAM=1 才输出，默认静默（问题定位后可摘）
 const DBG_STREAM = () => process.env.QODER_DEBUG_STREAM === "1";
 const sdbg = (...a) => { if (DBG_STREAM()) console.log("[qoder-stream]", ...a); };
@@ -30,7 +33,9 @@ export function reshapeQoderStream(upstreamRes, { model, chatId, prefetched = []
   // 判决帧会在这里被正常解析并抛错，同时 chat.js 已用同一批帧定出状态码挂上门面。
   let buf = prefetched.map((b) => dec.decode(b, { stream: true })).join("");
   let usage = null;
-  let finish = "stop";
+  // 收尾判定与 aggregate 同构：上游给过 finish_reason 一律优先，全程没给才兜底（tool_calls > stop）
+  let upstreamFinish = "";
+  let sawToolCalls = false;
   let sawContent = false;
   let finishSent = false;
   const stream = new ReadableStream({
@@ -67,21 +72,28 @@ export function reshapeQoderStream(upstreamRes, { model, chatId, prefetched = []
               usage = { prompt_tokens: d.usageIn, completion_tokens: d.usageOut, total_tokens: d.usageIn + d.usageOut };
               sdbg(`[usage] ${JSON.stringify(usage)}`);
             }
+            if (d.finishReason) upstreamFinish = d.finishReason;
             const delta = {};
             if (!sawContent) delta.role = "assistant";
             if (d.content) { delta.content = d.content; contentLen += d.content.length; sawContent = true; }
             if (d.reasoning) { delta.reasoning_content = d.reasoning; sawContent = true; }
-            if (d.toolCalls) { delta.tool_calls = d.toolCalls; finish = "tool_calls"; sawContent = true; }
+            if (d.toolCalls) { delta.tool_calls = d.toolCalls; sawToolCalls = true; sawContent = true; }
             if (Object.keys(delta).length) send(openaiChunk({ model, chatId, delta }));
-            sdbg(`[acc] line#=${lineIdx} sawContent=${sawContent} contentLen=${contentLen} finish=${finish} usage=${JSON.stringify(usage)}`);
+            sdbg(`[acc] line#=${lineIdx} sawContent=${sawContent} contentLen=${contentLen} upstreamFinish=${upstreamFinish} usage=${JSON.stringify(usage)}`);
+          }
+          // 完整行消费完毕后再判越限：leftover 超大不得把同 chunk 里的合法帧连坐丢弃（评审路1 P1#4）
+          if (buf.length > MAX_BUFFER_CHARS) {
+            sdbg(`[buffer-limit] leftover=${buf.length} chars → abort stream`);
+            throw { kind: "upstream", status: 502, detail: "qoder SSE buffer exceeded 2MiB limit" };
           }
           if (done) break;
         }
-        sdbg(`[end] totalChunks=${chunkIdx} totalLines=${lineIdx} sawContent=${sawContent} contentLen=${contentLen} finish=${finish} usage=${JSON.stringify(usage)}`);
+        sdbg(`[end] totalChunks=${chunkIdx} totalLines=${lineIdx} sawContent=${sawContent} contentLen=${contentLen} upstreamFinish=${upstreamFinish} usage=${JSON.stringify(usage)}`);
         if (!sawContent && !usage) {
           sdbg(`[empty-stream] sawContent=false usage=null → throw 502 empty upstream stream`);
           throw { kind: "upstream", status: 502, detail: "empty upstream stream" };
         }
+        const finish = upstreamFinish || (sawToolCalls ? "tool_calls" : "stop");
         send(openaiChunk({ model, chatId, delta: {}, finish, usage }));
         send("data: [DONE]\n\n");
         finishSent = true;

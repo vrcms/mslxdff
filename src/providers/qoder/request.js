@@ -5,7 +5,7 @@ import { buildCosyHeaders, pathSigFrom } from "./session.js";
 import { cosyEncode } from "./encode.js";
 import { buildQoderBody, mapModel } from "./payload.js";
 
-export function buildUpstreamRequest({ sess, region, model, messages, tools, maxTokens }) {
+export function buildUpstreamRequest({ sess, region, model, messages, tools, maxTokens, isReasoning }) {
   const upstreamModel = mapModel(model);
   const { body, mcSource } = buildQoderBody({
     template: undefined,
@@ -14,6 +14,7 @@ export function buildUpstreamRequest({ sess, region, model, messages, tools, max
     messages,
     tools,
     maxTokens,
+    isReasoning,
   });
   const ep = getEndpoints(normalizeRegion(region));
   const url = ep.chatStreamURL;

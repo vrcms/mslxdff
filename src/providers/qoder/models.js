@@ -67,7 +67,11 @@ export function createModelsService({ id = "qoder", fetchImpl, clock = Date.now 
      return list;
    }
  
-   function clearCache() { cache = null; fetchedAt = 0; cacheByRegion.clear(); }
- 
-   return { listModels, clearCache, _getCache: () => cache ?? cacheByRegion.get("global")?.list ?? null };
+  function clearCache() { cache = null; fetchedAt = 0; cacheByRegion.clear(); }
+  // 快照语义（评审路2 P0：不吃 TTL）：daemon 稳态里 chat 不再回源，能力标记「过期」也比「丢失」强——
+  // is_reasoning 启动预热后持续有效；刷新走 listModels（preheat/CLI/聚合路由），chat 路径恒 0 额外上游调用。
+  function peekModels(region = "global") {
+    return cacheByRegion.get(normalizeRegion(region))?.list ?? null;
+  }
+  return { listModels, peekModels, clearCache, _getCache: () => cache ?? cacheByRegion.get("global")?.list ?? null };
  }

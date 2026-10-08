@@ -1,6 +1,7 @@
 // qoder 对话服务：上游恒 stream:true；请求方 stream=true → 真流式转发边收边吐，
 // false → 聚合回 JSON。装配走 request.js，帧格式走 sse.js，两条管线共享。
 import { compatFetch, timeoutSignal } from "../../compat.js";
+import { mapModel } from "./payload.js";
 import { normalizeRegion } from "./constants.js";
 import { buildUpstreamRequest } from "./request.js";
 import { reshapeQoderStream } from "./stream.js";
@@ -77,7 +78,7 @@ async function peekEnvelopeVerdict(upRes, cdbg) {
   });
   return { res: new Response(body, { status: upRes.status, headers: upRes.headers }), status, quota, queued, frames };
 }
-export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
+export function createChatService({ id = "qoder", fetchImpl, timeoutMs, getModelMeta } = {}) {
   if (!fetchImpl) fetchImpl = compatFetch;
 
   // body: OpenAI chat 请求；sess: 已建 COSY 会话；region: 该账号所属区（每号独立选端点）。返回 Response。
@@ -120,6 +121,12 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
     const tools = Array.isArray(body?.tools) && body.tools.length ? body.tools : null;
     const messages = Array.isArray(body?.messages) ? body.messages : [];
     const maxTokens = Number(body?.max_tokens) || 0;
+    // is_reasoning 由模型目录供数（index 注入 getModelMeta，只读 peekModels 快照缓存，chat 路径恒 0 上游调用）；
+    // 冷缓存/缺失一律降级 false（= 旧行为，不阻断对话）—— P0：推理标志此前从未出门。
+    let isReasoning = false;
+    try {
+      if (getModelMeta) isReasoning = (await getModelMeta(sess, normalizeRegion(region), mapModel(model)))?.is_reasoning === true;
+    } catch {}
 
     let upRes; let reqUrl = "";
     const echo = (res) => withEcho(res, reqUrl, region, pick);
@@ -127,7 +134,7 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs } = {}) {
     const cdbg = (...a) => { if (process.env.QODER_DEBUG_STREAM === "1") console.log("[qoder-chat]", ...a); };
     let upMs = 0;
     try {
-      const req = buildUpstreamRequest({ sess, region: normalizeRegion(region), model, messages, tools, maxTokens });
+      const req = buildUpstreamRequest({ sess, region: normalizeRegion(region), model, messages, tools, maxTokens, isReasoning });
       reqUrl = req.url;
       cdbg(`[req] url=${hostOf(req.url)} region=${normalizeRegion(region)} model=${model} msgs=${messages.length} tools=${tools?.length ?? 0} maxTokens=${maxTokens} stream=${stream} bodyBytes=${req.bodyStr?.length ?? 0}`);
       const t0 = Date.now();
