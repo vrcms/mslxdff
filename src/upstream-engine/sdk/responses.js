@@ -141,6 +141,11 @@ export async function attemptOnceResponsesSdk({
       }
     }
     if (mapped) return mapped;
+    // 非 HTTP 类错误（网络断/超时/无 statusCode）经 errorResponseFromSdkError 映射为 null：
+    // 必须 rethrow，否则 res 保持 undefined 掉到下面 res.stream，把真实网络错误伪装成
+    // "Cannot read properties of undefined" 的 TypeError 502（2026-10-07 muse-spark 实测）。
+    // 不可无条件 throw：400(encrypted) 剥态重试成功也走到这里（res 已赋值、mapped 置 null）。
+    if (res === undefined) throw e;
   }
   const out = streamResponseFromParts(res.stream, { marker, clock, t0, captured });
   if (encRetry) { try { out._t.encRetry = true; } catch {} }
