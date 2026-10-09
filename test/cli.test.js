@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -176,4 +176,66 @@ test("-model refresh fetches from the upstream and updates the cache", async () 
   } finally {
     srv.close();
   }
+});
+
+// ---------- -setto claude：入口校验必须先于任何写盘（评审 P1-5） ----------
+
+test("-setto claude auto → 退出 1，不碰 ~/.claude/settings.json", () => {
+  const home = tmpState();
+  const res = runCli(["-setto", "claude", "auto"], { HOME: home, USERPROFILE: home });
+  assert.equal(res.status, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stderr, /auto/);
+  assert.equal(existsSync(join(home, ".claude", "settings.json")), false, "校验没过就不许写用户配置");
+});
+
+test("-setto claude 真写隔离 HOME：键面正确、token 不外泄、二次运行零字节改动", () => {
+  const home = tmpState();
+  const dir = tmpState(); // 两次运行共用同一 daemon 目录 → token 稳定，才测得出幂等
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json") };
+  const one = runCli(["-setto", "claude", "qwenwork/test-model"], env);
+  assert.equal(one.status, 0, `stdout=${one.stdout} stderr=${one.stderr}`);
+  const p = join(home, ".claude", "settings.json");
+  const s = JSON.parse(readFileSync(p, "utf8"));
+  assert.equal(s.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8989", "BASE_URL 不带 /v1（客户端自拼）");
+  assert.equal(s.env.ANTHROPIC_AUTH_TOKEN.length > 32, true, "token 应已写入");
+  assert.ok(!one.stdout.includes(s.env.ANTHROPIC_AUTH_TOKEN), "CLI 输出不得回显 token");
+  assert.equal(s.env.ANTHROPIC_MODEL, undefined, "env.ANTHROPIC_MODEL 必须让位给 modelPicker");
+  assert.equal(s.env.CLAUDE_CODE_ATTRIBUTION_HEADER, "0");
+  assert.equal(s.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, "1");
+  assert.equal(s.model, "qwenwork/test-model");
+  assert.equal(s.modelPicker.options[0].model, "qwenwork/test-model");
+  assert.equal(s.modelPicker.options[0].behavesAs, "claude-sonnet-5");
+  assert.equal(existsSync(join(home, ".claude", "settings.pre-mslxdff.json")), false, "首次接管前无可备份原文，不该凭空造备份");
+  const two = runCli(["-setto", "claude", "qwenwork/test-model"], env);
+  assert.equal(two.status, 0, two.stderr);
+  assert.match(two.stdout, /已是目标状态/);
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), s, "幂等：二次运行字节不变");
+});
+
+test("-setto claude 未知 target 仍被白名单挡住", () => {
+  const home = tmpState();
+  const res = runCli(["-setto", "claude-not"], { HOME: home, USERPROFILE: home });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /usage: mslxdff -setto/);
+});
+
+test("-setto claude --behaves-as 缺值 → 退出 1，且不碰 settings.json 也不先写 preferredModel", () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json") };
+  const res = runCli(["-setto", "claude", "qwenwork/test-model", "--behaves-as"], env);
+  assert.equal(res.status, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stderr, /--behaves-as 需要取值/);
+  assert.equal(existsSync(join(home, ".claude", "settings.json")), false, "参数没验过就不许写用户配置");
+  assert.ok(!/default model set to:/.test(res.stdout), "校验必须先于 savePreferredModel，不得先改默认模型再报错");
+});
+
+test("-setto claude --all 而勾选集为空 → 明确提示回落单模型", () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json") };
+  const res = runCli(["-setto", "claude", "--all"], env);
+  assert.equal(res.status, 0, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stdout, /--all：modelPicks 勾选集为空/);
+  assert.match(res.stdout, /先跑 mslxdff -model pick/);
 });

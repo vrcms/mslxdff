@@ -94,6 +94,7 @@
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1；`picks` 非空时自动摘除未在 picks 的失效本地条目，非本地条目永不动） | 是 | 热重载 |
 | `mslxdff -setto chatgpt [modelId]` | `--setto`（`codex` 等价） | 设默认模型并写入 Codex/ChatGPT 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `http://127.0.0.1:<port>/v1` + Responses API，鉴权走 `mslxdff -showtoken` 命令不落盘） | 是 | Codex 重启/reload 生效 |
+| `mslxdff -setto claude [modelId\|--all] [--behaves-as <id>]` | `--setto`（`-a` 与裸 `all` 亦为批量；`--behaves-as ""` 关闭能力锚） | 设默认模型并写入 Claude Code 用户设置 `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址）：`env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` **不带 /v1**（客户端自拼 `/v1/messages`，ADR-0047 外壳）+ 明文 `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_ATTRIBUTION_HEADER=0` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `model` + `modelPicker.options`（**每行带 `behavesAs`，缺省 `claude-sonnet-5`** —— 实测本机 Claude Code 对不认识且无映射的 id 直接拒跑并发不出请求）；只动这些键、其余键（hooks/permissions 等）与键序保留；**首写前一次性备份 `settings.pre-mslxdff.json`（已存在不覆盖）**；JSON 解析失败拒写、写不进即报错不谎报；token 轮换后需重跑 | 是（写 `preferredModel`） | 重启 claude 生效（env/model 均启动时读） |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
 | `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
 | `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
@@ -923,7 +924,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 
 ---
 
-## 7. 外部同步（WorkBuddy / opencode）
+## 7. 外部同步（WorkBuddy / opencode / Codex / Claude Code）
 
 ### `-setto opencode [modelId|--all]` / `--setto opencode [modelId|--all]`
 
@@ -1013,6 +1014,23 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   2. 单次覆盖：`codex exec -m <modelId> "提示词"`（CLI 参数优先，不改配置文件）。
   3. 直接改 `~/.codex/config.toml` 第一行的 `model = "..."`，存盘即生效（桌面端重进会话）。
   - 可填任何网关能服务的 id（free 列表、`-model list` 里的、`workbuddy/...` 等供应商前缀形态）；`model_provider = "mslxdff"` 保持不动。
+
+### `-setto claude [modelId|--all] [--behaves-as <id>]` / `--setto claude ...`
+
+- **语法**：`mslxdff -setto claude [modelId]`（`--setto` 等价；批量亦接受 `-a` 与裸 `all`）；能力锚覆盖 `--behaves-as <已知 claude-* id>`，关闭写 `--behaves-as ""`（**缺值即报错退出**，不会静默当成关闭）。
+- **作用**：把本机网关写成 Claude Code 的**用户设置** `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址），使 `claude` 经 `/v1/messages` 协议外壳（ADR-0047）用池子里任意模型。`project`/`local` 级 settings 会被 Claude Code 忽略（v2.1.242+ 才认 `modelPicker`），故只能写 user 级。
+- **写入键面**（其余键与键序原样保留）：
+  - `env.ANTHROPIC_BASE_URL = http://127.0.0.1:<port>` —— **不带 `/v1`**，客户端自己拼 `/v1/messages`；
+  - `env.ANTHROPIC_AUTH_TOKEN = <明文 token>`（文件 `0600`；token 轮换后需重跑本命令）；
+  - `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"`、`env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0"`（外壳把 `system` 折叠成单条，归因块必须让客户端压根不发）、`env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1"`；
+  - 顶层 `model = <modelId>`；`modelPicker.options[] = {model,label,behavesAs}`，`behavesAs` 缺省 `claude-sonnet-5`（实测本机 Claude Code 对「不认识且无 behavesAs 映射」的 id 直接拒跑、连请求都不发；`behavesAs` 需 v2.1.257+；它只改客户端本地能力推断，不改发往上游的模型）；
+  - **删除 `env.ANTHROPIC_MODEL`**（它压过顶层 `model`，留着会让设置失效）。
+- **`--all`**：用 `state.json` 的 `modelPicks` 勾选集**整体替换** `modelPicker.options`（options 由本命令全权管理，没有「剪枝保留」概念）；勾选集为空时打印提示并回落单模型。
+- **安全阀**：目标 JSON 解析失败 → 拒写报错（那是用户手写的 hooks/permissions）；写不进去（文件被占用等）→ 抛错退出，**绝不谎报「已同步」**；`settings.json.tmp.*` 在任何失败路径都被清掉（半截文件里带明文 token）；首次覆盖前一次性备份 `settings.pre-mslxdff.json`，**已存在不覆盖**（备份恒为「mslxdff 首次接管前」那份，代价：之后的手改不进备份）。
+- **备份提示**：只有本次真复制过才打印备份路径与还原命令；首写（原本无 settings.json）、本次无字节变化、或同目录已有更早备份 → 打印「backup: 未生成…」，不给假路径。
+- **生效时机**：`env` 与 `model` 均为 Claude Code **启动时**读取 → 重启 claude 才生效。
+- **冒烟**：`curl -H "Authorization: Bearer $(mslxdff -showtoken)" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d '{"model":"<id>","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}' http://127.0.0.1:<port>/v1/messages`（`max_tokens` 别给太小：思考型模型会把额度全花在 reasoning 上而吐空正文轮）。
+- **已知限制**：客户端不认识的模型 id 一律按 200K 窗口假设（带 `[1m]` 后缀才按 1M），需要更大窗口另设 `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`；排障看 daemon.log 的 `[messages]` 行（`MSLXDFF_ANTHROPIC_DEBUG=1`）。
 
 ---
 
@@ -1366,6 +1384,10 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_TALK_FULL_MAX_MB` | `50` | 回路语料单文件轮转阈值（MB）：按**字节** rename 轮转 `.jsonl`→`.jsonl.1`…（不按时间环形，调试要看几天前的会话）。`envInt` 只认正数：`0`/非法 **回落默认而非关闭** |
 | `MSLXDFF_TALK_FULL_KEEP` | `3` | 回路语料保留旧份数（**`0` 合法** = 超限直接删当前文件、不留旧份，与上面两个 MB 档的语义相反）。单模型占用上界 `(KEEP+1)×MAX_MB` = 默认最坏 200MB |
 | `MSLXDFF_TALK_FULL_MAX_LINE_MB` | `16` | 回路语料单条记录上限（MB）：超限**不丢记录**，`request.messages` 原地降级为 `{i,role,chars,hash,head}` 结构摘要并置 `meta.truncated=true`（极端体量再二级剪 `tools` 与思考/正文）；`envInt` 同上一条（只认正数） |
+| `MSLXDFF_ANTHROPIC_PING_MS` | `15000` | `/v1/messages` 流式空闲 ping 周期（ms），让 Claude Code 在长思考期不触发 idle watchdog；`0` 关闭 |
+| `MSLXDFF_ANTHROPIC_STREAM_USAGE` | 开 | 流式请求向上游注入 `stream_options:{include_usage:true}`（否则 `message_delta.usage` 恒 0）；个别上游不认这字段会 400 → 设 `0` 关 |
+| `MSLXDFF_ANTHROPIC_THINKING` | `0` | 是否把上游 `reasoning_content` 翻成 Anthropic `thinking` 块外发。缺省丢——我们无法签发 `signature`，客户端回传必被上游拒（ADR-0047） |
+| `MSLXDFF_ANTHROPIC_DEBUG` | — | `1` 时 daemon 日志打 `[messages]` 行（请求形状、截断、收场读数），排障用 |
 
 > 注：`-port`/`-provider` 等 CLI 写入的 state 优先级高于同名 env（如 `MSLXDFF_PORT`），但 `MSLXDFF_<ID>_KEY` 单值 env 优先于 state 的多 key（便于容器/CI 临时覆盖）。
 

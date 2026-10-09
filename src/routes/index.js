@@ -7,6 +7,7 @@ import { heartbeatHandler, pollHandler, resultHandler, forwardHandler, streamHan
 import { modelsHandler, modelsStatusHandler, providerModelsHandler, capabilitiesHandler } from "./models-route.js";
 import { relayHandler } from "./relay.js";
 import { responsesHandler } from "./responses-route.js";
+import { messagesHandler, countTokensHandler } from "./messages-route.js";
 
 export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins }) {
   return async function router(req, res) {
@@ -49,6 +50,18 @@ const ROUTES = [
     path: "/v1/responses",
     requiresAuth: true,
     handler: responsesHandler,
+  },
+  {
+    method: "POST",
+    path: "/v1/messages",
+    requiresAuth: true,
+    handler: messagesHandler,
+  },
+  {
+    method: "POST",
+    path: "/v1/messages/count_tokens",
+    requiresAuth: true,
+    handler: countTokensHandler,
   },
   {
     method: "POST",

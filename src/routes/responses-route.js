@@ -8,7 +8,7 @@ import { responsesToChatBody, chatJsonToResponse, createChunkTranslator, chunkTo
  * 非流式：收集 chat JSON → 转 Response 对象；流式：逐块实时翻成 responses SSE。
  */
 
-function withBody(req, body) {
+export function withBody(req, body) {
   return Object.assign(Object.create(Object.getPrototypeOf(req)), req, { body });
 }
 
@@ -22,7 +22,7 @@ function errorShape(text, status) {
 }
 
 // 最小事件发射器：pipeline 靠 res.on("close") 感知下游断开，垫片必须有
-function createEmitter() {
+export function createEmitter() {
   const map = new Map();
   const self = {
     on(ev, fn) { if (typeof fn === "function") { if (!map.has(ev)) map.set(ev, []); map.get(ev).push(fn); } return self; },

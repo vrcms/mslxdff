@@ -5,6 +5,7 @@ import { normalizeModel } from "../../reasoning.js";
 import { syncToWorkbuddy, workbuddyModelsPath } from "../../sync-workbuddy.js";
 import { syncToOpencode, opencodeConfigPath } from "../../sync-opencode.js";
 import { syncToCodex, codexConfigPath } from "../../sync-codex.js";
+import { syncToClaude, claudeSettingsPath } from "../../sync-claude.js";
 import { createModelsService } from "../../models.js";
 import { createUpstreamClient } from "../../upstream.js";
 import { logDir } from "../../logs.js";
@@ -20,8 +21,8 @@ export async function handleSetto(args) {
   if (!(args.includes("-setto") || args.includes("--setto"))) return false;
   const idx = args.findIndex((x) => x === "-setto" || x === "--setto");
   const target = args[idx + 1];
-  if (!["workbuddy", "opencode", "chatgpt", "codex"].includes(target)) {
-    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId]");
+  if (!["workbuddy", "opencode", "chatgpt", "codex", "claude"].includes(target)) {
+    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId|--all] [--behaves-as <id>]");
     process.exit(1);
   }
   if (target === "chatgpt" || target === "codex") {
@@ -59,6 +60,67 @@ export async function handleSetto(args) {
       console.log(`  鉴权走 mslxdff -showtoken 命令（token 不落盘），直接 codex exec "hi" 验证`);
     } catch (err) {
       console.error(`failed to sync to codex: ${String(err?.message || err)}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+  if (target === "claude") {
+    // Claude Code 用户设置 ~/.claude/settings.json：走本机 /v1/messages 外壳（ADR-0047）
+    // 参数校验一律先于任何写盘（含 savePreferredModel）：校验不过不得碰 state.json 与 settings.json
+    // --behaves-as <已知 claude-* id> 覆盖能力锚；`--behaves-as ""` 显式关掉（关掉后本机 Claude Code 可能对未知 id 拒跑）
+    const baIdx = args.findIndex((x) => x === "--behaves-as");
+    if (baIdx >= 0 && args[baIdx + 1] === undefined) {
+      console.error("--behaves-as 需要取值：给一个已知 claude-* id，或显式传空串关闭（--behaves-as \"\"）");
+      process.exit(1);
+    }
+    const behavesAs = baIdx >= 0 ? String(args[baIdx + 1]) : undefined;
+    const wantsAll = args.includes("--all") || args.includes("-a") || args[idx + 2] === "all";
+    const raw = args[idx + 2] && !String(args[idx + 2]).startsWith("-") && args[idx + 2] !== "all" ? String(args[idx + 2]).trim() : null;
+    let id;
+    if (raw) {
+      if (raw === "auto" || !normalizeModel(raw)) {
+        console.error("modelId 不能为 auto 或空");
+        process.exit(1);
+      }
+      const norm = normalizeModel(raw);
+      if (!norm) {
+        console.error("modelId 不能为空");
+        process.exit(1);
+      }
+      savePreferredModel(norm);
+      console.log(`default model set to: ${norm} (daemon hot-reloads on next request)`);
+      id = norm;
+    } else {
+      const pref = loadPreferredModel() || getPref();
+      if (!pref) {
+        console.error("no preferred model set; use: mslxdff -setto claude <modelId>");
+        process.exit(1);
+      }
+      id = normalizeModel(pref);
+    }
+    try {
+      const { token } = await loadToken();
+      const persisted = getPort();
+      const envPort = Number(process.env.MSLXDFF_PORT);
+      const port = persisted !== null ? persisted : (Number.isInteger(envPort) && envPort > 0 ? envPort : 8989);
+      // `--all` 用勾选集整体替换 modelPicker.options（options 由本命令全权管理，无「剪枝」概念）；
+      // 勾选集为空时如实说明回落，不静默把批量当成单模型（评审 P1：原先 `|| pruneKeep()` 是死代码）。
+      const picks = wantsAll ? loadModelPicks() : null;
+      if (picks && !picks.length) console.log(`  ⚠ --all：modelPicks 勾选集为空 → 回落单模型 ${id}（先跑 mslxdff -model pick 勾选）`);
+      const file = claudeSettingsPath();
+      const r = syncToClaude({ id, token, port, picks, file, behavesAs });
+      console.log(`synced to claude: ${r.action} "${r.id}" @ ${r.file}${r.changed ? "" : "（已是目标状态，未改字节）"}`);
+      if (r.backup) console.log(`  backup: ${r.backup}
+            还原: Copy-Item "${r.backup}" "${r.file}"`);
+      else console.log(`  backup: 未生成（本次无变化，或同目录已有更早的 settings.pre-mslxdff.json —— 那份是首次接管前的原文）`);
+      if (r.tmpLeftover) console.error(`  ⚠ 临时文件清理失败：${r.tmpLeftover}（内含明文 token，请手动删除）`);
+      console.log(`  url: http://127.0.0.1:${port}  （不带 /v1 —— Claude Code 自己拼 /v1/messages）`);
+      console.log(`  modelPicker: ${r.rows} 行${wantsAll ? "（--all：全部 picks）" : "（单模型）"}`);
+      console.log(`  冒烟: curl -H "Authorization: Bearer $(mslxdff -showtoken)" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d '{"model":"${r.id}","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}' http://127.0.0.1:${port}/v1/messages  （max_tokens 别给太小：思考型模型会把额度全花在 reasoning 上而吐空正文轮）`);
+      console.log(`  ⚠ env 与 model 均为 Claude Code 启动时读取 → 重启 claude 生效；token 轮换后需重跑本命令`);
+      console.log(`  ℹ 客户端不认识的模型 id 一律按 200K 窗口假设（带 \`[1m]\` 后缀才按 1M），需要更大窗口另设 env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`);
+    } catch (err) {
+      console.error(`failed to sync to claude: ${String(err?.message || err)}`);
       process.exit(1);
     }
     process.exit(0);
