@@ -230,12 +230,81 @@ test("-setto claude --behaves-as 缺值 → 退出 1，且不碰 settings.json �
   assert.ok(!/default model set to:/.test(res.stdout), "校验必须先于 savePreferredModel，不得先改默认模型再报错");
 });
 
-test("-setto claude --all 而勾选集为空 → 明确提示回落单模型", () => {
+// ---------- -setto claude 默认语义：不带参数 = 写入全部勾选模型（picks 驱动） ----------
+// 踩坑来历：无参兜底曾直接取 preferredModel，而它可能是一个已从池子消失的 id
+// （生产实况 preferredModel=mimo-v2.5-free，写入后 Claude Code 每次请求只得到 502）。
+
+test("-setto claude 不带参数 → options 写勾选集全集，顶层 model 取勾选集内的首选模型", async () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const stateFile = join(dir, "state.json");
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: stateFile };
+  const { saveModelPicks } = await import("../src/state/schemas/model.js");
+  runCli(["-setto", "claude", "qwenwork/kept-model"], env); // 先落 state（含 token 与 preferredModel）
+  saveModelPicks(["qwenwork/kept-model", "qwenwork/second-model", "claude-opus-9"], { file: stateFile });
+  const res = runCli(["-setto", "claude"], env);
+  assert.equal(res.status, 0, `stdout=${res.stdout} stderr=${res.stderr}`);
+  const s = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+  assert.deepEqual(s.modelPicker.options.map((o) => o.model), ["qwenwork/kept-model", "qwenwork/second-model", "claude-opus-9"], "默认应写入勾选集全集，顺序保持");
+  assert.equal(s.model, "qwenwork/kept-model", "首选模型在勾选集内 → 顶层 model 用它");
+  assert.ok(!("behavesAs" in s.modelPicker.options[2]), "claude-* 前缀客户端本就认识，不该再被标成 sonnet 的能力口径");
+  assert.match(res.stdout, /modelPicker: 3 行（勾选集全集）/);
+  const again = runCli(["-setto", "claude"], env);
+  assert.match(again.stdout, /已是目标状态/, "默认批量同样幂等");
+});
+
+test("-setto claude 不带参数 + 首选模型已失效（不在勾选集）→ 警告并改用勾选集首个", async () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const stateFile = join(dir, "state.json");
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: stateFile };
+  const { saveModelPicks } = await import("../src/state/schemas/model.js");
+  runCli(["-setto", "claude", "qwenwork/dead-model"], env);
+  saveModelPicks(["qwenwork/alive-a", "qwenwork/alive-b"], { file: stateFile });
+  const res = runCli(["-setto", "claude"], env);
+  assert.equal(res.status, 0, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stdout, /不在勾选集内（可能已失效）/);
+  const s = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+  assert.equal(s.model, "qwenwork/alive-a", "失效的 preferredModel 绝不能再写进 Claude Code 顶层 model");
+  assert.deepEqual(s.modelPicker.options.map((o) => o.model), ["qwenwork/alive-a", "qwenwork/alive-b"]);
+});
+
+test("-setto claude 不带参数 + 勾选集为空 → 退出 1，不写用户配置", () => {
   const home = tmpState();
   const dir = tmpState();
   const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: join(dir, "state.json") };
-  const res = runCli(["-setto", "claude", "--all"], env);
+  const res = runCli(["-setto", "claude"], env);
+  assert.equal(res.status, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stderr, /modelPicks 勾选集为空/);
+  assert.match(res.stderr, /-model pick/);
+  assert.equal(existsSync(join(home, ".claude", "settings.json")), false, "无模型可写时不得凭空造配置");
+});
+
+test("-setto claude --all 与不带参数同义（勾选集全集）", async () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const stateFile = join(dir, "state.json");
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: stateFile };
+  const { saveModelPicks } = await import("../src/state/schemas/model.js");
+  runCli(["-setto", "claude", "qwenwork/kept-model"], env);
+  saveModelPicks(["qwenwork/kept-model", "qwenwork/another"], { file: stateFile });
+  const all = runCli(["-setto", "claude", "--all"], env);
+  assert.equal(all.status, 0, `stdout=${all.stdout} stderr=${all.stderr}`);
+  const s = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+  assert.deepEqual(s.modelPicker.options.map((o) => o.model), ["qwenwork/kept-model", "qwenwork/another"]);
+});
+
+test("-setto claude 显式指定未勾选的模型 → 警告但仍按用户意图写单条", async () => {
+  const home = tmpState();
+  const dir = tmpState();
+  const stateFile = join(dir, "state.json");
+  const env = { HOME: home, USERPROFILE: home, MSLXDFF_DAEMON_DIR: dir, MSLXDFF_STATE_FILE: stateFile };
+  const { saveModelPicks } = await import("../src/state/schemas/model.js");
+  saveModelPicks(["qwenwork/picked"], { file: stateFile });
+  const res = runCli(["-setto", "claude", "qwenwork/unpicked"], env);
   assert.equal(res.status, 0, `stdout=${res.stdout} stderr=${res.stderr}`);
-  assert.match(res.stdout, /--all：modelPicks 勾选集为空/);
-  assert.match(res.stdout, /先跑 mslxdff -model pick/);
+  assert.match(res.stdout, /不在勾选集 modelPicks 内/);
+  const s = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+  assert.equal(s.modelPicker.options.length, 1, "显式单模型：options 只留这一条");
+  assert.equal(s.model, "qwenwork/unpicked");
 });

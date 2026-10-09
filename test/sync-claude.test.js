@@ -70,6 +70,15 @@ describe("buildClaudeSettings — 纯函数改键面", () => {
     assert.equal(buildClaudeSettings({}, { ...CTX, behavesAs: "claude-opus-4-8" }).modelPicker.options[0].behavesAs, "claude-opus-4-8");
     assert.equal("behavesAs" in buildClaudeSettings({}, { ...CTX, behavesAs: "" }).modelPicker.options[0], false);
   });
+  test("claude-* 前缀的 id 不写 behavesAs（客户端本就认识，标了反而错配能力口径）", () => {
+    const out = buildClaudeSettings({}, { ...CTX, picks: ["claude-opus-4-8", "claude.sonnet-6", "vendor/claude-x", "qwenwork/m"] });
+    assert.ok(!("behavesAs" in out.modelPicker.options[0]), "claude- 开头 → 不写");
+    assert.ok(!("behavesAs" in out.modelPicker.options[1]), "claude. 开头 → 不写");
+    assert.equal(out.modelPicker.options[2].behavesAs, "claude-sonnet-5", "claude- 只在开头才算自家 id：vendor/claude-x 仍需映射");
+    assert.equal(out.modelPicker.options[3].behavesAs, "claude-sonnet-5");
+    const forced = buildClaudeSettings({}, { ...CTX, picks: ["claude-opus-4-8"], behavesAs: "claude-haiku-1" });
+    assert.equal(forced.modelPicker.options[0].behavesAs, "claude-haiku-1", "显式 --behaves-as 覆盖豁免");
+  });
 });
 
 describe("syncToClaude — 落盘语义", () => {

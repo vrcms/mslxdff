@@ -24,7 +24,7 @@ Usage:
   mslxdff -refresh-token           rotate the auth token (prints the new one)
   mslxdff -setto workbuddy [modelId]  set default model and sync to WorkBuddy models.json (insert or update 127.0.0.1/v1 entry)
   mslxdff -setto chatgpt [modelId]    set default model and sync to Codex/ChatGPT ~/.codex/config.toml (model_providers.mslxdff → 127.0.0.1/v1/responses, auth via mslxdff -showtoken)
-  mslxdff -setto claude [modelId|--all] [--behaves-as <id>]  set default model and sync to Claude Code ~/.claude/settings.json (env.ANTHROPIC_BASE_URL → 127.0.0.1 without /v1, /v1/messages shell, modelPicker rows each with behavesAs; first write backs up settings.pre-mslxdff.json)
+  mslxdff -setto claude [modelId] [--behaves-as <id>]  set default model and sync to Claude Code ~/.claude/settings.json (no modelId = write ALL modelPicks rows, --all is the same thing; env.ANTHROPIC_BASE_URL → 127.0.0.1 without /v1, /v1/messages shell; modelPicker rows carry behavesAs only for ids the client cannot recognize, default claude-sonnet-5; first write backs up settings.pre-mslxdff.json)
   mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1; extra models = allowlist)
   mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]  add WorkBuddy专用供应商（workbuddy/hy3 前缀路由，auths 与 keys 一一对应）
   mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]  configure provider API keys/URL (multiple keys = rotating, set-url for generic)

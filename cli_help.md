@@ -94,7 +94,7 @@
 | `mslxdff -workbuddy remove <uid> [--keep-file]` | `-wb remove` | 按 `uid`（全等或前缀 6 位）摘除账号（删 `keys/auths` 与 `auths/workbuddy-<uid>.json`，清 `balanceCache`） | 是 | 重启生效 |
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1；`picks` 非空时自动摘除未在 picks 的失效本地条目，非本地条目永不动） | 是 | 热重载 |
 | `mslxdff -setto chatgpt [modelId]` | `--setto`（`codex` 等价） | 设默认模型并写入 Codex/ChatGPT 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `http://127.0.0.1:<port>/v1` + Responses API，鉴权走 `mslxdff -showtoken` 命令不落盘） | 是 | Codex 重启/reload 生效 |
-| `mslxdff -setto claude [modelId\|--all] [--behaves-as <id>]` | `--setto`（`-a` 与裸 `all` 亦为批量；`--behaves-as ""` 关闭能力锚） | 设默认模型并写入 Claude Code 用户设置 `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址）：`env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` **不带 /v1**（客户端自拼 `/v1/messages`，ADR-0047 外壳）+ 明文 `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_ATTRIBUTION_HEADER=0` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `model` + `modelPicker.options`（**每行带 `behavesAs`，缺省 `claude-sonnet-5`** —— 实测本机 Claude Code 对不认识且无映射的 id 直接拒跑并发不出请求）；只动这些键、其余键（hooks/permissions 等）与键序保留；**首写前一次性备份 `settings.pre-mslxdff.json`（已存在不覆盖）**；JSON 解析失败拒写、写不进即报错不谎报；token 轮换后需重跑 | 是（写 `preferredModel`） | 重启 claude 生效（env/model 均启动时读） |
+| `mslxdff -setto claude [modelId] [--behaves-as <id>]` | `--setto`（不带 modelId = 写入勾选集全集；`--all`／`-a`／裸 `all` 与之同义；`--behaves-as ""` 关闭能力锚） | 设默认模型并写入 Claude Code 用户设置 `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址）：`env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` **不带 /v1**（客户端自拼 `/v1/messages`，ADR-0047 外壳）+ 明文 `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_ATTRIBUTION_HEADER=0` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `model` + `modelPicker.options`；**不带 modelId 时写入 `modelPicks` 勾选集全集**，顶层 `model` 也只在勾选集内取（picks 空 → 报错退出，**绝不兜底到可能已失效的 `preferredModel`**）；`behavesAs` 只给客户端不认识的 id（缺省 `claude-sonnet-5`，`claude-*` 行不写；实测无映射的未知 id 会被本机 Claude Code 直接拒跑）；只动这些键、其余键（hooks/permissions 等）与键序保留；**首写前一次性备份 `settings.pre-mslxdff.json`（已存在不覆盖）**；JSON 解析失败拒写、写不进即报错不谎报；token 轮换后需重跑 | 仅显式传 modelId 时写 `preferredModel` | 重启 claude 生效（env/model 均启动时读） |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
 | `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
 | `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
@@ -1015,17 +1015,18 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   3. 直接改 `~/.codex/config.toml` 第一行的 `model = "..."`，存盘即生效（桌面端重进会话）。
   - 可填任何网关能服务的 id（free 列表、`-model list` 里的、`workbuddy/...` 等供应商前缀形态）；`model_provider = "mslxdff"` 保持不动。
 
-### `-setto claude [modelId|--all] [--behaves-as <id>]` / `--setto claude ...`
+### `-setto claude [modelId] [--behaves-as <id>]` / `--setto claude ...`
 
-- **语法**：`mslxdff -setto claude [modelId]`（`--setto` 等价；批量亦接受 `-a` 与裸 `all`）；能力锚覆盖 `--behaves-as <已知 claude-* id>`，关闭写 `--behaves-as ""`（**缺值即报错退出**，不会静默当成关闭）。
+- **语法**：`mslxdff -setto claude [modelId]`（`--setto` 等价）；**不带 modelId = 把 `modelPicks` 勾选集整体写入**，`--all`／`-a`／裸 `all` 与它同义；能力锚覆盖 `--behaves-as <已知 claude-* id>`，关闭写 `--behaves-as ""`（**缺值即报错退出**，不会静默当成关闭）。
 - **作用**：把本机网关写成 Claude Code 的**用户设置** `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址），使 `claude` 经 `/v1/messages` 协议外壳（ADR-0047）用池子里任意模型。`project`/`local` 级 settings 会被 Claude Code 忽略（v2.1.242+ 才认 `modelPicker`），故只能写 user 级。
 - **写入键面**（其余键与键序原样保留）：
   - `env.ANTHROPIC_BASE_URL = http://127.0.0.1:<port>` —— **不带 `/v1`**，客户端自己拼 `/v1/messages`；
   - `env.ANTHROPIC_AUTH_TOKEN = <明文 token>`（文件 `0600`；token 轮换后需重跑本命令）；
   - `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"`、`env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0"`（外壳把 `system` 折叠成单条，归因块必须让客户端压根不发）、`env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1"`；
-  - 顶层 `model = <modelId>`；`modelPicker.options[] = {model,label,behavesAs}`，`behavesAs` 缺省 `claude-sonnet-5`（实测本机 Claude Code 对「不认识且无 behavesAs 映射」的 id 直接拒跑、连请求都不发；`behavesAs` 需 v2.1.257+；它只改客户端本地能力推断，不改发往上游的模型）；
+  - 顶层 `model` + `modelPicker.options[] = {model,label,behavesAs?}`；**`behavesAs` 只写给客户端不认识的 id**（缺省 `claude-sonnet-5`；`claude-`／`claude.` 开头的行不写 —— 把 `claude-opus` 标成 sonnet 会让客户端按错的能力口径推断它的 effort／auto-compact）。实测本机 Claude Code 对「不认识且无 behavesAs 映射」的 id 直接拒跑、连请求都不发，故这层映射必需；`behavesAs` 需 v2.1.257+；它只改客户端本地能力推断，不改发往上游的模型。
   - **删除 `env.ANTHROPIC_MODEL`**（它压过顶层 `model`，留着会让设置失效）。
-- **`--all`**：用 `state.json` 的 `modelPicks` 勾选集**整体替换** `modelPicker.options`（options 由本命令全权管理，没有「剪枝保留」概念）；勾选集为空时打印提示并回落单模型。
+- **模型选择规则**（不带 modelId 时）：`options` = `modelPicks` 勾选集全集（顺序保持）；顶层 `model` 只在勾选集内取 —— `preferredModel` 属于 picks 就用它，否则用 `picks[0]` 并打印警告。**绝不兜底到一个可能已从池子消失的 `preferredModel`**（生产实况：`preferredModel=mimo-v2.5-free` 上游已停用，写进 Claude Code 后每次请求只得到 502）；勾选集为空 → **报错退出 1**（提示先 `mslxdff -model pick`，或显式传 modelId），不凭空造配置；此路径**不写 `preferredModel`**。
+- **显式传 modelId 时**：`options` 只留该一条（整体替换），并写 `preferredModel`（daemon 热重载语义）；若该 id 不在勾选集内 → 打印警告（可能是拼错或已失效）但仍按你的显式意图写入，不替你否决。
 - **安全阀**：目标 JSON 解析失败 → 拒写报错（那是用户手写的 hooks/permissions）；写不进去（文件被占用等）→ 抛错退出，**绝不谎报「已同步」**；`settings.json.tmp.*` 在任何失败路径都被清掉（半截文件里带明文 token）；首次覆盖前一次性备份 `settings.pre-mslxdff.json`，**已存在不覆盖**（备份恒为「mslxdff 首次接管前」那份，代价：之后的手改不进备份）。
 - **备份提示**：只有本次真复制过才打印备份路径与还原命令；首写（原本无 settings.json）、本次无字节变化、或同目录已有更早备份 → 打印「backup: 未生成…」，不给假路径。
 - **生效时机**：`env` 与 `model` 均为 Claude Code **启动时**读取 → 重启 claude 才生效。
@@ -1353,6 +1354,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
  | `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `2000` | 旧式固定延迟档，**仅当 `MSLXDFF_EMPTY_TURN_RETRY_STEPS=[]` 时生效**（回退路径；阶梯模式下由 STEPS 接管） |
  | `MSLXDFF_EMPTY_TURN_RAISE_TOKENS` | `16384` | 空转重试前把 `max_tokens`/`max_completion_tokens` 翻倍抬到的上限（思考刷满额度致零正文是主因，同参重拉必复现；`0`=关闭抬额；事件带 `raiseFrom/raiseTo` 可查） |
  | `MSLXDFF_EMPTY_TURN_MIN_RAISE_TO` | `16384` | **客户端没设额度时的兜底**：空转重试给请求发明一次 `max_tokens`（现网主流空轮正是「思考吃满 max_tokens、正文为零」，客户端不设额度时同参重拉必然复现）；`0`=关，回旧口径「绝不替客户端发明上限」 |
+ | `MSLXDFF_EMPTY_TURN_MIN_TOKENS` / `MSLXDFF_EMPTY_TURN_TINY_MAX` | `8192` / `64` | **首发输出额度托底**：客户端发来的 `max_tokens`/`max_completion_tokens` 低于 `TINY_MAX`（默认 64，属算爆——实测长会话把额度算成 `1`，上游按 1 token 截断 `finish=length`、agent 循环停摆）时，首发上游前托到 `MIN_TOKENS`；只加不减、没设额度不发明；`0`=关闭；事件 `output-floor` 带 `raiseFrom/raiseTo` |
  | `MSLXDFF_EMPTY_TURN_HOLD_END` | 开 | **空轮留口**（默认开）：一次尝试在「出现任何模型产出」前写下去的只有空 delta 帧与 `[DONE]`（可撤销前缀），先暂扣不写、流结束也不 `res.end()`，把这次尝试交回同模型重拉/换候选——让后面那发的正文还能顺着同一条连接送出去。**`0`/`off`/`false`=关**：立即补写前缀并封口，逐字节复现旧行为（代价：之后的重拉写的是一次已终结的响应，只省额度、救不回正文）；「思考已刷出、正文为零」撤不回，故不留口，改在流尾补一帧 `EMPTY_MODEL_RESPONSE` SSE 错误 + `[DONE]`，客户端不再看到莫名空白 |
  | `MSLXDFF_EMPTY_TURN_BUDGET_MS` | `45000` | **请求级**空轮等待预算（跨所有候选累计，非每候选各一份）：到点即停止重拉开新发，按终局收场返回。防「N 个候选 × 整条阶梯」把一次请求吊在 N×40s 的白等里 |
 | `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |

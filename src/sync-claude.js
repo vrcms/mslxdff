@@ -48,11 +48,16 @@ export function buildClaudeSettings(existing, ctx = {}) {
   out.env = env;
   out.model = String(ctx.model || "");
   const picks = Array.isArray(ctx.picks) && ctx.picks.length ? ctx.picks : [ctx.model];
-  const behavesAs = ctx.behavesAs == null ? DEFAULT_BEHAVES_AS : String(ctx.behavesAs);
+  // behavesAs 的含义是「该 id 不在客户端模型目录里，请按 X 的能力口径推断」。
+  // 客户端本来就认识的 claude-* id 不该被这么标：把 claude-opus 标成 behavesAs=claude-sonnet-5，
+  // 客户端就会按 sonnet 的 effort / auto-compact 口径去推断它。显式 --behaves-as 仍覆盖一切。
+  const override = ctx.behavesAs == null ? null : String(ctx.behavesAs);
+  const anchorOf = (m) => (override != null ? override : /^claude[-.]/i.test(String(m)) ? "" : DEFAULT_BEHAVES_AS);
   out.modelPicker = {
     options: picks.filter(Boolean).map((m) => {
       const row = { model: String(m), label: String(m) };
-      if (behavesAs) row.behavesAs = behavesAs;
+      const anchor = anchorOf(m);
+      if (anchor) row.behavesAs = anchor;
       return row;
     }),
   };

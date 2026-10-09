@@ -22,7 +22,7 @@ export async function handleSetto(args) {
   const idx = args.findIndex((x) => x === "-setto" || x === "--setto");
   const target = args[idx + 1];
   if (!["workbuddy", "opencode", "chatgpt", "codex", "claude"].includes(target)) {
-    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId|--all] [--behaves-as <id>]");
+    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId] [--behaves-as <id>]  (claude: 不带 modelId = 写入 modelPicks 勾选集全集，--all 与之同义)");
     process.exit(1);
   }
   if (target === "chatgpt" || target === "codex") {
@@ -74,9 +74,10 @@ export async function handleSetto(args) {
       process.exit(1);
     }
     const behavesAs = baIdx >= 0 ? String(args[baIdx + 1]) : undefined;
-    const wantsAll = args.includes("--all") || args.includes("-a") || args[idx + 2] === "all";
     const raw = args[idx + 2] && !String(args[idx + 2]).startsWith("-") && args[idx + 2] !== "all" ? String(args[idx + 2]).trim() : null;
+    const picksAll = loadModelPicks();
     let id;
+    let batch = false;
     if (raw) {
       if (raw === "auto" || !normalizeModel(raw)) {
         console.error("modelId 不能为 auto 或空");
@@ -87,35 +88,44 @@ export async function handleSetto(args) {
         console.error("modelId 不能为空");
         process.exit(1);
       }
+      if (picksAll.length && !picksAll.includes(norm)) {
+        console.log(`  ⚠ "${norm}" 不在勾选集 modelPicks 内 —— 可能是拼错或已失效；仍按你显式指定的写入`);
+      }
       savePreferredModel(norm);
       console.log(`default model set to: ${norm} (daemon hot-reloads on next request)`);
       id = norm;
     } else {
-      const pref = loadPreferredModel() || getPref();
-      if (!pref) {
-        console.error("no preferred model set; use: mslxdff -setto claude <modelId>");
+      // 不带参数（含 --all / 裸 all）= 写入全部勾选模型：modelPicker.options = modelPicks 全集，
+      // 顶层 model 也只在勾选集内取。**不再兜底 preferredModel** —— 它可能是一个已从池子消失的 id
+      // （真实踩坑：preferredModel=mimo-v2.5-free 被写进 Claude Code 后，每次请求只会得到 502）。
+      batch = true;
+      if (!picksAll.length) {
+        console.error("modelPicks 勾选集为空 → 无可写入的模型；先跑 mslxdff -model pick 勾选，或直接 mslxdff -setto claude <modelId>");
         process.exit(1);
       }
-      id = normalizeModel(pref);
+      const pref = normalizeModel(loadPreferredModel() || getPref() || "");
+      if (pref && picksAll.includes(pref)) {
+        id = pref;
+      } else {
+        if (pref) console.log(`  ⚠ 网关首选模型 "${pref}" 不在勾选集内（可能已失效）→ claude 默认改用勾选集首个 "${picksAll[0]}"`);
+        id = normalizeModel(picksAll[0]);
+      }
     }
     try {
       const { token } = await loadToken();
       const persisted = getPort();
       const envPort = Number(process.env.MSLXDFF_PORT);
       const port = persisted !== null ? persisted : (Number.isInteger(envPort) && envPort > 0 ? envPort : 8989);
-      // `--all` 用勾选集整体替换 modelPicker.options（options 由本命令全权管理，无「剪枝」概念）；
-      // 勾选集为空时如实说明回落，不静默把批量当成单模型（评审 P1：原先 `|| pruneKeep()` 是死代码）。
-      const picks = wantsAll ? loadModelPicks() : null;
-      if (picks && !picks.length) console.log(`  ⚠ --all：modelPicks 勾选集为空 → 回落单模型 ${id}（先跑 mslxdff -model pick 勾选）`);
+      // options 由本命令全权管理：默认/`--all` 用勾选集整体替换，显式单模型则只留一条。
+      const picks = batch ? picksAll : null;
       const file = claudeSettingsPath();
       const r = syncToClaude({ id, token, port, picks, file, behavesAs });
       console.log(`synced to claude: ${r.action} "${r.id}" @ ${r.file}${r.changed ? "" : "（已是目标状态，未改字节）"}`);
-      if (r.backup) console.log(`  backup: ${r.backup}
-            还原: Copy-Item "${r.backup}" "${r.file}"`);
+      if (r.backup) { console.log(`  backup: ${r.backup}`); console.log(`  还原: Copy-Item "${r.backup}" "${r.file}"`); }
       else console.log(`  backup: 未生成（本次无变化，或同目录已有更早的 settings.pre-mslxdff.json —— 那份是首次接管前的原文）`);
       if (r.tmpLeftover) console.error(`  ⚠ 临时文件清理失败：${r.tmpLeftover}（内含明文 token，请手动删除）`);
       console.log(`  url: http://127.0.0.1:${port}  （不带 /v1 —— Claude Code 自己拼 /v1/messages）`);
-      console.log(`  modelPicker: ${r.rows} 行${wantsAll ? "（--all：全部 picks）" : "（单模型）"}`);
+      console.log(`  modelPicker: ${r.rows} 行${batch ? "（勾选集全集）" : "（单模型）"}`);
       console.log(`  冒烟: curl -H "Authorization: Bearer $(mslxdff -showtoken)" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d '{"model":"${r.id}","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}' http://127.0.0.1:${port}/v1/messages  （max_tokens 别给太小：思考型模型会把额度全花在 reasoning 上而吐空正文轮）`);
       console.log(`  ⚠ env 与 model 均为 Claude Code 启动时读取 → 重启 claude 生效；token 轮换后需重跑本命令`);
       console.log(`  ℹ 客户端不认识的模型 id 一律按 200K 窗口假设（带 \`[1m]\` 后缀才按 1M），需要更大窗口另设 env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`);
