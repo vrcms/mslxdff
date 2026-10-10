@@ -6,7 +6,7 @@ import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys } from "../../state.js";
 import { forwardRaccoonChat } from "./chat.js";
 import { buildRaccoonModelList, listRaccoonModels } from "./models.js";
-import { applyRaccoonRefresh, listRaccoonAccountDocs, readRaccoonAccountDoc, writeRaccoonAccountFile } from "./account-store.js";
+import { applyRaccoonRefresh, listRaccoonAccountDocs, raccoonCredentialFromDoc, readRaccoonAccountDoc, syncRaccoonKeys, writeRaccoonAccountFile } from "./account-store.js";
 import { refreshRaccoonCredential } from "./login.js";
 import { isRaccoonExpiringSoon } from "./auth.js";
 import { RACCOON_DEFAULT_COOLDOWN_MS, RACCOON_DEFAULT_QUOTA_COOLDOWN_MS } from "./const.js";
@@ -39,14 +39,28 @@ export function createRaccoonProvider({
   effort,
 } = {}) {
   if (!fetchImpl) fetchImpl = compatFetch;
-  const keys = (() => {
-    if (Array.isArray(apiKeys) && apiKeys.length) return [...new Set(apiKeys.map((k) => String(k).trim()).filter(Boolean))];
+  const explicitKeys = Array.isArray(apiKeys) && apiKeys.length;
+  let keys = explicitKeys
+    ? [...new Set(apiKeys.map((k) => String(k).trim()).filter(Boolean))]
+    : (() => {
+        try {
+          return loadProviderKeys(id, file ? { file } : {});
+        } catch {
+          return [];
+        }
+      })();
+  if (!explicitKeys) {
+    // ⚠ 自愈：keys 一律以 auths/ 文档为准。续期只回写文档，两者一旦分叉，重启后 ring 拿的就是已过期
+    //   token，症状是「明明登录过、积分还在，却恒 401 / 429 全号冷却」，只能重扫码。显式传 apiKeys 的
+    //   调用方（chatWithKeys、单测）尊重入参，不覆盖。
     try {
-      return loadProviderKeys(id, file ? { file } : {});
-    } catch {
-      return [];
-    }
-  })();
+      const fromDocs = [...new Set(listRaccoonAccountDocs().map((d) => String(d.accessToken || "").trim()).filter(Boolean))];
+      if (fromDocs.length && fromDocs.join("\n") !== keys.join("\n")) {
+        keys = fromDocs;
+        syncRaccoonKeys({}).catch(() => {});
+      }
+    } catch {}
+  }
   const ring = createKeyRing(keys, { cooldownMs });
 
   // access_token → 账号文档（office_identity / device_id / refresh_token 跟号走，取自 auths/raccoon-<uid>.json）
@@ -63,49 +77,58 @@ export function createRaccoonProvider({
   }
 
   function credentialFor(token) {
-    const doc = accountFor(token);
-    return {
-      access_token: token,
-      refresh_token: doc?.refreshToken || "",
-      office_identity: doc?.officeIdentity || "",
-      device_id: doc?.deviceId || "",
-      expires_at: doc?.expiresAt || "",
-      uid: doc?.uid || "",
-    };
+    // 映射的单一源在 account-store.raccoonCredentialFromDoc（曾各自内联，漏 expires_at 会让续期判定静默失效）
+    return raccoonCredentialFromDoc(accountFor(token) || { accessToken: token });
   }
+
+  // 同一 token 的并发续期必须合并成一次请求 —— refresh_token 是一次性轮换的（2026-10-10 实测：
+  // 续期成功后旧值立刻失效），并发各刷各的等于自己把号烧了。姿势对齐 workbuddy/auth.js 的 inflightRefresh。
+  const inflightRefresh = new Map();
 
   /** 临期即续期；续期成功把新 token 回写账号文档并替换 keyring 里的旧键。失败不阻断（让上游如实报）。 */
   async function ensureFresh(token) {
     const credential = credentialFor(token);
     if (!credential.refresh_token || !isRaccoonExpiringSoon(credential)) return credential;
-    try {
-      const next = await refreshRaccoonCredential(credential, { fetchImpl });
-      if (next.access_token !== token) {
-        ring.replace(token, next.access_token);
-        docCache?.delete(token);
-      }
-      // ⚠ 同 token 也必须刷新到期时间：否则 docCache 永远停在旧 expires_at，每个请求都会重复调一次 refresh
-      docCache?.set(next.access_token, { ...credential, accessToken: next.access_token, refreshToken: next.refresh_token, expiresAt: next.expires_at || "" });
+    const pending = inflightRefresh.get(token);
+    if (pending) return pending;
+    const p = (async () => {
       try {
-        if (credential.uid) {
-          const existing = readRaccoonAccountDoc(credential.uid) || {}; const merged = applyRaccoonRefresh(existing.auth || {}, { accessToken: next.access_token, refreshToken: next.refresh_token, expiresAt: next.expires_at });
-          writeRaccoonAccountFile({
-            uid: credential.uid,
-            accessToken: merged.access_token,
-            refreshToken: merged.refresh_token,
-            expiresAt: merged.expires_at || "",
-            officeIdentity: credential.office_identity,
-            deviceId: credential.device_id,
-            name: existing.account?.name || "",
-            phone: existing.account?.phone || "",
-          });
+        const next = await refreshRaccoonCredential(credential, { fetchImpl });
+        if (next.access_token !== token) {
+          ring.replace(token, next.access_token);
+          docCache?.delete(token);
         }
-      } catch {}
-      return next;
-    } catch (e) {
-      if (e?.authExpired) ring.onError(token, cooldownMs);
-      return credential;
-    }
+        // ⚠ 同 token 也必须刷新到期时间：否则 docCache 永远停在旧 expires_at，每个请求都会重复调一次 refresh
+        docCache?.set(next.access_token, { ...credential, accessToken: next.access_token, refreshToken: next.refresh_token, expiresAt: next.expires_at || "" });
+        try {
+          if (credential.uid) {
+            const existing = readRaccoonAccountDoc(credential.uid) || {}; const merged = applyRaccoonRefresh(existing.auth || {}, { accessToken: next.access_token, refreshToken: next.refresh_token, expiresAt: next.expires_at });
+            writeRaccoonAccountFile({
+              uid: credential.uid,
+              accessToken: merged.access_token,
+              refreshToken: merged.refresh_token,
+              expiresAt: merged.expires_at || "",
+              officeIdentity: credential.office_identity,
+              deviceId: credential.device_id,
+              name: existing.account?.name || "",
+              phone: existing.account?.phone || "",
+            });
+            syncRaccoonKeys({}).catch(() => {}); // 文档里 token 换了，keys 必须跟上，否则重启即拿旧值撞 401
+          }
+        } catch (e) {
+          // 绝不静默：内存里还能用，但进程一重启、盘上那份已作废的 refresh_token 就成了废号。
+          console.error(`[raccoon] token 落盘失败（刷新已成功，重启将丢失）: ${String(e?.message || e).slice(0, 200)}`);
+        }
+        return next;
+      } catch (e) {
+        if (e?.authExpired) ring.onError(token, cooldownMs);
+        return credential;
+      } finally {
+        inflightRefresh.delete(token);
+      }
+    })();
+    inflightRefresh.set(token, p);
+    return p;
   }
 
   async function chat(body, opts = {}) {

@@ -134,12 +134,9 @@ export async function saveRaccoonAccount({
     { dir: targetDir },
   );
 
-  const { loadProviderConfig, saveProviderConfig } = await import("../../state.js");
-  const cur = loadProviderConfig("raccoon", file ? { file } : {}) || {};
-  const keys = [...new Set([...(Array.isArray(cur.keys) ? cur.keys : []), accessToken])];
-  // spread cur：保留 allowlist/allowAnyModels 等既有字段，绝不 `{keys}` 重建
-  saveProviderConfig("raccoon", { ...cur, keys }, file ? { file } : {});
-  return { file: fp, keys: keys.length, updated: Boolean(existing) };
+  // keys 一律以账号文档为准（覆盖式，见 syncRaccoonKeys 的说明）
+  const sync = await syncRaccoonKeys({ dirs: [targetDir], ...(file ? { file } : {}) });
+  return { file: fp, keys: sync.keys.length, updated: Boolean(existing) };
 }
 
 /** device_id：账号文档内持久复用；缺失且已有 token 时生成并写回。 */
@@ -176,4 +173,44 @@ export function applyRaccoonRefresh(existing, { accessToken, refreshToken, expir
     refresh_token: refreshToken && refreshToken.length > 0 ? refreshToken : existing.refresh_token,
     expires_at: expiresAt || existing.expires_at || "",
   };
+}
+
+/**
+ * 账号文档 → provider/credits 认的 credential 形状。**单一源**：此前 index.js 的 credentialFor、
+ * runtime/raccoon-checkin.js 与 CLI 各自内联一份，漏一个 `expires_at` 就会让过期/临期判定静默失效。
+ * 输入是 listRaccoonAccountDocs() 的 camelCase 条目，输出是上游口径的 snake_case credential。
+ */
+export function raccoonCredentialFromDoc(doc) {
+  return {
+    access_token: doc?.accessToken || "",
+    refresh_token: doc?.refreshToken || "",
+    expires_at: doc?.expiresAt || "",
+    office_identity: doc?.officeIdentity || "",
+    device_id: doc?.deviceId || "",
+    uid: doc?.uid || "",
+  };
+}
+
+/**
+ * providerConfigs.raccoon.keys ← auths/ 各号文档里的当前 access_token（**覆盖式**，不是追加）。
+ * 为什么必须覆盖（两个都是踩过的坑）：
+ *   1) access_token 约 3 小时一换，追加会让 keys 越攒越多已作废 token，ring 反复选中它们去撞 401；
+ *   2) 续期回写只改账号文档（writeRaccoonAccountFile 从不碰 keys），两者一分叉，daemon 重启后拿到的
+ *      就是过期 token —— 症状是「明明登录过、积分还在，却恒 401 / 429 全号冷却」，只能重扫码。
+ * 账号文档是身份的唯一可信源（refresh_token / office_identity / device_id 只在文档里），
+ * 所以 keys 以它为准；不在任何文档里的 token 一律剔除。
+ */
+export async function syncRaccoonKeys({ dirs, file } = {}) {
+  const { loadProviderConfig, saveProviderConfig } = await import("../../state.js");
+  const tokens = [...new Set(
+    listRaccoonAccountDocs(dirs ? { dirs } : {})
+      .map((d) => String(d?.accessToken || "").trim())
+      .filter(Boolean),
+  )];
+  const cfg = loadProviderConfig("raccoon", file ? { file } : {}) || {};
+  const prev = Array.isArray(cfg.keys) ? cfg.keys : [];
+  const identical = prev.length === tokens.length && prev.every((k) => tokens.includes(k));
+  if (identical) return { keys: tokens, changed: false, dropped: 0 };
+  saveProviderConfig("raccoon", { ...cfg, keys: tokens }, file ? { file } : {});
+  return { keys: tokens, changed: true, dropped: prev.filter((k) => !tokens.includes(k)).length };
 }

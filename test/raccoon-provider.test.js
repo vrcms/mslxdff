@@ -201,21 +201,25 @@ test("CLI: raccoon quota 有凭据 → 打印五分项与合计", async () => {
   assert.ok(out.includes("每日积分"));
 });
 
-test("CLI: raccoon checkin 已领 → 显示「今日已领取」而非报错", async () => {
+test("CLI: raccoon checkin 已领过 → 如实显示「每号只有一次」，且不再打写端点", async () => {
   const lines = [];
+  const urls = [];
   let exited = 0;
   const ok = await handleRaccoonQuota("raccoon", "checkin", [], {
     credential: { access_token: "tok-x" },
     fetchImpl: async (url) => {
-      if (String(url).includes("login/points/grant")) return jsonRes({ code: 400009, message: "今日已领取" });
+      urls.push(String(url));
       return jsonRes({ code: 0, data: { list: [{ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: new Date().toISOString() }] } });
     },
     log: (m) => lines.push(String(m)),
     exit: (c) => { exited = c; },
   });
   assert.equal(ok, true);
-  assert.equal(exited, 0);
-  assert.ok(lines.join("\n").includes("今日已领取"));
+  assert.equal(exited, 0, "已领过是常态，不是失败");
+  const out = lines.join("\n");
+  assert.ok(out.includes("每号只有一次"), "文案不能再写「明日再来」—— 这家根本没有每日签到");
+  assert.ok(!out.includes("明日再来"));
+  assert.ok(!urls.some((u) => u.includes("/grant")), "账单已显示领过就不该再打写端点");
 });
 
 test("CLI: 非 raccoon id / 非目标子命令 → 返回 false（不误吞其它 provider）", async () => {
@@ -244,6 +248,44 @@ test("续期: 上游不回 refresh_token 时不得抹空盘上的旧值（P0 回
     const doc = readRaccoonAccountDoc("u-refresh", { dir: authDir });
     assert.equal(doc.auth.access_token, "tok-new");
     assert.equal(doc.auth.refresh_token, "ref-keep", "上游不回新 refresh_token 时必须沿用旧的——抹成空串会让该号永久无法续期");
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});
+
+// refresh_token 是一次性轮换的（2026-10-10 实测：续期成功后旧值立刻失效）。
+// 同一 token 的并发请求若各自去续期，第一个消费成功、后面的全部撞空 —— 等于自己把号烧了。
+test("续期: 同一 token 并发只允许发一次 refresh（防重复消费一次性 refresh_token）", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-conc-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    writeRaccoonAccountFile({ uid: "u-conc", accessToken: "tok-old", refreshToken: "ref-once", expiresAt: "1" }, { dir: authDir });
+    let refreshCalls = 0;
+    let inflightNow = 0;
+    let inflightMax = 0;
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-old"],
+      fetchImpl: async (url) => {
+        if (String(url).includes("/auth/v1/refresh")) {
+          refreshCalls += 1;
+          inflightNow += 1;
+          inflightMax = Math.max(inflightMax, inflightNow);
+          await new Promise((r) => setTimeout(r, 25)); // 刻意拉长窗口，逼并发撞车
+          inflightNow -= 1;
+          return jsonRes({ code: 0, data: { access_token: "tok-new", refresh_token: "ref-new" } });
+        }
+        return jsonRes({ choices: [{ message: { content: "ok" } }] });
+      },
+    });
+    const results = await Promise.all([
+      provider.chat({ model: "raccoon/sn-kimi-k3", stream: false }),
+      provider.chat({ model: "raccoon/sn-kimi-k3", stream: false }),
+      provider.chat({ model: "raccoon/sn-kimi-k3", stream: false }),
+    ]);
+    assert.ok(results.every((r) => r.status === 200), "三个请求都该成功");
+    assert.equal(refreshCalls, 1, `并发续期必须共享同一次 refresh，实际发了 ${refreshCalls} 次`);
+    assert.equal(inflightMax, 1, "同一时刻不该有两个 refresh 在飞");
   } finally {
     delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
   }

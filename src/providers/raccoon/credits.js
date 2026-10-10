@@ -1,6 +1,10 @@
-// raccoon 积分：余额五分项查询 + 每日签到（幂等）。
-// 这家是**积分制**——签到是唯一的日常回血途径（默认 3000 分），所以「已领取」必须判得出来，
-// 不能靠上游报错来当业务状态（重复领取要显示「今日已领取」而不是错误堆栈）。
+// raccoon 积分：余额五分项查询 + 登录奖励领取（幂等，判据只认账单）。
+// 这家是**积分制**，三种积分来源的性质（2026-10-10 账单流水实测 + 参考实现双向取证）：
+//   · 新人注册礼包 3000 —— 注册时服务端自动发，**无端点可领**
+//   · 每日积分发放 300 —— 每天服务端自动发，**当天 23:59:59 清零**（账单里有 `daily_expire`），也**无端点可领**
+//   · 桌面端登录奖励 3000 —— **每号一次性**，走 `POST /desktop/v1/login/points/grant`，唯一需要领的
+// ⚠ 上游对「已经领过」的重复请求**照样回 code:0**，但积分一分不到账 —— 所以 `code:0` 绝不能当成功凭据，
+//   必须用账单流水裁决（见 claimRaccoonLoginReward）。谎报成功会让 daemon/CLI 输出假到账，比报错更坏。
 import {
   RACCOON_LOGIN_REWARD_EVENT_NAME,
   RACCOON_LOGIN_REWARD_POINTS,
@@ -62,30 +66,64 @@ export async function fetchRaccoonBalance(opts = {}) {
   return parseRaccoonBalance(envelope.data);
 }
 
-/** 从账单里找「今天是否已领过登录奖励」，返回已领积分数或 undefined。 */
-export function findLoginRewardInBills(data, { now = Date.now() } = {}) {
-  const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  for (const item of list) {
-    if (typeof item !== "object" || item === null) continue;
-    if (item.biz_type !== "reward_grant") continue;
-    if (item.event_name !== RACCOON_LOGIN_REWARD_EVENT_NAME) continue;
-    const at = item.created_at ?? item.createdAt ?? item.time;
-    const ts = typeof at === "number" ? (at > 1e12 ? at : at * 1000) : typeof at === "string" ? Date.parse(at) : NaN;
-    if (Number.isFinite(ts) && ts < dayStart.getTime()) continue;
-    return num(item.points) ?? RACCOON_LOGIN_REWARD_POINTS;
+/** 账单流水数组（上游把 list/items 两种形状都回过，容错取）。 */
+function billsRows(data) {
+  const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : null;
+  return list === null ? undefined : list.filter((x) => typeof x === "object" && x !== null);
+}
+
+/** 上游的时间字段可能是秒/毫秒数字或 ISO 串，统一成毫秒。 */
+function billTimeMs(item) {
+  const at = item.created_at ?? item.createdAt ?? item.time;
+  if (typeof at === "number" && Number.isFinite(at)) return at > 1e12 ? at : at * 1000;
+  if (typeof at === "string") {
+    const ms = Date.parse(at);
+    if (Number.isFinite(ms)) return ms;
   }
   return undefined;
 }
 
 /**
- * 领取每日登录积分。返回 `{ claimed, points }`：
- * - `claimed: true` 本次真领到；`claimed: false` 今日已领（不是错误）。
- * - 上游报错且账单里查不到已领记录 → 抛错（如实透出，不吞）。
+ * 从账单里找「这个号历史上领过登录奖励没有」，返回 `{ points, at }` 或 undefined。
+ * ⚠ 判据是**全历史**，不看日期窗口：登录奖励是每号一次性，用「今天」当窗口会让已领的号每天重新发请求，
+ *   还会把"昨天领的"判成"没领过"。注册礼包同样是 `reward_grant`，所以 `event_name` 必须逐字比对。
  */
-export async function claimRaccoonLoginReward({ credential, fetchImpl = fetch, env = process.env, timeoutMs, now = Date.now() } = {}) {
+export function findLoginRewardInBills(data) {
+  const rows = billsRows(data) || [];
+  for (const item of rows) {
+    if (item.biz_type !== "reward_grant") continue;
+    if (item.event_name !== RACCOON_LOGIN_REWARD_EVENT_NAME) continue;
+    const at = billTimeMs(item);
+    return { points: num(item.points) ?? RACCOON_LOGIN_REWARD_POINTS, ...(at === undefined ? {} : { at }) };
+  }
+  return undefined;
+}
+
+/** 拉一次账单流水；网络/解析任何失败都返回 undefined（判定降级，不抛）。 */
+async function readBills(opts) {
+  try {
+    const envelope = await request(raccoonBillsUrl(), opts);
+    return envelope?.code === 0 ? billsRows(envelope.data) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 领取「桌面端登录奖励」（每号一次性）。返回三种非抛错结果之一：
+ * - `{ claimed: true,  points }`  本次真到账（账单里出现了登录奖励那笔）
+ * - `{ claimed: false, alreadyClaimed: true, points }`  历史已领，**且不会去碰写端点**
+ * - `{ claimed: false, phantom: true,  points: 0 }`  上游回了 code:0 但账单没有这笔 —— 虚回，如实报未到账
+ * - `{ claimed: false, unverified: true, points: 0 }`  账单查不动，无法确认到账（不猜、不谎报）
+ * grant 请求本身失败（业务码非 0）且账单也查不到已领 → 抛错（如实透出）。
+ */
+export async function claimRaccoonLoginReward({ credential, fetchImpl = fetch, env = process.env, timeoutMs } = {}) {
   const opts = { credential, fetchImpl, env, timeoutMs };
+
+  const before = await readBills(opts);
+  const already = before === undefined ? undefined : findLoginRewardInBills(before);
+  if (already) return { claimed: false, alreadyClaimed: true, points: already.points };
+
   let envelope;
   try {
     envelope = await request(raccoonLoginGrantUrl(), { ...opts, method: "POST", body: {} });
@@ -93,24 +131,31 @@ export async function claimRaccoonLoginReward({ credential, fetchImpl = fetch, e
     envelope = { code: -1, message: error?.message ?? String(error), status: 0, data: undefined };
   }
 
-  if (envelope.code === 0) {
-    const points = num(envelope.data?.points) ?? num(envelope.data?.popup?.points) ?? RACCOON_LOGIN_REWARD_POINTS;
+  // 无论上游怎么说，一律回账单复查 —— 这是唯一可信的到账凭据。
+  const after = await readBills(opts);
+  const landed = after === undefined ? undefined : findLoginRewardInBills(after);
+  if (landed) {
+    const points = num(envelope?.data?.points) ?? num(envelope?.data?.popup?.points) ?? landed.points ?? RACCOON_LOGIN_REWARD_POINTS;
     return { claimed: true, points };
   }
+  if (after === undefined) return { claimed: false, unverified: true, points: 0 };
+  if (envelope?.code === 0) return { claimed: false, phantom: true, points: 0 };
 
-  // 上游可能把「今日已领」当业务错误回 —— 以账单为准判幂等，避免把常态当失败。
-  let bills;
-  try {
-    bills = await request(raccoonBillsUrl(), opts);
-  } catch {
-    bills = undefined;
-  }
-  if (bills?.code === 0) {
-    const already = findLoginRewardInBills(bills.data, { now });
-    if (already !== undefined) return { claimed: false, points: already };
-  }
   const err = new Error(`raccoon: 领取登录积分失败：${raccoonEnvelopeText(envelope, "上游未返回原因")}`);
   err.code = envelope.code;
   err.status = envelope.status;
   throw err;
+}
+
+/**
+ * claimRaccoonLoginReward 的结果 → 统一状态字。daemon 与 CLI 共用，避免两处各写一份分支后漂移。
+ * claimed=真到账 · already=一次性礼包此前已领过（正常态） · phantom=上游回执成功但账单没这笔 ·
+ * unverified=账单查不动，不下结论 · error=真失败。
+ */
+export function raccoonClaimStatus(r) {
+  if (r?.claimed) return "claimed";
+  if (r?.alreadyClaimed) return "already";
+  if (r?.phantom) return "phantom";
+  if (r?.unverified) return "unverified";
+  return "error";
 }

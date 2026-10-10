@@ -64,7 +64,7 @@ test("account-store: 落盘可读回、权限 0600（POSIX）、device_id 持久
   }
 });
 
-test("account-store: saveRaccoonAccount 只增不减合并 keys，且不丢 allowlist", async () => {
+test("account-store: saveRaccoonAccount 以 auths 文档为准**覆盖** keys，换 token 不留死号，且不丢 allowlist", async () => {
   const dir = tmpDir();
   const sf = join(dir, "state.json");
   try {
@@ -74,10 +74,33 @@ test("account-store: saveRaccoonAccount 只增不减合并 keys，且不丢 allo
     saveProviderConfig("raccoon", { ...cur, allowedModels: ["sn-kimi-k3"] }, { file: sf });
     const r = await saveRaccoonAccount({ uid: "u1", accessToken: "tok2", dir, file: sf });
     const cfg = loadProviderConfig("raccoon", { file: sf });
-    assert.deepEqual([...cfg.keys].sort(), ["tok1", "tok2"]);
+    // 旧实现是「只增不减」→ tok1 永久留在池里；token 约 3 小时一换，ring 会反复选中已作废的号撞 401
+    assert.deepEqual(cfg.keys, ["tok2"], "keys 必须等于各号文档里的当前 token，不多不少");
     assert.deepEqual(cfg.allowedModels, ["sn-kimi-k3"], "allowlist 不应被 keys 重建抹掉");
-    assert.equal(r.keys, 2);
+    assert.equal(r.keys, 1);
     assert.equal(r.updated, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("account-store: 多号各留一个 token；syncRaccoonKeys 能把分叉的 keys 自愈回文档值", async () => {
+  const dir = tmpDir();
+  const sf = join(dir, "state.json");
+  try {
+    const { syncRaccoonKeys, writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    const { loadProviderConfig } = await import("../src/state.js");
+    await saveRaccoonAccount({ uid: "uA", accessToken: "tokA", dir, file: sf });
+    await saveRaccoonAccount({ uid: "uB", accessToken: "tokB", dir, file: sf });
+    assert.deepEqual([...loadProviderConfig("raccoon", { file: sf }).keys].sort(), ["tokA", "tokB"], "覆盖式同步不能误删别的号");
+    // 复现线上现场：provider 续期只回写了账号文档，keys 还停在作废的旧 token 上
+    writeRaccoonAccountFile({ uid: "uA", accessToken: "tokA-new", refreshToken: "r", expiresAt: "9" }, { dir });
+    const out = await syncRaccoonKeys({ dirs: [dir], file: sf });
+    assert.equal(out.changed, true);
+    assert.equal(out.dropped, 1, "被续期作废的旧 token 该被剔除");
+    assert.deepEqual([...loadProviderConfig("raccoon", { file: sf }).keys].sort(), ["tokA-new", "tokB"]);
+    const again = await syncRaccoonKeys({ dirs: [dir], file: sf });
+    assert.equal(again.changed, false, "幂等：已一致就不该反复写盘");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
