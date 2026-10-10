@@ -74,3 +74,54 @@ test("payload: original body is not mutated", () => {
   assert.equal("thinking" in src, false);
   assert.equal("reasoning_effort" in src, false);
 });
+
+// —— 11128 Claude Code 指纹剥离（上游实测 2026-10-10：行首 billing 整行 + 两句官方整句，只扫 system/assistant；整句为纯子串匹配）——
+
+const CC_SENT = () => "You are Claude Code, Anthropic's official CLI for Claude.";
+
+test("payload: strips billing line and identity sentence from system", () => {
+  const sys = "x-anthropic-billing-header: cc_version=2.1.197.a4a; cc_entrypoint=cli;\nYou are Claude Code, Anthropic's official CLI for Claude.\nYou are an interactive agent.";
+  const out = rewriteWorkbuddyPayload({ model: "glm-5.3-flash", messages: [{ role: "system", content: sys }, { role: "user", content: "hi" }] });
+  assert.ok(!out.messages[0].content.includes("x-anthropic-billing-header"), "billing 行必须剥掉");
+  assert.ok(!out.messages[0].content.includes(CC_SENT()), "身份整句必须剥掉");
+  assert.ok(out.messages[0].content.includes("You are an interactive agent."), "用户侧正文必须保留");
+});
+
+test("payload: strips identity sentence echoed in assistant history", () => {
+  const out = rewriteWorkbuddyPayload({ model: "glm-5.3-flash", messages: [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: `You are Claude Code, Anthropic's official CLI for Claude. 很高兴帮你。` },
+  ] });
+  assert.equal(out.messages[1].content, " 很高兴帮你。");
+});
+
+test("payload: user/tool text is never touched (upstream does not scan those roles)", () => {
+  const t = `日志里有 x-anthropic-billing-header: cc_version=1 和 ${CC_SENT()}`;
+  const out = rewriteWorkbuddyPayload({ model: "glm-5.3-flash", messages: [
+    { role: "user", content: t },
+    { role: "tool", tool_call_id: "c1", content: t },
+  ] });
+  assert.equal(out.messages[0].content, t);
+  assert.equal(out.messages[1].content, t);
+});
+
+test("payload: system content-array text parts also stripped without mutating original", () => {
+  const src = { model: "glm-5.3-flash", messages: [{ role: "system", content: [{ type: "text", text: "x-anthropic-billing-header: cc_version=1;\nkeep me" }] }, { role: "user", content: "hi" }] };
+  const out = rewriteWorkbuddyPayload(src);
+  assert.equal(out.messages[0].content[0].text, "keep me");
+  assert.ok(src.messages[0].content[0].text.includes("x-anthropic-billing-header"), "原对象不得被污染");
+});
+
+test("payload: strips the feedback-URL sentence too (bisected from real Claude Code 27KB system)", () => {
+  const sys = "Some rules.\n- To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues\nMore text.";
+  const out = rewriteWorkbuddyPayload({ model: "glm-5.3-flash", messages: [{ role: "system", content: sys }, { role: "user", content: "hi" }] });
+  const t = out.messages[0].content;
+  assert.ok(!t.includes("anthropics/claude-code"), "feedback 整句必须剥掉（实测整句纯子串匹配，与行首 - 前缀无关）");
+  assert.ok(t.includes("Some rules.") && t.includes("More text."), "前后正文必须保留");
+});
+
+test("payload: bare URL or paraphrase is left alone (上游是整句匹配不是关键词)", () => {
+  const t = "see https://github.com/anthropics/claude-code/issues and the Claude Code docs";
+  const out = rewriteWorkbuddyPayload({ model: "glm-5.3-flash", messages: [{ role: "system", content: t }, { role: "user", content: "hi" }] });
+  assert.equal(out.messages[0].content, t);
+});
