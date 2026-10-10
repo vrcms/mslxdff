@@ -277,6 +277,13 @@ test("talk log: 段正文被 maskText 字节封顶砍掉时，标签行必须体
   assert.ok(clean.includes("[我问 · 2 字]"), `[我问 · N 字] 旧格式不得变形：${clean.split("\n").find((l) => l.startsWith("[我问"))}`);
 });
 
+test("talk log: 头行 ttft= 首字耗时（含 relay 之前的等待）；拿不到首块就不打印，绝不写 0 冒充秒回", () => {
+  const withTtft = formatTalkEntry({ reqId: "a", model: "m", question: "问", answer: "答", elapsedMs: 4900, relayMs: 1500, ttftMs: 2345.6 });
+  assert.match(withTtft, /^#talk-entry ts=\d+ .*ttft=2346ms/, `头行该有 ttft=（四舍五入），实际：${withTtft.split("\n")[0].slice(0, 200)}`);
+  const noTtft = formatTalkEntry({ reqId: "b", model: "m", question: "问", answer: "答", elapsedMs: 100 });
+  assert.ok(!noTtft.includes("ttft="), `非流式/无首块不得打印，实际：${noTtft.split("\n")[0].slice(0, 200)}`);
+});
+
 // —— default-on-agent-loop-capture §2.3/§3.2：finish= 头行、零正文显式标注、attemptMs/relayMs 读数（红灯先行）——
 test("talk log: 只调工具零正文轮 → 头行 finish=tool_calls 且回答段明写「本轮无正文」（不再静默跳块）", () => {
   withTalkDir(() => {

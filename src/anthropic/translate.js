@@ -69,7 +69,8 @@ export function messagesToChatBody(req = {}) {
 
   for (const m of Array.isArray(req.messages) ? req.messages : []) {
     if (!m || typeof m !== "object") continue;
-    const role = m.role === "assistant" ? "assistant" : "user";
+    // role=system/developer 必须保留：Claude Code ≥2.1.286 的 mid-conversation system beta 就往 messages[] 里塞系统指令，
+    const role = m.role === "assistant" ? "assistant" : m.role === "system" || m.role === "developer" ? "system" : "user";
     const blocks = typeof m.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m.content) ? m.content : [];
     let text = "";
     const imgs = [];
@@ -205,6 +206,13 @@ export function chatJsonToAnthropic(chatJson = {}, model = "") {
 
 // ---------- 流式响应：chat SSE chunk → Anthropic 具名事件 ----------
 
+// thinking 块必须在 content_block_stop **之前**交一帧 signature_delta，缺它 Claude Code 把整块静默丢弃
+// （routatic/proxy#51 真机复现、PR#133 修）。下面是**身份占位**：不含思考原文、不冒充密码学签名，理由与风险见 ADR-0052。
+const SIG_PREFIX = "mslxdff:thinking:v1:";
+function thinkingSignature(messageId, index) {
+  return Buffer.from(`${SIG_PREFIX}${messageId}:${index}`, "utf8").toString("base64url");
+}
+
 /**
  * @param model 回显给客户端的模型名
  * @param opts  { id?, thinking?: boolean }  thinking=true 才把 reasoning_content 发成 thinking 块
@@ -226,6 +234,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
 
   function closeOpen(out) {
     if (!open) return;
+    if (open.kind === "thinking") out.push(ev("content_block_delta", { index: open.index, delta: { type: "signature_delta", signature: thinkingSignature(id, open.index) } }));
     out.push(ev("content_block_stop", { index: open.index }));
     open = null;
   }
@@ -245,7 +254,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
   }
   function pushThinking(delta) {
     const out = [];
-    if (!open || open.kind !== "thinking") openBlock("thinking", { type: "thinking", thinking: "" }, out);
+    if (!open || open.kind !== "thinking") openBlock("thinking", { type: "thinking", thinking: "", signature: "" }, out);
     open.text += delta;
     out.push(ev("content_block_delta", { index: open.index, delta: { type: "thinking_delta", thinking: delta } }));
     return out;
@@ -327,6 +336,9 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
     const choice = chatJson.choices?.[0] || {};
     const m = choice.message || {};
     const ct = textFromChatContent(m.content); // 字符串或部件数组都吃，别把数组正文整段丢掉
+    // 聚合上游把思考放在 message.reasoning_content（muse-spark / workbuddy 聚合 / zcode 非流式）：thinking 块须排 text 前。
+    const rt = typeof m.reasoning_content === "string" ? m.reasoning_content : "";
+    if (rt && emitThinking) out.push(...pushThinking(rt));
     if (ct) out.push(...pushText(ct));
     (Array.isArray(m.tool_calls) ? m.tool_calls : []).forEach((tc, i) => {
       out.push(...pushTool({ index: i, id: tc?.id, function: { name: tc?.function?.name, arguments: tc?.function?.arguments } }));

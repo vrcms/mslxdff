@@ -141,9 +141,12 @@ export function createRelayPipeline({
     //（P0 回归实锤：落盘 elapsedMs=1791249258686；测试喂了同钟 perfNow 桩才把混钟掩盖住 —— 防回归见 test/agent-loop-wiring.test.js 真时钟两例）。
     // attemptStartMs 非有限（调用方未给该 ctx，如管线直调）→ 回退 out.totalMs，此时 elapsed 与 relayMs 同值（spec 降级 scenario），不伪造。
     const attemptMs = Number.isFinite(attemptStartMs) ? Math.round(performance.now() - attemptStartMs) : out.totalMs;
+    // ttft = relay 入口前消耗的等待(anchorMs) + relay 内首块；与 usage 行 rowTtfb 同源。anchorMs 只加给上报时长，闸门计时与 recordModelStats 不碰（design D2）。
+    const anchorMs = Number.isFinite(out?.preflightMs) && out.preflightMs > 0 ? out.preflightMs : 0;
+    const ttftMs = Number.isFinite(out?.ttfMs) && out.ttfMs >= 0 ? out.ttfMs + anchorMs : null;
     // 环形对话日志：只记有真实输出的轮次（空轮交给下面的空转判定另行报错）。
     // 纯旁路：不改闸门、不改计时、不改返回体；任何异常都吞掉，绝不影响转发。
-    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, finishReason: out.detail?.sawFinishReason }); } catch {}
+    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, ttftMs, finishReason: out.detail?.sawFinishReason }); } catch {}
     // 回路语料（talk/full）另起一条独立 try，不与上面合并：talk.log 是人读环形稿、capture 是机读全量语料，
     // 两者生死独立 —— 一边不落另一边照落，判据也不同（capture 只认 hops=0，且要带 sessionKey/clientIp 供分组与来源核对）。
     // 纯旁路同上：不改闸门、不改计时、不改返回体；out.detail.talk 是原桶（logs.js 的 dropTalk 剥的是副本），这里不再剥。
@@ -181,9 +184,6 @@ export function createRelayPipeline({
       return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg, emptyTurn: true, heldOpen: out.heldOpen === true } };
     }
 
-    // 上报锚点偏移：relay 入口之前消耗掉的等待（上游排队、建连、provider 为取判决预读的首帧）。
-    // 只加给 usage 行的时长；闸门计时与 recordModelStats 一律不碰 —— 见 design D2 与 Non-Goals。
-    const anchorMs = Number.isFinite(out?.preflightMs) && out.preflightMs > 0 ? out.preflightMs : 0;
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
     if (out.timedOut === true) {
       const why = out.detail?.upstreamError ? ` (upstream read error: ${out.detail.upstreamError})` : "";

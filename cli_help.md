@@ -1416,7 +1416,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_TALK_FULL_MAX_LINE_MB` | `16` | 回路语料单条记录上限（MB）：超限**不丢记录**，`request.messages` 原地降级为 `{i,role,chars,hash,head}` 结构摘要并置 `meta.truncated=true`（极端体量再二级剪 `tools` 与思考/正文）；`envInt` 同上一条（只认正数） |
 | `MSLXDFF_ANTHROPIC_PING_MS` | `15000` | `/v1/messages` 流式空闲 ping 周期（ms），让 Claude Code 在长思考期不触发 idle watchdog；`0` 关闭 |
 | `MSLXDFF_ANTHROPIC_STREAM_USAGE` | 开 | 流式请求向上游注入 `stream_options:{include_usage:true}`（否则 `message_delta.usage` 恒 0）；个别上游不认这字段会 400 → 设 `0` 关 |
-| `MSLXDFF_ANTHROPIC_THINKING` | 开 | 是否把上游 `reasoning_content` 翻成 Anthropic `thinking` 块外发。缺省**发**（不设就看不见思考），设 `0` 才丢；发的块没有 `signature`（我们签不出），但请求侧本就丢弃客户端回传的 `thinking` 块，不会因此在下一轮被上游拒（ADR-0051 取代 ADR-0047 的缺省丢） |
+| `MSLXDFF_ANTHROPIC_THINKING` | 开 | 是否把上游 `reasoning_content` 翻成 Anthropic `thinking` 块外发。缺省**发**（不设就看不见思考），设 `0` 才丢。thinking 块在封口（`content_block_stop`）**之前**交一帧**占位** `signature_delta`（`base64url("mslxdff:thinking:v1:<messageId>:<index>")`，不含思考原文）——缺它 Claude Code 会整块丢弃、一个字都看不见（ADR-0051 管外发、ADR-0052 管签名帧）；请求侧仍丢弃客户端回传的 thinking 块，故不会被上游回拒 |
 | `MSLXDFF_ANTHROPIC_DEBUG` | — | `1` 时 daemon 日志打 `[messages]` 行（请求形状、截断、收场读数），排障用 |
 | `MSLXDFF_WEB_SEARCH` | `tavily,exa,parallel` | 网关代跑 Anthropic `web_search`（ADR-0049）的后端顺序，逗号分隔按序降级（首腿＝Tavily keyless REST，Exa/Parallel MCP 兜底）；`off`/`none`/`0` = 关闭（此时旁路请求直接 400 不出网）；写了未知名字则回落到缺省三个后端，**不会**被当成关闭 |
 | `MSLXDFF_WEB_SEARCH_TIMEOUT_MS` | `15000` | **整条后端链共享的**搜索预算（ms）：单后端拿剩余时间，剩余 <250ms 直接放弃后续后端。代跑期间不落响应头（失败要能干净回 400），故客户端最长等这么久才见首帧或错误 |

@@ -35,8 +35,8 @@ function alog(...a) {
   if (ADEBUG) console.log("[messages]", ...a);
 }
 
-// thinking 块外发：默认开，`MSLXDFF_ANTHROPIC_THINKING=0` 才关（无 signature 可签，但请求侧丢弃回传的
-// thinking 块〔translate.js:92〕，外发不会让下一轮被上游拒；看不见思考比缺签名痛 — ADR-0051）
+// thinking 块外发：默认开，`MSLXDFF_ANTHROPIC_THINKING=0` 才关。外发的 thinking 块必须在封口前交一帧占位
+// signature_delta（translate.js 的 thinkingSignature），缺它 Claude Code 整块丢弃 — ADR-0051 外发 / ADR-0052 签名
 function emitThinking() { return process.env.MSLXDFF_ANTHROPIC_THINKING !== "0"; }
 
 // 空闲 ping 周期（ms）：`0` 关闭；客户端长思考期靠它扛过 streaming idle timeout

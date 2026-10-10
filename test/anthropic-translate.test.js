@@ -152,6 +152,25 @@ describe("messagesToChatBody — 请求映射", () => {
     assert.throws(() => messagesToChatBody({ model: "m", messages: [] }), /缺少用户消息/);
     assert.throws(() => messagesToChatBody({ model: "m", messages: [{ role: "user", content: "" }] }), /缺少用户消息/);
   });
+
+  test("mid-conversation system/developer 保留为 system（Claude Code ≥2.1.286 把系统指令放进 messages[]）", () => {
+    const b = messagesToChatBody({
+      model: "m", max_tokens: 8, system: "顶层身份",
+      messages: [
+        { role: "user", content: "问" },
+        { role: "system", content: "中途改的规则" },
+        { role: "developer", content: "开发者注记" },
+        { role: "assistant", content: "答" },
+      ],
+    });
+    // 三条纪律：顶层 system 置首、中途 system 留在它原本的位置、developer 折成 system 而非原样透传（上游只认 system）
+    assert.deepEqual(b.messages.map((m) => m.role), ["system", "user", "system", "system", "assistant"]);
+    assert.equal(b.messages[0].content, "顶层身份");
+    assert.equal(b.messages[2].content, "中途改的规则");
+    assert.equal(b.messages[3].content, "开发者注记");
+    // 全是 system、没有一句用户话 → 仍判「缺少用户消息」，不许拿系统指令顶包
+    assert.throws(() => messagesToChatBody({ model: "m", messages: [{ role: "system", content: "只有系统" }] }), /缺少用户消息/);
+  });
 });
 
 describe("错误形状与 id", () => {
@@ -311,7 +330,7 @@ describe("createAnthropicChunkTranslator — 具名事件序列", () => {
     assert.equal(t.stats().skippedLines, 1);
   });
 
-  test("thinking 缺省丢弃；opts.thinking=true 才发 thinking 块且不发 signature", () => {
+  test("thinking 缺省丢弃；opts.thinking=true 发 thinking 块且封口前交占位 signature_delta", () => {
     const off = createAnthropicChunkTranslator("m");
     off.begin();
     assert.deepEqual(off.push(frame({ choices: [{ delta: { reasoning_content: "内心戏" } }] })), []);
@@ -320,13 +339,14 @@ describe("createAnthropicChunkTranslator — 具名事件序列", () => {
     on.begin();
     const evs = on.push(frame({ choices: [{ delta: { reasoning_content: "内心戏" } }] }));
     assert.deepEqual(typesOf(evs), ["content_block_start", "content_block_delta"]);
-    assert.deepEqual(evs[0].content_block, { type: "thinking", thinking: "" });
+    assert.deepEqual(evs[0].content_block, { type: "thinking", thinking: "", signature: "" });
     assert.deepEqual(evs[1].delta, { type: "thinking_delta", thinking: "内心戏" });
-    assert.ok(!JSON.stringify(evs).includes("signature"));
-    // thinking 后来正文 → 另起 text 块
+    // thinking 后来正文 → 封口必须先交 signature_delta 再 stop：Claude Code 缺这帧会整块丢弃思考
     const after = on.push(frame({ choices: [{ delta: { content: "答案" } }] }));
-    assert.deepEqual(typesOf(after), ["content_block_stop", "content_block_start", "content_block_delta"]);
-    assert.equal(after[1].content_block.type, "text");
+    assert.deepEqual(typesOf(after), ["content_block_delta", "content_block_stop", "content_block_start", "content_block_delta"]);
+    assert.equal(after[0].delta.type, "signature_delta");
+    assert.equal(Buffer.from(after[0].delta.signature, "base64url").toString(), `mslxdff:thinking:v1:${on.id}:0`);
+    assert.equal(after[2].content_block.type, "text");
   });
 
   test("usage 终值可只来自收尾帧（end 不传 usage 时用累积到的 lastUsage）", () => {
@@ -364,9 +384,9 @@ describe("estimateTokens", () => {
 // ---------- 评审补漏（第 1 轮 P1 + 第 2 轮）：入口校验、stream_options、聚合兜底 ----------
 
 describe("评审补漏 — 校验与兜底", () => {
-  test("role:\"system\" 混进 messages（官方只允许顶层 system）→ 降级为 user，不算空会话", () => {
-    const b = messagesToChatBody({ model: "m", max_tokens: 8, messages: [{ role: "system", content: "s" }] });
-    assert.equal(b.messages[0].role, "user");
+  test("role 为 system 的消息混进 messages 时保留为 system，不再伪装成 user（旧口径的「不算空会话」是靠伪造用户轮换来的，见 :100 注释）", () => {
+    const b = messagesToChatBody({ model: "m", max_tokens: 8, messages: [{ role: "user", content: "问" }, { role: "system", content: "s" }] });
+    assert.deepEqual(b.messages.map((m) => m.role), ["user", "system"]);
   });
 
   test("流式请求注入 stream_options.include_usage；env=0 可关（个别上游不认这字段会 400）", () => {

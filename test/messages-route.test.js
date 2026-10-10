@@ -148,8 +148,10 @@ test("思考过程默认外发：reasoning_content→thinking 块；设 `MSLXDFF
     assert.equal(on.status, 200);
     assert.ok(on.text.includes('"type":"thinking"'), `默认该发 thinking 块，实得 ${on.text.slice(0, 400)}`);
     assert.ok(on.text.includes('"thinking_delta","thinking":"先比整数位"'), on.text.slice(0, 400));
-    assert.ok(!on.text.includes("signature"), "签不出 signature 就绝不伪造");
+    assert.ok(on.text.includes('"signature_delta"'), "thinking 块必须在 stop 前交 signature_delta，缺了 Claude Code 会整块丢弃");
     assert.ok(on.text.includes('"text_delta","text":"9.9 大"'), "thinking 之后正文照常另开块");
+    const sigAt = on.text.indexOf('"signature_delta"');
+    assert.ok(sigAt > 0 && sigAt < on.text.indexOf('"content_block_stop"'), "signature_delta 必须排在 thinking 块 content_block_stop 之前");
 
     process.env.MSLXDFF_ANTHROPIC_THINKING = "0";
     const off = await call();
