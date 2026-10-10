@@ -127,6 +127,41 @@ test("流式：具名 event: 帧、无 [DONE]、以 message_stop 收尾", async 
   } finally { await app.close(); }
 });
 
+
+test("思考过程默认外发：reasoning_content→thinking 块；设 `MSLXDFF_ANTHROPIC_THINKING=0` 才丢", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write('data: {"choices":[{"index":0,"delta":{"reasoning_content":"先比整数位"}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{"content":"9.9 大"}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+  const call = async () => {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, {
+      method: "POST", headers: { ...AUTH, Accept: "text/event-stream" },
+      body: JSON.stringify({ model: "m", max_tokens: 8, stream: true, messages: [{ role: "user", content: "hi" }] }),
+    });
+    return { status: res.status, text: await res.text() };
+  };
+  try {
+    const on = await call();
+    assert.equal(on.status, 200);
+    assert.ok(on.text.includes('"type":"thinking"'), `默认该发 thinking 块，实得 ${on.text.slice(0, 400)}`);
+    assert.ok(on.text.includes('"thinking_delta","thinking":"先比整数位"'), on.text.slice(0, 400));
+    assert.ok(!on.text.includes("signature"), "签不出 signature 就绝不伪造");
+    assert.ok(on.text.includes('"text_delta","text":"9.9 大"'), "thinking 之后正文照常另开块");
+
+    process.env.MSLXDFF_ANTHROPIC_THINKING = "0";
+    const off = await call();
+    assert.equal(off.status, 200);
+    assert.ok(!off.text.includes("thinking"), "设 0 后一个 thinking 字节都不外发");
+    assert.ok(!off.text.includes("先比整数位"), "关掉后思考内容不得夹进正文");
+    assert.ok(off.text.includes('"text_delta","text":"9.9 大"'), "关思考不影响正文");
+  } finally {
+    delete process.env.MSLXDFF_ANTHROPIC_THINKING;
+    await app.close();
+  }
+});
 test("count_tokens：200 正整数，无凭据 401", async () => {
   const app = await boot(chatJsonHandler);
   try {

@@ -35,7 +35,10 @@ function alog(...a) {
   if (ADEBUG) console.log("[messages]", ...a);
 }
 
-const THINKING = process.env.MSLXDFF_ANTHROPIC_THINKING === "1";
+// thinking 块外发：默认开，`MSLXDFF_ANTHROPIC_THINKING=0` 才关（无 signature 可签，但请求侧丢弃回传的
+// thinking 块〔translate.js:92〕，外发不会让下一轮被上游拒；看不见思考比缺签名痛 — ADR-0051）
+function emitThinking() { return process.env.MSLXDFF_ANTHROPIC_THINKING !== "0"; }
+
 // 空闲 ping 周期（ms）：`0` 关闭；客户端长思考期靠它扛过 streaming idle timeout
 const PING_MS = (() => {
   const raw = Number(process.env.MSLXDFF_ANTHROPIC_PING_MS);
@@ -348,7 +351,7 @@ export async function messagesHandler(ctx) {
   const forwardClose = (shim) => { try { req.on?.("close", () => shim.emit("close")); } catch { /* ignore */ } };
   try {
     if (chatBody.stream) {
-      const translator = createAnthropicChunkTranslator(chatBody.model, { thinking: THINKING });
+      const translator = createAnthropicChunkTranslator(chatBody.model, { thinking: emitThinking() });
       const live = createAnthropicForwarder(res, translator);
       forwardClose(live);
       await pipeline.execute({ req: fakeReq, res: live });
