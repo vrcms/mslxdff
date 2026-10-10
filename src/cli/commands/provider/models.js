@@ -59,6 +59,9 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "zcode") {
       const { createZcodeProvider } = await import("../../../providers/zcode/index.js");
       provider = createZcodeProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "raccoon") {
+      const { createRaccoonProvider } = await import("../../../providers/raccoon/index.js");
+      provider = createRaccoonProvider({ id, apiKeys: keys, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);

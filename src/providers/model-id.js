@@ -52,6 +52,16 @@ export function persistModelAliases(file) {
   } catch {}
 }
 
+/** 别名文件路径（单一真相，供只读消费方复用，别再各自拼一遍）。 */
+export function modelAliasFile() {
+  return aliasFile();
+}
+
+/** 当前已装载的 alias 快照（只读；不触发重读，判"会不会被覆盖"用）。 */
+export function snapshotModelAliases() {
+  return Object.fromEntries(_modelAliases);
+}
+
 let _aliasLoaded = false;
 export function getModelAlias(id) {
   const key = String(id || "").trim();

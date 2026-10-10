@@ -46,7 +46,7 @@ export function normalizeEndpointPath(v) {
 }
 
 export function defaultModelsPath(id) {
-  if (String(id).toLowerCase() === "workbuddy") return "/console/enterprises/personal/models";
+  if (String(id).toLowerCase() === "workbuddy") return "/v3/config"; // 2026-10-10 现网实测：console 目录对多数 token 恒 401/500，产品文档 /v3/config 才稳定 200（与 globalworkbuddy 同源）
   return "/models";
 }
 export function defaultChatPath(id) {

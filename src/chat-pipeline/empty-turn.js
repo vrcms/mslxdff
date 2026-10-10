@@ -93,6 +93,34 @@ export function withRaisedMaxTokens(payload, cap, floor = 0) {
   if (floor) return { ...payload, max_tokens: Math.min(floor, cap || floor) }; // 客户端没设额度：兜底发明一次
   return payload;
 }
+
+// 首发输出额度托底：客户端"剩余上下文"算术算爆会把 max_tokens/max_completion_tokens 写成 1
+// （实测 442 条消息 PI agent 会话 → 上游按 1 token 截断 finish=length、正文 0~5 字，循环停摆）；
+// 既有空转翻倍抬额 1→2→4 救不回来，且正文非零（2~5 字）进不了空转重试 → 首发前托平。
+// 只托"存在且 <门槛"的值，不发明额度（发明归 emptyTurnMinRaiseTo）。
+// MSLXDFF_EMPTY_TURN_MIN_TOKENS=0 关闭；MSLXDFF_EMPTY_TURN_TINY_MAX 改门槛。
+export function outputFloorCfg() {
+  const rawMin = String(process.env.MSLXDFF_EMPTY_TURN_MIN_TOKENS ?? "").trim();
+  const min = rawMin === "" ? NaN : Number(rawMin);
+  const rawTiny = String(process.env.MSLXDFF_EMPTY_TURN_TINY_MAX ?? "").trim();
+  const tiny = rawTiny === "" ? NaN : Number(rawTiny);
+  return {
+    min: Number.isFinite(min) && min <= 0 ? 0 : (Number.isFinite(min) ? Math.floor(min) : 8192), // 0/负数=关（对齐 emptyTurnMinRaiseTo）；非法/未设=8192
+    tiny: Number.isFinite(tiny) && tiny >= 0 ? Math.floor(tiny) : 64, // 非法/未设=64
+  };
+}
+export function withOutputFloor(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const { min, tiny } = outputFloorCfg();
+  if (!min) return payload; // 0=关闭托底（空串=未设由 cfg 兜底成 8192）
+  let out = payload;
+  for (const key of ["max_tokens", "max_completion_tokens"]) {
+    if (payload[key] == null || payload[key] === "") continue; // 没设=原样，不发明
+    const cur = Number(payload[key]);
+    if (Number.isFinite(cur) && cur > 0 && cur < tiny) { const to = Math.max(Math.floor(cur), min); if (to > cur) out = { ...out, [key]: to }; } // >0 才算设过（0=上游默认值，抬了反降额——评审 P1）；只加不减
+  }
+  return out;
+}
 // 空转追问：最后一次空转重试前追加一句 user 兜底（content 空轮大概率是模型“收尾犹豫”，
 // 追问把它逼出一句“任务完成了”即可终结；前面重试仍原样重拉，防改写正常对话）。
 // MSLXDFF_EMPTY_NUDGE=0 关闭；MSLXDFF_EMPTY_NUDGE_TEXT 改话术。

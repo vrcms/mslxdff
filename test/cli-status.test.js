@@ -78,4 +78,15 @@ test("zcode 内置端点型：有 key 即启用（picker 候选口径，与 qode
   const z2 = buildProviderRows({ stateFile: f2, env: {} }).find((r) => r.id === "zcode");
   assert.equal(z2.enabled, false, "未登录不进 picker");
 });
+  test("raccoon 内置端点型：登录后有 key 即启用（picker 候选口径，与 zcode/qoder 同构）", () => {
+    const f = tmpFile({ providerConfigs: { raccoon: { keys: ["eyJ.a.b"], allowedModels: ["sn-kimi-k3"] } } });
+    const r = buildProviderRows({ stateFile: f, env: {} }).find((x) => x.id === "raccoon");
+    assert.ok(r, "应含 raccoon 行");
+    assert.equal(r.enabled, true, "登录后（saveRaccoonAccount 已把 access_token 同步进 keys）即启用 — 端点内置不该卡在 baseUrl");
+    assert.equal(r.baseUrl, "raccoon://native", "内置端点给伪 baseUrl（与 zcode://native 同款）");
+    assert.equal(r.note, "", "不得再出现 missing baseUrl（否则交互式 -models 整家不显示）");
+    const f2 = tmpFile({ providerConfigs: { raccoon: { allowedModels: ["sn-kimi-k3"] } } });
+    const r2 = buildProviderRows({ stateFile: f2, env: {} }).find((x) => x.id === "raccoon");
+    assert.equal(r2.enabled, false, "未登录不进 picker");
+  });
 });

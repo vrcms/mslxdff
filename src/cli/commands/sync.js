@@ -21,9 +21,15 @@ export async function handleSetto(args) {
   if (!(args.includes("-setto") || args.includes("--setto"))) return false;
   const idx = args.findIndex((x) => x === "-setto" || x === "--setto");
   const target = args[idx + 1];
-  if (!["workbuddy", "opencode", "chatgpt", "codex", "claude"].includes(target)) {
-    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId] [--behaves-as <id>]  (claude: 不带 modelId = 写入 modelPicks 勾选集全集，--all 与之同义)");
+  if (!["workbuddy", "opencode", "chatgpt", "codex", "claude", "claude-desktop", "claudedesktop"].includes(target)) {
+    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId] [--behaves-as <id>] | mslxdff -setto claude-desktop [modelId ...] [--max N] [--no-alias] [--check] [--official]  (claude: 不带 modelId = 写入 modelPicks 勾选集全集，--all 与之同义 / claude-desktop: 写 Claude Desktop 3P profile + 角色槽 alias)");
     process.exit(1);
+  }
+  if (target === "claude-desktop" || target === "claudedesktop") {
+    // Claude Desktop on 3P（ADR-0048）：写 profile + 角色槽 alias。sync.js 只做转发——
+    // 本文件已近 20KB 体积门，实现放 src/cli/commands/claude-desktop.js。
+    const { handleClaudeDesktopSetto } = await import("./claude-desktop.js");
+    return handleClaudeDesktopSetto(args, idx);
   }
   if (target === "chatgpt" || target === "codex") {
     // Codex/ChatGPT 三端共用 ~/.codex/config.toml：写 model + model_provider + [model_providers.mslxdff]

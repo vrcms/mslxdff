@@ -1,5 +1,6 @@
 import { loadGroupsJoined } from "../state.js";
 import { errMsg } from "../cli/util.js";
+import { withOutputFloor } from "../chat-pipeline/empty-turn.js";
 import { startBroadbandStream } from "./broadband-stream.js";
 import { compatFetch, timeoutSignal } from "../compat.js";
 
@@ -18,8 +19,10 @@ export function startBroadband({ token, upstream }) {
   })();
   const execAndPost = async (g, reqId, body) => {
     let result;
+    const fl = withOutputFloor(body); // 首发输出额度托底：leader 转来的 body 不经 pipeline，成员侧自托（评审 P1）
+    if (fl !== body) console.log(`output-floor(broadband): req=${reqId} ${(body?.max_tokens ?? body?.max_completion_tokens)}→${(fl.max_tokens ?? fl.max_completion_tokens)}`);
     try {
-      const upRes = await upstream.chat(body);
+      const upRes = await upstream.chat(fl);
       const ct = upRes.headers.get("content-type") || "";
       const isStream = Boolean(body?.stream) || ct.includes("text/event-stream");
       if (isStream && upRes.body) {

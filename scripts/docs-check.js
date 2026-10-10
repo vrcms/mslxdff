@@ -72,7 +72,7 @@ try {
 // 5. 功能树：四道门（前向引用/反向锚定/分支登记/预算）+ 摩擦账 —— 全局唯一脚本 ft-check.mjs（技能目录）
 try {
   const { spawnSync } = await import("node:child_process");
-  const ft = process.env.FT_HOME ? join(process.env.FT_HOME, "resources", "ft-check.mjs") : join(os.homedir(), ".agents", "skills", "feature-tree", "resources", "ft-check.mjs");
+  const ft = process.env.FT_HOME ? join(process.env.FT_HOME, "resources", "ft-check.mjs") : [join(os.homedir(), ".agents", "skills", "ft", "resources", "ft-check.mjs"), join(os.homedir(), ".agents", "skills", "feature-tree", "resources", "ft-check.mjs")].find((p) => existsSync(p)) ?? join(os.homedir(), ".agents", "skills", "ft", "resources", "ft-check.mjs"); // 技能 2.4.30 改名 feature-tree→ft，旧路径兜底
   const r = spawnSync(process.execPath, [ft, "check"], { stdio: "inherit" });
   if (r.status === 0) ok("功能树检查通过（前向/反向锚定/分支登记/预算）");
   else fail("功能树检查失败 — 按上方输出补叶或占位，改完跑 ft-check.mjs sync 刷新索引");

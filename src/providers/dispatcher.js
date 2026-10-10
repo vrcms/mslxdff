@@ -1,8 +1,8 @@
  import { appendEvent } from "../logs.js";
  import { splitModelId, DEFAULT_PROVIDER, joinModelId } from "./model-id.js";
  import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
- // 定制预热名单：registry customProviders 8 家 + 默认 opencode；openrouter/自配 generic 不预热（按需自拉）
- const CUSTOM_PREHEAT_IDS = new Set(["opencode", "workbuddy", "traework", "cline", "codearts", "qoder", "globalqwenwork", "qwenwork", "zcode"]);
+// 定制预热名单：registry customProviders 9 家 + 默认 opencode；openrouter/自配 generic 不预热（按需自拉）
+const CUSTOM_PREHEAT_IDS = new Set(["opencode", "workbuddy", "traework", "cline", "codearts", "qoder", "globalqwenwork", "qwenwork", "zcode", "raccoon"]);
  function isPreheatDisabled() {
    const raw = process.env.MSLXDFF_PREHEAT;
    if (raw === undefined || raw === null || raw === "") return false;

@@ -11,6 +11,7 @@
  *     model ID 照发全套字段，而 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` 不清 thinking 与 effort。
  */
 import { chunkToString } from "../responses/translate.js";
+import { isServerTool } from "./web-search.js";
 
 let seq = 0;
 export function newMessageId() {
@@ -102,16 +103,21 @@ export function messagesToChatBody(req = {}) {
   // 流式必须让上游把 usage 放进收尾帧，否则 message_delta.usage 恒 0（OpenAI 规范字段）。
   // 个别上游不认 stream_options 会 400 → `MSLXDFF_ANTHROPIC_STREAM_USAGE=0` 关掉。
   if (body.stream && process.env.MSLXDFF_ANTHROPIC_STREAM_USAGE !== "0") body.stream_options = { include_usage: true };
-  if (Array.isArray(req.tools) && req.tools.length) {
-    body.tools = req.tools.map((t) => ({
+  // Anthropic 的 server tool（web_search_*/web_fetch_*/…）没有 input_schema，折成假 function 会
+  // 让上游收到「空参数空描述」的工具（严格端点直接 422），本网关不实现的发前一律剥除（ADR-0049）。
+  const fnTools = (Array.isArray(req.tools) ? req.tools : []).filter((t) => !isServerTool(t));
+  if (fnTools.length) {
+    body.tools = fnTools.map((t) => ({
       type: "function",
       function: { name: String(t?.name || ""), description: String(t?.description || ""), parameters: t?.input_schema || {} },
     }));
   }
+  const keptNames = new Set(fnTools.map((t) => String(t?.name || "")));
   const tc = req.tool_choice;
   if (tc === "auto" || (tc && typeof tc === "object" && tc.type === "auto")) body.tool_choice = "auto";
   else if (tc && typeof tc === "object" && tc.type === "any") body.tool_choice = "required";
-  else if (tc && typeof tc === "object" && tc.type === "tool") body.tool_choice = { type: "function", function: { name: String(tc.name || "") } };
+  // 点名一个已被剥掉的工具时降为 auto：上游会按不存在的函数强制点名，那样一定拿不到有用回答
+  else if (tc && typeof tc === "object" && tc.type === "tool") body.tool_choice = keptNames.has(String(tc.name || "")) ? { type: "function", function: { name: String(tc.name || "") } } : "auto";
   else if (tc && typeof tc === "object" && tc.type === "none") body.tool_choice = "none";
   if (req.max_tokens != null && Number.isFinite(Number(req.max_tokens))) body.max_tokens = Number(req.max_tokens);
   if (req.temperature != null) body.temperature = req.temperature;

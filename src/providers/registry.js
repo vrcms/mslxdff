@@ -48,6 +48,11 @@ export const customProviders = [
     match: (id, baseUrl) => id === "zcode" || String(baseUrl).includes("zcode.z.ai"),
     load: () => import("./zcode/index.js").then((m) => m.createZcodeProvider),
   },
+  {
+    id: "raccoon",
+    match: (id, baseUrl) => id === "raccoon" || String(baseUrl).includes("xiaohuanxiong.com"),
+    load: () => import("./raccoon/index.js").then((m) => m.createRaccoonProvider),
+  },
 ];
 
 // 供 bench/probe 等需要定制化解析模型列表的场景

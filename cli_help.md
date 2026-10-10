@@ -61,7 +61,7 @@
 | `mslxdff -model unpick <id>` | — | 从 `modelPicks` 移除（该模型随之从 `/v1/models` 消失，`?all=1` 仍可见） | 是 | 热更新 |
 | `mslxdff -model picks` | — | 列出当前勾选集（= 对外目录范围；空集表示目录不裁剪、全量暴露） | 否 | — |
 | `mslxdff -model pick clear` | — | 清空勾选集（`auto` 回退全量候选 **且** `/v1/models` 回退全量目录） | 是 | 热更新 |
-| `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`workbuddy=/console/enterprises/personal/models`；`cline` 内置 `recommended-models`，无需配置） | 是 | 重启生效 |
+| `mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]` | `--provider` | 一键添加通用 OpenAI 兼容供应商（`providerConfigs`，前缀路由 `<id>/model`；`--models-path` 如 `/v1/models`、`--chat-path` 如 `/v1/chat/completions` 可配异形路径，`b.ai=/v1/models`、`workbuddy=/v3/config`；`cline` 内置 `recommended-models`，无需配置） | 是 | 重启生效 |
 | `mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]` | `--provider` | 添加 WorkBuddy 专用供应商（`providerConfigs.workbuddy={baseUrl,keys,auths}`，`workbuddy/hy3` 前缀路由，走 `workbuddy-token-auto.js` 自动落盘 `auths`） | 是 | 重启生效 |
 | `mslxdff -provider <id> models [--json]` | `--provider` | 列该供应商可用模型（按 `allowlist` 过滤，`--json` 输出 `{"object":"list","data":[...]}`；`workbuddy` 29 个、`cline` 5 个等，无需 `curl`；`cline` 与聚合目录同源走 `recommended-models` 的 `free`（不再列全量 443 个内部目录）；表格含能力列：上下文长度（`1M/200k`）+ `📷`读图 `🧠`推理 `🔧`工具调用，workbuddy 走上游原生字段，无此字段的供应商显示 `—`） | 否 | 否 |
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
@@ -77,6 +77,8 @@
 | `mslxdff -provider qwenwork login` | `--provider` | 千问办公设备授权（PKCE + poll，`gateway.qwenwork.cn`）：打印 `device/selectAccounts` 兑换链接 → 浏览器确认授权 → 落盘 `auths/qwenwork-<uid>.json`（0600）+ state 双写，**默认 `allowAnyModels=false` + 只种 `flash/pro/qwen3.8-max-preview` 3 个实测模型**（与 qoder 惯例故意不同：额度是账号积分池、每日回血未实测，防 auto 烧分）；登录尾部显示套餐名 + 积分剩余；此后 `qwenwork/<modelId>` 前缀路由（恒上游 `stream:true`，多号 keyring 轮转，401/403 refresh 回写轮换再重试；无身份签名会被判 101，手动配 key 首轮自动补 userinfo）；**恒 local-only** 不借出（ADR-0037） | 是（写 `providerConfigs.qwenwork`） | 重启生效 |
 | `mslxdff -provider zcode login [--bigmodel]` | `--provider` | ZCode（智谱官方编程工作台）免费额度授权：打印 chat.z.ai 授权链接 → 浏览器登录 → **CLI 轮询**（`oauth/cli/init`→`oauth/cli/poll`，无需回调服务器、**全程免验证码**）拿 zcode JWT，落盘 `auths/zcode-<uid>.json`（0600）+ state keys，并把内置目录（`GLM-5.3`/`GLM-5.3-Flash`/`GLM-5.2`/`GLM-5-Turbo`）只增不减并入 allowlist（开箱可用）；此后 `zcode/<modelId>` 前缀路由（Anthropic 网关 `.../zcode-plan/anthropic/v1/messages`，恒上游 `stream:true`，非流式本地聚合；12 项 ZCode 客户端头 + per-account deviceMid）；错误分级 401/1006 短冷+重登指引、1005 长冷 1h+`quota_exhausted`、3002/3008/3009/3010 短冷、3007 不冷却直透；`--bigmodel` 切 bigmodel.cn 入口；**恒 local-only** 不借出（ADR-0038） | 是（写 `providerConfigs.zcode`） | 重启生效 |
 | `mslxdff -provider zcode quota [--json]` | `--provider` | 查 ZCode 套餐/余量（`GET /api/v1/zcode-plan/billing/balance?app_version=` 按 plans/balances 分组表格：套餐名/状态/有效期 + 各模型 entitlement 余量）；空套餐给领取指引、401 给重登指引；`--json` 供脚本 | 否（只读） | 立即生效 |
+| `mslxdff -provider raccoon login` | `--provider` | Raccoon（商汤小浣熊）**扫码登录**：本地生成 `qrcode_code` → 终端渲染二维码 + 打印 `https://xiaohuanxiong.com/login/mp?code=…` 深链接（**必须用微信「扫一扫」扫**；浏览器直接打开必 404 —— 站点 SPA 路由表无该路径）→ 轮询 `login_with_qrcode_code`（pending/logging/canceled/success）至 `success`，落盘 `auths/raccoon-<uid>.json`（0600）+ state keys，并把兜底目录（6 模型，全部读图）只增不减并入 allowlist（开箱可用）；此后 `raccoon/<modelId>` 前缀路由（**OpenAI 兼容网关**，流式逐字节透传、非流式本地聚合；客户端同形头 + `extra_body.thinking`，**不发 `reasoning_effort`**；按响应体形状判流式）；错误分级 登录态（200001/200003/401）→401 重登指引、积分不足→长冷 1h + `quota_exhausted`、限流/服务端→短冷 30s；临期用 `refresh_token` 自动续期；**全程免验证码**（短信登录需阿里云滑块，明确不做）；**恒 local-only** 不借出（ADR-0050） | 是（写 `providerConfigs.raccoon`） | 重启生效 |
+| `mslxdff -provider raccoon quota [--json]` / `checkin [--json]` | `--provider` | 查积分余额（可用/奖励/每日/月度/充值五分项）与领每日登录积分（默认 3000 分，重复领取显示「今日已领取」而非报错）；未登录给 login 指引、登录态失效给重登指引；`--json` 供脚本；daemon 每日 09:00 自动签到（`MSLXDFF_RACCOON_CHECKIN=0` 关，`_CHECKIN_HOUR` 改点，启动补签，结果落 `state.raccoonCheckin`） | 否（只读）/ 是（checkin 领积分） | 立即生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -95,6 +97,8 @@
 | `mslxdff -setto workbuddy [modelId]` | `--setto` | 设默认模型并原子写入 `~/.workbuddy/models.json`（仅 127.0.0.1/v1；`picks` 非空时自动摘除未在 picks 的失效本地条目，非本地条目永不动） | 是 | 热重载 |
 | `mslxdff -setto chatgpt [modelId]` | `--setto`（`codex` 等价） | 设默认模型并写入 Codex/ChatGPT 三端共用 `~/.codex/config.toml`（`model_providers.mslxdff` → `http://127.0.0.1:<port>/v1` + Responses API，鉴权走 `mslxdff -showtoken` 命令不落盘） | 是 | Codex 重启/reload 生效 |
 | `mslxdff -setto claude [modelId] [--behaves-as <id>]` | `--setto`（不带 modelId = 写入勾选集全集；`--all`／`-a`／裸 `all` 与之同义；`--behaves-as ""` 关闭能力锚） | 设默认模型并写入 Claude Code 用户设置 `~/.claude/settings.json`（`CLAUDE_CONFIG_DIR` 可改址）：`env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` **不带 /v1**（客户端自拼 `/v1/messages`，ADR-0047 外壳）+ 明文 `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_ATTRIBUTION_HEADER=0` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `model` + `modelPicker.options`；**不带 modelId 时写入 `modelPicks` 勾选集全集**，顶层 `model` 也只在勾选集内取（picks 空 → 报错退出，**绝不兜底到可能已失效的 `preferredModel`**）；`behavesAs` 只给客户端不认识的 id（缺省 `claude-sonnet-5`，`claude-*` 行不写；实测无映射的未知 id 会被本机 Claude Code 直接拒跑）；只动这些键、其余键（hooks/permissions 等）与键序保留；**首写前一次性备份 `settings.pre-mslxdff.json`（已存在不覆盖）**；JSON 解析失败拒写、写不进即报错不谎报；token 轮换后需重跑 | 仅显式传 modelId 时写 `preferredModel` | 重启 claude 生效（env/model 均启动时读） |
+| `mslxdff -setto claude-desktop [modelId ...] [--max N] [--max-effort <lvl>] [--no-alias] [--check] [--official]` | `--setto`、`claudedesktop` | 一键接 **Claude Desktop**（App 的 Code tab，官方名 Claude Desktop on 3P，ADR-0048）：桌面端**不读** `ANTHROPIC_BASE_URL`/`settings.json`，只读自家 3P profile 且只认「三档角色 ID」→ 本命令一次写两处：① `configLibrary/<uuid>.json` + `_meta.json`（`inferenceProvider=gateway`/`credentialKind=static`/`authScheme=bearer`/`baseUrl` **不带 /v1**/`inferenceModels[{name:角色槽,labelOverride:真模型名}]`，只 upsert 自家条目、他人 entry 不动、损坏拒写、幂等按原文比对、明文 token `0600`）② `model-aliases.json` 写「角色槽 → 真模型」（入站 `policy.js` 生效、未命中即重读 → **不重启 daemon**）；槽位上限 12（取 App 签名 `model-catalog`），超出如实报 dropped | 否（不改 `preferredModel`/state） | 否；⚠ **App 不热重载**，写完必须完全退出重开并在登录界面选这份配置 |
+| `mslxdff -claude-desktop [status|slots|check]` | `--claude-desktop` | 桌面端体检（只读）：`status` 托管策略→profile 登记→槽位 alias 三段判据；`slots` 解 App 签名 `model-catalog`（base64 `documentBytes`）与内置 12 槽比对；`check` 逐槽打本机 `/v1/messages`（`max_tokens=16`）给 状态/耗时/`x-mslxdff-actual-model`/失败原因与下一步 | 否 | 否 |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
 | `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
 | `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
@@ -578,7 +582,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 #### `mslxdff -provider add <id> <baseUrl> <key>`（通用 OpenAI 兼容供应商一键添加，支持异形路径）
 
 - **语法**：`mslxdff -provider add <id> <baseUrl> <key> [allow...] [--models-path <path>] [--chat-path <path>]`
-- **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl><chatPath>`，`GET <baseUrl><modelsPath>` 拉模型列表（不过滤，全量前缀化）。`--models-path`/`--chat-path` 用于适配异形上游：`opencode=/zen/v1/models`、`b.ai=/v1/models`、`cline=/api/v1/models`、`workbuddy=/console/enterprises/personal/models`，不传则按供应商默认值（`workbuddy` 为定制，其余为 `/models` & `/chat/completions`）。
+- **作用**：一键注册任意 OpenAI 兼容网关为新供应商。`baseUrl` 为 OpenAI 根（如 `https://api.example.com/v1`，去尾 `/`），`key` 为 Bearer token；模型对外形如 `myapi/gpt-4`，转发时剥前缀 `gpt-4` 调 `POST <baseUrl><chatPath>`，`GET <baseUrl><modelsPath>` 拉模型列表（不过滤，全量前缀化）。`--models-path`/`--chat-path` 用于适配异形上游：`opencode=/zen/v1/models`、`b.ai=/v1/models`、`cline=/api/v1/models`、`workbuddy=/v3/config`，不传则按供应商默认值（`workbuddy` 为定制，其余为 `/models` & `/chat/completions`）。
 - **安全默认（0.1.61 起）**：`allowAnyModels=false`，**空 `allowlist` 时上游直接禁用**，`chat` 返回 `403 {"error":"model not allowed… — allowed: (none) (use: mslxdff -provider <id> allowlist add <model>)"}` + 头 `x-mslxdff-allowlist:1`，不打上游、不计费。**必须二选一**：`mslxdff -provider <id> allowlist set <m1> <m2> ...`（推荐，精确 free 模型）或 `mslxdff -provider <id> allowAny on`（放行全部，`opencode` 例外默认 `ON`）。
 - **行为**：`saveProviderConfig(id, {baseUrl, keys:[key], modelsPath, chatPath})`，若 `id` 已存在则更新 `baseUrl` 并追加 key（去重）；`opencode/openrouter` 保留走原分支，误用 `add openrouter ...` 会提示改用 `add <key>` / `set-url`。
 - **校验**：`id` 经 `normalizeProviderId`，`baseUrl` 必须 `http(s)://` 前缀，`modelsPath`/`chatPath` 必须以 `/` 开头。
@@ -627,7 +631,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   空 allowlist 时：
   ```
   provider workbuddy: 未设置 allowlist（allowAny=OFF），不发起测速，仅探活模型列表...
-  尝试：GET https://copilot.tencent.com/console/enterprises/personal/models → ...
+  尝试：GET https://copilot.tencent.com/v3/config → ...
   发现 28 个模型：
     - hy3
     - hy4-preview
@@ -768,7 +772,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 - **语法**：
   ```bash
   mslxdff -provider <id> set-url <baseUrl>          # 别名 setUrl/url
-  mslxdff -provider <id> set-models-path <path>     # 如 /v1/models 或 /console/enterprises/personal/models
+  mslxdff -provider <id> set-models-path <path>     # 如 /v1/models 或 /v3/config
   mslxdff -provider <id> set-chat-path <path>       # 如 /v1/chat/completions 或 /v2/chat/completions
   ```
 - **作用**：仅改已注册通用供应商的对应路径，保留 `keys`/`allowlist`；`openrouter` 的地址仍由 `MSLXDFF_OPENROUTER_BASE_URL` 控制，不建议用此改。`modelsPath`/`chatPath` 持久化到 `state.json providerConfigs.<id>`，`0600` 原子写。
@@ -877,7 +881,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -workbuddy remove <uid> [--keep-file]           # 按 uid 摘除（删 keys/auths 与 auths/workbuddy-<uid>.json）
   ```
 - **存储**：`state.json providerConfigs.workbuddy={ baseUrl:"https://copilot.tencent.com", keys:["k1",...], auths:[{uid,domain,enterpriseId,refreshToken}], allowedModels:["hy3",...] }`，`auths` 与 `keys` 一一对应（多号同索引），由 `node workbuddy-token-auto.js` 自动落盘（`workbuddy-<uid>.json` + `state.json`，`0600`）或 `-provider add workbuddy` 解析 JWT `uid` 自动追加。**凭据目录跟随 state 文件**（`<state 目录>/auths`，默认 `~/.config/mslxdff/auths`；旧 cwd 兜底 `./auths` 仅作只读兜底，ADR-0025）。`baseUrl` 默认 `https://copilot.tencent.com`（`MSLXDFF_WORKBUDDY_BASE_URL` 可覆盖）。
-- **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/console/enterprises/personal/models`（`credits xN.NN` 升序，前缀 `workbuddy/`）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。**SDK 通道**：底层缺省改走 `@ai-sdk/openai-compatible`（官方 SDK 栈；局部 `MSLXDFF_WORKBUDDY_SDK` 或未设置时继承的全局 `MSLXDFF_UPSTREAM_ENGINE` 设 `legacy`/关闭词即回退原生 transport，不可用自动回退并告警一次，上层逻辑不变）。
+- **上游**：`POST https://copilot.tencent.com/v2/chat/completions`（强制 `stream:true`，头含 `X-User-Id/X-Domain/X-Product:SaaS + Origin/Referer/User-Agent`，多号环形：`402/insufficient` 自动切号 + `balanceCache` TTL 5min，`header x-mslxdff-workbuddy-uid` 或 `model workbuddy/<uid>:<id>` 定号，`x-mslxdff-workbuddy-uid` 回显），`GET https://copilot.tencent.com/v3/config`（产品文档目录，`credits xN.NN` 升序，前缀 `workbuddy/`；2026-10-10 现网实测旧 `GET /console/enterprises/personal/models` 对多数 token 恒 401/500，故改此端点，返回随 UA 变、本仓 UA 与 chat 同身份）+ `POST /v2/billing/meter/get-user-resource` 查余额（`workbuddy-balance.js`），401/403 自动 `POST /v2/plugin/auth/token/refresh` 回写并重放一次。**SDK 通道**：底层缺省改走 `@ai-sdk/openai-compatible`（官方 SDK 栈；局部 `MSLXDFF_WORKBUDDY_SDK` 或未设置时继承的全局 `MSLXDFF_UPSTREAM_ENGINE` 设 `legacy`/关闭词即回退原生 transport，不可用自动回退并告警一次，上层逻辑不变）。
 - **白名单**：同通用供应商（空=不限，非空仅名单内可用，`403 + x-mslxdff-allowlist:1` 直通，`/v1/models` 过滤）。
 - **共享**：`workbuddy` local-only（ADR-0015）恒不走组员，不参与 key 借出（ADR-0019 硬排除）；`opencode` 同理恒排除。
 - **签到**：`POST https://www.codebuddy.cn/v2/billing/meter/daily-checkin` + `https://copilot.tencent.com/v2/billing/meter/daily-checkin` 双域，`code 0` 新增 100 credits/30d 裂变包，`code 10001 已签到` 视为成功；并行 3，`--json` 聚合 `results[].balance`；`workbuddy-token-auto.js` 已在 `refresh` 后自动 `spawn workbuddy-checkin.js`；daemon 默认每日 09:00 自动全号签到（`MSLXDFF_WORKBUDDY_CHECKIN_HOUR` 改时间，`=0` 关，启动时过期补签），新追加账号次日自动纳入无需配置，不再需要 `schtasks`。
@@ -1038,6 +1042,24 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 ## 8. 群组网络
 
 > 群组用于分散 `opencode.ai` 的 IP 级限流：A 转发给 B 时，上游看到的是 B 的出口 IP。组内还支持 failover、hedge 对冲、宽带中继等。Leader 持有 `groups.<name>.members`，成员通过 `-addtogroup` 注册到 leader。
+
+### `-setto claude-desktop [modelId ...] [--max N] [--max-effort <lvl>] [--no-alias] [--check] [--official]` / `--setto claude-desktop ...`
+
+- **语法**：`mslxdff -setto claude-desktop`（`--setto` 等价、别名 `claudedesktop`）；不带 modelId = 把 `modelPicks` 勾选集摊到角色槽，给多个 modelId 则按给定顺序上槽。
+- **为什么不能复用 `-setto claude`**：官方 `code.claude.com/docs/en/llm-gateway-connect` 明写桌面端「reads gateway routing from its third-party inference configuration, **not from `ANTHROPIC_BASE_URL` or `settings.json`**」；且桌面端只接受三档角色 ID（`claude-sonnet-*`/`claude-opus-*`/`claude-haiku-*`，旧式 `claude-3-5-sonnet-*` 亦拒），池子 id（`qwenwork/flash` 这类）写进去会被拒。
+- **写点 ①（桌面端 profile）**：Windows `%LOCALAPPDATA%\Claude-3p\configLibrary\<uuid>.json` + `_meta.json`（mac `~/Library/Application Support/Claude-3p/configLibrary/`、linux `$XDG_CONFIG_HOME/Claude-3p/configLibrary/`；`MSLXDFF_CLAUDE_DESKTOP_DIR` 改址）。`_meta.json` 的 `appliedId` 指向生效配置，uuid 由端口派生 `00000000-0000-4000-8000-<12位端口>` → 重跑原地更新不堆条目；**App/用户自建的 entry 一字不动**。键面：`inferenceProvider=gateway`、`inferenceCredentialKind=static`、`inferenceGatewayAuthScheme=bearer`（本仓 `src/routes/helpers.js` 的 `authorized()` 只认 `Authorization: Bearer`，选 `x-api-key` 即 401）、`inferenceGatewayBaseUrl=http://127.0.0.1:<port>`（**不带 `/v1`**）、`inferenceModels[{name,labelOverride}]`（`labelOverride` 写真模型名，App 下拉里认得出来）。
+- **写点 ②（网关 alias）**：`~/.config/mslxdff/model-aliases.json` 加「角色槽 → 真模型」（复用 `src/providers/model-id.js` 的 `registerModelAlias`/`persistModelAliases`，与 `-setto workbuddy`/`-setto opencode` 同一张表）。入站在 `src/chat-pipeline/policy.js` 生效，`getModelAlias` 未命中会就地重读文件 → **不用重启 daemon**。⚠ alias 是全局的：终端 `claude` 发同名槽位 id 也会落到池子模型；覆盖旧值前逐条打印 `slot: from → to`。
+- **两步缺一必红**：只写 profile 时 App 探活（固定发 `claude-sonnet-5`）会因无映射被当未知模型丢宽带组员转发，30–90 s 后 502、界面上只表现为 Test connection 红点。
+- **选项**：`--max N` 只摊前 N 条；`--max-effort <low|medium|high|xhigh|max>` 给每条槽位加 `maxEffort`（本仓外壳会丢 `output_config`，一般不用）；`--no-alias` 只写 profile（打印明说后果）；`--check` 写完立刻逐槽探活；`--official` 摘掉自家登记（**不删配置文件**，App 里还能切回来）并提示 alias 需手工清理。
+- **不做什么**：不写 `preferredModel`（接桌面端不该顺手改 CLI 默认）、不碰 `claude_desktop_config.json`（App 自己的 prefs）、不写注册表策略（`HKLM\SOFTWARE\Policies\Claude` 一旦有值，App 整体忽略本地 `configLibrary`，那是运维的权力）。
+- **生效姿势**：⚠ App **不热重载** —— 完全退出并重新打开 Claude Desktop，在登录界面选这份 3P 配置（3P 模式不需要 claude.ai 账号；要连该选项都不给看见，由 MDM 下发 `disableDeploymentModeChooser: true`）。token 轮换后需重跑本命令（profile 里存明文 key）。
+- **官方立场**：`code.claude.com/docs/en/llm-gateway` 明写 Anthropic 不支持把 Claude Code 路由到非 Claude 模型 → 本命令属「能跑但 unsupported」，App 换版收紧校验时先跑 `-claude-desktop slots` 看实况清单。
+
+### `-claude-desktop [status|slots|check]` / `--claude-desktop ...`
+
+- **status**（缺省子命令）：只读盘，三段判据 —— ① 托管策略（`reg query` 计数不认本地化表头「找到 N 个值」，只认恒为 ASCII 的 `REG_` 值行；`reg.exe` 读不动时如实说「读不动」而不是「无策略」）② `_meta.json` 的 `appliedId` 指向哪份、有无 profile ③ 每条 `inferenceModels` 槽位有无 alias、是否角色槽形态。
+- **slots**：解 App 自带签名目录 `Claude-3p/model-catalog/published.json`（`documentBytes` 是 base64 的 `surfaces.{cc,ccd,ccr,chat,cowork}.model_selector_state`），与内置 12 槽比对并列出差异（App 换版即此处先红）。
+- **check [modelId ...]**：逐槽向本机 `/v1/messages` 发 `max_tokens=16`（给 1 会让思考型模型把预算全花在 reasoning 上、吐空正文轮），表格给 状态/耗时/`x-mslxdff-actual-model`/正文首段；失败按四类给判据：无 `actual-model` + 30~90 s 超时 = 槽位没 alias、401 = token 已轮换、502 且有 `actual-model` = 该真模型上游失效、connection refused = 网关没起。全绿退出 0，有红退出 1。
 
 ### `-creategroup <name>` / `--creategroup <name>` / `-group create <name>`
 
@@ -1308,6 +1330,12 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_QODER_STICKY_MS` | `600000` | qoder 同请求粘号 TTL（同一次客户端请求内复用同一个号，仅冷却才换，ADR-0036；`0`=关，退回每次调用 round-robin） |
 | `MSLXDFF_QODER_CHECKIN` | `1` | qoder 每日自动签到开关（`0` 关；开启则每日本地时 `_CHECKIN_HOUR` 全号签到，按每号 region 选域名，落盘 `state.qoderCheckin`） |
 | `MSLXDFF_QODER_CHECKIN_HOUR` | `9` | qoder 自动签到小时（`0~23` 本地时，非法回退 9） |
+| `MSLXDFF_RACCOON_CLIENT_VERSION` | `v1.0.35` | raccoon 客户端版本（`X-Client-Version` 与 UA `Raccoon Work/<ver> (Windows)`）；上游按版本做风控判断，硬编码会随官方发版失效 |
+| `MSLXDFF_RACCOON_THINKING` | 开 | raccoon 思考开关默认（`off`/`0`/`false`/`no`/`disabled` 关，其余含未设=开）；优先级：请求体 `extra_body.thinking.type` ＞ 调用方 `effort` ＞ 本 env ＞ 开 |
+| `MSLXDFF_RACCOON_COOLDOWN_MS` / `_QUOTA_COOLDOWN_MS` / `_TIMEOUT_MS` | `30000` / `3600000` / `300000` | raccoon 短冷却（登录态/限流/服务端）/ 积分不足长冷却（按天回血）/ 上游整请求超时 |
+| `MSLXDFF_RACCOON_AUTH_DIR` | `<state 目录>/auths` | raccoon 账号文档目录（`raccoon-<uid>.json`，`0600`；读取时兼容 `cwd/auths` 兜底） |
+| `MSLXDFF_RACCOON_CHECKIN` | `1` | raccoon daemon 每日自动签到开关（`0` 关；开则每天本地时 `_CHECKIN_HOUR` 全号签到，幂等以账单判「今日已领」不算失败，启动补签，落盘 `state.raccoonCheckin`） |
+| `MSLXDFF_RACCOON_CHECKIN_HOUR` | `9` | raccoon 自动签到小时（`0~23` 本地时，非法回退 9） |
 | `MSLXDFF_QWENWORK_COOLDOWN_MS` | `30000` | qwenwork 多号冷却（401/403/429/5xx 与 fetch 异常；额度错走 `MSLXDFF_QWENWORK_QUOTA_COOLDOWN_MS` 长冷却，400 等业务错不冷却） |
 | `MSLXDFF_QWENWORK_QUOTA_COOLDOWN_MS` | `3600000` (1h) | qwenwork 额度耗尽号冷却（code 14018/中英额度措辞命中；额度按天恢复，短冷却等于反复撞死号） |
 | `MSLXDFF_QWENWORK_TIMEOUT_MS` | `120000` | qwenwork 上游连接超时（COSY 签名请求的 `timeoutSignal`） |
@@ -1390,6 +1418,16 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_ANTHROPIC_STREAM_USAGE` | 开 | 流式请求向上游注入 `stream_options:{include_usage:true}`（否则 `message_delta.usage` 恒 0）；个别上游不认这字段会 400 → 设 `0` 关 |
 | `MSLXDFF_ANTHROPIC_THINKING` | `0` | 是否把上游 `reasoning_content` 翻成 Anthropic `thinking` 块外发。缺省丢——我们无法签发 `signature`，客户端回传必被上游拒（ADR-0047） |
 | `MSLXDFF_ANTHROPIC_DEBUG` | — | `1` 时 daemon 日志打 `[messages]` 行（请求形状、截断、收场读数），排障用 |
+| `MSLXDFF_WEB_SEARCH` | `tavily,exa,parallel` | 网关代跑 Anthropic `web_search`（ADR-0049）的后端顺序，逗号分隔按序降级（首腿＝Tavily keyless REST，Exa/Parallel MCP 兜底）；`off`/`none`/`0` = 关闭（此时旁路请求直接 400 不出网）；写了未知名字则回落到缺省三个后端，**不会**被当成关闭 |
+| `MSLXDFF_WEB_SEARCH_TIMEOUT_MS` | `15000` | **整条后端链共享的**搜索预算（ms）：单后端拿剩余时间，剩余 <250ms 直接放弃后续后端。代跑期间不落响应头（失败要能干净回 400），故客户端最长等这么久才见首帧或错误 |
+| `MSLXDFF_WEB_SEARCH_MAX_RESULTS` | `8` | 返回给客户端的结果条数上限（也是 Tavily `max_results` / Exa `numResults` 的索取值）。搜索结果直接进客户端上下文窗口，不设上限＝把网关变成 token 焚烧炉 |
+| `MSLXDFF_WEB_SEARCH_MAX_CHARS` | `700` | 每条结果正文（`snippet`）字符上限；另有不可配的硬截断：`title` 200、`url` 500、单发响应体读 2_000_000 字符 |
+| `MSLXDFF_WEB_SEARCH_TAVILY_URL` | `https://api.tavily.com/search` | Tavily 后端覆盖点（缺省首腿，keyless 档免注册即用；换自建/内网搜索、测试注入）。查询词与来源公网 IP 会离开本机到该地址 |
+| `MSLXDFF_WEB_SEARCH_PARALLEL_URL` | `https://search.parallel.ai/mcp` | Parallel 后端覆盖点（换自建/内网搜索、测试注入）。查询词与来源公网 IP 会离开本机到该地址 |
+| `MSLXDFF_WEB_SEARCH_EXA_URL` | `https://mcp.exa.ai/mcp` | Exa 后端覆盖点，同上。免 key 档实测常被限流（且限流也是 HTTP 200，故判成功的唯一依据是「拿到 ≥1 条带 `url` 的结果」） |
+| `MSLXDFF_WEB_SEARCH_PARALLEL_KEY` | 空 | 可选 Bearer key，只改变计量归属，不是解锁 |
+| `MSLXDFF_WEB_SEARCH_EXA_KEY` | 空 | 可选，拼进 URL 的 `?exaApiKey=`，同上 |
+| `MSLXDFF_WEB_SEARCH_TAVILY_KEY` | 空 | 可选 Bearer key：有值则改走带 key 的配额档（免费 1000 credits/月、dev 环境 100 RPM），空＝keyless 免注册档 |
 
 > 注：`-port`/`-provider` 等 CLI 写入的 state 优先级高于同名 env（如 `MSLXDFF_PORT`），但 `MSLXDFF_<ID>_KEY` 单值 env 优先于 state 的多 key（便于容器/CI 临时覆盖）。
 

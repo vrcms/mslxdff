@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // workbuddy-models.js — 列出 WorkBuddy 官方模型、价格、CLI 可用集（低消耗优先排序）
 // 用法：node workbuddy-models.js [--json]
-// 读 auths/workbuddy-*.json 的 token 调 https://copilot.tencent.com/console/enterprises/personal/models
+// 读 auths/workbuddy-*.json 的 token 调 https://copilot.tencent.com/v3/config
 // 输出按 credits 升序（0 消耗最前），方便选最省积分的模型做测试
 
 import fs from "node:fs";
@@ -38,7 +38,7 @@ async function main() {
     Origin: "https://www.codebuddy.cn",
     Referer: "https://www.codebuddy.cn/",
   };
-  const res = await compatFetch("https://copilot.tencent.com/console/enterprises/personal/models", { headers });
+  const res = await compatFetch("https://copilot.tencent.com/v3/config", { headers });
   if (!res.ok) throw new Error(`models ${res.status} ${await res.text().then(t=>t.slice(0,300))}`);
   const obj = await res.json();
   const models = obj.data.models;

@@ -12,7 +12,7 @@ import { handleExhaustedLocal, handleExhaustedAll } from "../routes/chat/exhaust
 import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from "../state/schemas/use-group.js";
 import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
-import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
+import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -74,6 +74,13 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     let upRes = null;
     let forwarded = { ...injectReasoningContent(model, body), model };
+    // 首发输出额度托底（plugin hook 前——plugin 有最终发言权，硬底线只约束客户端直发 body）
+    const _floored = withOutputFloor(forwarded);
+    if (_floored !== forwarded) {
+      const _fk = ["max_tokens", "max_completion_tokens"].find((k) => _floored[k] !== forwarded[k]) || "max_tokens";
+      evt("output-floor", { reqId, model, key: _fk, raiseFrom: Number(forwarded[_fk]), raiseTo: Number(_floored[_fk]) });
+      forwarded = _floored;
+    }
     if (plugins?.length) {
       const ur = await runHook(plugins, "upstream:request", { reqId, requested, model, payload: forwarded, stream: Boolean(body.stream) });
       for (const e of ur.errors) evt("plugin-hook-error", { reqId, hook: "upstream:request", plugin: e.plugin, error: e.error });

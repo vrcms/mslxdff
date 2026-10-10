@@ -34,7 +34,7 @@ test("state: workbuddy defaults", async () => {
   const { saveProviderConfig, loadProviderConfig } = await import("../src/state.js");
   saveProviderConfig("workbuddy", { baseUrl: "https://copilot.tencent.com", keys: ["k1"], auths: [{ uid: "u1", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt1" }] }, { file });
   const cfg = loadProviderConfig("workbuddy", { file });
-  assert.equal(cfg.modelsPath, "/console/enterprises/personal/models");
+  assert.equal(cfg.modelsPath, "/v3/config");
   assert.equal(cfg.chatPath, "/v2/chat/completions");
 });
 

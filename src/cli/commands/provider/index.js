@@ -46,6 +46,8 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider qoder checkin [--json] [--region cn|global] [--any] [--dry]  每日签到领积分（cn=daily-check-in，global=campaigns）");
     console.error("            mslxdff -provider zcode login [--bigmodel]       ZCode 授权（智谱免费额度，Start/Coding Plan）");
     console.error("            mslxdff -provider zcode quota [--json]          查看套餐/余量（未登录给重登指引）");
+    console.error("            mslxdff -provider raccoon login                   Raccoon（商汤小浣熊）扫码登录（终端二维码，免验证码）");
+    console.error("            mslxdff -provider raccoon quota|checkin [--json]   查积分余额 / 领每日登录积分");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
@@ -89,6 +91,11 @@ const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleZcodeLogin(id, sub, rest)) return true;
   const { handleZcodeQuota } = await import("./zcode-quota.js");
   if (await handleZcodeQuota(id, sub, rest)) return true;
+
+  const { handleRaccoonLogin } = await import("./raccoon-login.js");
+  if (await handleRaccoonLogin(id, sub, rest)) return true;
+  const { handleRaccoonQuota } = await import("./raccoon-quota.js");
+  if (await handleRaccoonQuota(id, sub, rest)) return true;
   const { handleProviderConfig } = await import("./config.js");
   if (await handleProviderConfig(id, sub, rest)) return true;
   const { handleProviderAllowlist } = await import("./allowlist.js");

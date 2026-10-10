@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { injectReasoningContent } from "../reasoning.js";
 import { runHook } from "../plugins.js";
 import { errMsg } from "../routes/helpers.js";
+import { withOutputFloor } from "./empty-turn.js";
 import { handleLocalRelay } from "../routes/chat/local-handler.js";
 import { handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
 
@@ -56,6 +57,13 @@ export async function runAutoRace(ctx, deps = {}) {
   const raceStart = performance.now();
   const attempts = raceModels.map(async (m) => {
     let f = { ...injectReasoningContent(m, body), model: m };
+    // 首发输出额度托底（同 serial-trial；auto 竞速路径独立组装，不能漏）
+    const _fl = withOutputFloor(f);
+    if (_fl !== f) {
+      const _fk = ["max_tokens", "max_completion_tokens"].find((k) => _fl[k] !== f[k]) || "max_tokens";
+      evt("output-floor", { reqId, model: m, key: _fk, raiseFrom: Number(f[_fk]), raiseTo: Number(_fl[_fk]) });
+      f = _fl;
+    }
     if (plugins?.length) {
       const u = await runHook(plugins, "upstream:request", { reqId, requested, model: m, payload: f, stream: Boolean(body.stream) });
       if (u.changed && u.value?.payload) f = u.value.payload;

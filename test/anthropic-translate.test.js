@@ -134,7 +134,9 @@ describe("messagesToChatBody — 请求映射", () => {
     assert.equal(messagesToChatBody({ ...base, tool_choice: { type: "none" } }).tool_choice, "none");
     assert.equal(messagesToChatBody({ ...base, tool_choice: { type: "auto" } }).tool_choice, "auto");
     assert.equal(messagesToChatBody({ ...base, tool_choice: { type: "any" } }).tool_choice, "required");
-    assert.deepEqual(messagesToChatBody({ ...base, tool_choice: { type: "tool", name: "Read" } }).tool_choice, { type: "function", function: { name: "Read" } });
+    assert.deepEqual(messagesToChatBody({ ...base, tools: [{ name: "Read", description: "d", input_schema: { type: "object" } }], tool_choice: { type: "tool", name: "Read" } }).tool_choice, { type: "function", function: { name: "Read" } });
+    // ADR-0049 修订：点名一个没随请求声明的工具（如被剥掉的 server tool）时降为 auto——强制点名不存在的函数上游必拒
+    assert.equal(messagesToChatBody({ ...base, tool_choice: { type: "tool", name: "Read" } }).tool_choice, "auto");
     assert.equal(messagesToChatBody(base).tool_choice, undefined);
   });
 

@@ -57,5 +57,5 @@ export function createKeyRing(keys = [], { cooldownMs = DEFAULT_COOLDOWN_MS, now
   }
 
   // isCooling 对外暴露：粘号选择器要判断"上次这个号还在冷却吗"（决定是否必须换号）
-  return { next, onError, replace, available, isCooling, size: list.length, cooldownMs, keys: [...list] };
+  return { next, onError, replace, available, isCooling, cooldownMs, get size() { return list.length; }, get keys() { return [...list]; } }; // ⚠ size/keys 必须是 getter：replace() 换号后构造期快照会停在已废弃的旧 token
 }

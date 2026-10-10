@@ -40,7 +40,7 @@ export function normalizeProviderModels(modelsObj) {
   return out;
 }
 
-// workbuddy 上游原生字段（/console/enterprises/personal/models，first-party 最准）→ 统一 caps 形状
+// workbuddy 上游原生字段（/v3/config 产品文档，first-party 最准）→ 统一 caps 形状
 // 实测字段（2026-09-11，29 模型全覆盖）：maxInputTokens/maxOutputTokens/supportsImages/
 // supportsReasoning/reasoning{effort,summary}/supportsToolCall/disabledMultimodal/credits/tags/name/vendor
 // reasoning 是"当前档位"非档位列表 → effortType=effort 但 effortValues=null、defaultEffort 记默认档

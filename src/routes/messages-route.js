@@ -22,6 +22,13 @@ import {
   estimateTokens,
   anthropicError,
 } from "../anthropic/translate.js";
+import {
+  detectSearchRequest,
+  runWebSearch,
+  searchConfig,
+  buildSearchMessage,
+  searchEvents,
+} from "../anthropic/web-search.js";
 
 const ADEBUG = process.env.MSLXDFF_ANTHROPIC_DEBUG === "1";
 function alog(...a) {
@@ -217,6 +224,29 @@ export function createAnthropicForwarder(realRes, translator, opts = {}) {
   return res;
 }
 
+/**
+ * 代跑结果回给客户端：非流式整包 JSON，流式由同一份块生成的具名事件（无 `[DONE]`）。
+ * 搜索在调用前就跑完了，这里一次写完即可，不需要 createAnthropicForwarder 的 ping 垫片。
+ */
+function respondSearch(res, { message, stream, provider }, isDead) {
+  if (isDead && isDead()) return undefined; // 搜索期间客户端断连：别再写任何字节
+  if (!stream) {
+    try { res.setHeader?.("x-mslxdff-web-search", provider); } catch { /* 已 flush */ }
+    try { return json(res, 200, message); } catch { return undefined; /* 下游已断 */ }
+  }
+  try {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "x-mslxdff-web-search": provider,
+    });
+    for (const e of searchEvents(message)) res.write(frameOf(e.type, e));
+    res.end();
+  } catch { /* 下游已断 */ }
+  return undefined;
+}
+
 export async function messagesHandler(ctx) {
   const { req, res } = ctx;
   const t0 = Date.now();
@@ -225,6 +255,39 @@ export async function messagesHandler(ctx) {
     body = await readBody(req);
   } catch {
     return json(res, 400, anthropicError("invalid_request_error", "Invalid JSON body"));
+  }
+  // —— 网关代跑 web_search（ADR-0049）：旁路请求**一律由网关作答**——命中判据即不打模型。
+  // 搜到就回结果块；关了/全挂/空查询就回一条明确的 400（把无工具的旁路丢给上游，只会让模型凭空
+  // 编 URL 并让客户端按「0 次搜索」空转重试，那才是改前的老毛病）。主循环请求不受影响。
+  // 整段包 try：搜索期最长 15s，其间客户端可能已断连（`isDead`），任何意外都不得逃逸成 5xx。
+  const det = detectSearchRequest(body);
+  if (det.hit) {
+    const isDead = () => res.writableEnded === true || res.destroyed === true || res.headersSent === true;
+    const wsCfg = searchConfig();
+    let r;
+    if (!wsCfg.enabled) r = { ok: false, error: "disabled by MSLXDFF_WEB_SEARCH=off" };
+    else {
+      try {
+        r = det.query ? await runWebSearch(det.query, wsCfg) : { ok: false, error: "empty query" };
+      } catch (e) {
+        r = { ok: false, error: String(e?.message || e) };
+      }
+    }
+    if (r.ok) {
+      const readout = { provider: r.provider, ms: r.ms, results: r.results.length, queryChars: r.query.length, chain: r.chain || [] };
+      alog("web-search", JSON.stringify(readout));
+      try { ctx.logs?.appendEvent?.({ type: "web-search", ...readout }); } catch { /* 观测产物不参与判决 */ }
+      return respondSearch(res, {
+        message: buildSearchMessage({ model: String(body.model || ""), query: r.query, results: r.results }),
+        stream: Boolean(body.stream),
+        provider: r.provider,
+      }, isDead);
+    }
+    const why = String(r.error || "unknown").slice(0, 200);
+    alog("web-search-unavailable", why);
+    try { ctx.logs?.appendEvent?.({ type: "web-search-unavailable", queryChars: (det.query || "").length, error: why, chain: r.chain || [] }); } catch { /* 同上 */ }
+    if (isDead()) return undefined;
+    try { return json(res, 400, anthropicError("invalid_request_error", `web search failed at the gateway: ${why}`)); } catch { return undefined; }
   }
   let chatBody;
   try {

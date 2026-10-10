@@ -33,6 +33,8 @@ export async function run(args = process.argv.slice(2)) {
   if (await handleModel(args)) return;
   const { handleSetto } = await import("./commands/sync.js");
   if (await handleSetto(args)) return;
+  const { handleClaudeDesktop } = await import("./commands/claude-desktop.js");
+  if (await handleClaudeDesktop(args)) return;
   const { handleWorkbuddy } = await import("./commands/workbuddy.js");
   if (await handleWorkbuddy(args)) return;
 

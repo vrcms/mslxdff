@@ -19,7 +19,7 @@ function stubWorkbuddy() {
         if (j.model !== "hy3") { res.writeHead(400); res.end("model mismatch"); return; }
         res.writeHead(200, {"Content-Type":"text/event-stream"});
         res.end("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n");
-      } else if (req.url.includes("/console/enterprises/personal/models")) {
+      } else if (req.url.includes("/v3/config")) {
         res.writeHead(200, {"Content-Type":"application/json"});
         res.end(JSON.stringify({
           data: {
