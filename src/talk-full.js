@@ -94,7 +94,7 @@ export async function flushAgentLoop() {
  * ① 开关 ② hops>0（组员转发的对话不落盘，spec「只捕获本机自发流量」）③ 两侧全空且 status≠200 ④ 受理。
  * 任何异常吞掉返回 false，MUST NOT 抛出影响请求。
  */
-export function recordAgentLoop({ reqId, model, via, hops, body, out, sessionKey, clientIp, echo, attemptMs, relayMs } = {}) {
+export function recordAgentLoop({ reqId, model, via, hops, body, out, sessionKey, clientIp, echo, attemptMs, relayMs, api } = {}) {
   if (!agentLoopEnabled()) return false;
   try {
     if (Number(hops) > 0) return false;
@@ -109,7 +109,7 @@ export function recordAgentLoop({ reqId, model, via, hops, body, out, sessionKey
     const rec = {
       ts: at, time: fmtShanghaiYMDHMS(new Date(at)),
       reqId: reqId ?? null, sessionKey: normSessionKey(sessionKey, msgs), clientIp: clientIp ?? null,
-      model: String(model || "unknown"), via: via ?? null,
+      model: String(model || "unknown"), via: via ?? null, ...(api ? { api: String(api) } : {}),
       hops: hops == null || hops === "" || !Number.isFinite(Number(hops)) ? null : Number(hops),
       status, stream: body?.stream ? 1 : 0, elapsedMs: elapsedOf(attemptMs, out?.totalMs),
       usage: out?.detail?.usage ?? null, finishReason: out?.detail?.sawFinishReason ?? null,

@@ -6,6 +6,7 @@ import { isFreeModel } from "../models.js";
 import { clientIp, summarizePrompt } from "../routes/helpers.js";
 import { formatTimeline } from "../timeline.js";
 import { summarizeRequest, shouldTraceModel } from "../model-trace.js";
+import { apiKindOf } from "../api-kind.js";
 
 /**
  * ChatPipeline 深模块门面 — 对外 execute(req) 单一 inlet
@@ -18,6 +19,9 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
   async function execute({ req, res } = {}) {
     const startedAt = Date.now();
     const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    // 入站协议门（chat|responses|messages|other）：全场只在这里判一次，之后随 handlerCtx 透传；
+    // 各日志写点不得再各自匹配路径（第二份判定迟早漂移）—— 见 src/api-kind.js
+    const api = apiKindOf(req);
     const perf0 = performance.now();
     const stages = [];
     const mark = (name) => stages.push([name, Math.round(performance.now() - perf0)]);
@@ -34,10 +38,10 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
 
     // 事件/日志帮手先于 order 推导声明：evt 在 auto-scope 分支即被使用，
     // 声明置后会让 useAuto && autoProvider 的请求在 TDZ 上崩（线上 -chat 回退路径）
-    const logCall = (model, status) => logs?.appendCall({ reqId, model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(req?.body?.stream), stages });
-    const logError = (model, status, message) => logs?.appendError({ reqId, model, auto: useAuto, status, message, stages });
+    const logCall = (model, status) => logs?.appendCall({ reqId, api, model, auto: useAuto, status, durationMs: Date.now() - startedAt, stream: Boolean(req?.body?.stream), stages });
+    const logError = (model, status, message) => logs?.appendError({ reqId, api, model, auto: useAuto, status, message, stages });
     const evt = (type, data) => {
-      const entry = { ts: Date.now(), reqId, type, ...data, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
+      const entry = { ts: Date.now(), reqId, type, ...data, api, model: data.model ?? requested, auto: useAuto, durationMs: Date.now() - startedAt, stages: [...stages] };
       const traceModel = entry.model || requested;
       if (shouldTraceModel(type)) {
         // Note: 模型日志只投影安全字段，不能把含 prompt 的 entry 原样下传 — 见 .agents/notes/implemented/feature/2026-09-25-model-trace-log.md
@@ -111,7 +115,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     // 客户端会话标识（opencode 插件 chat.headers 注入）→ 透传上游做粘性路由/缓存亲和；
     // 无头时由 upstream.js 按对话首两条消息哈希兜底（不再每请求随机）
     const clientSession = String(req?.headers?.["x-session-affinity"] || req?.headers?.["x-session-id"] || "").trim() || null;
-    const handlerCtx = { reqId, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp };
+    const handlerCtx = { reqId, api, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp };
     if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
     await engine.run({

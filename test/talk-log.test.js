@@ -350,3 +350,15 @@ test("talk log: 有正文（非空白）时整条目逐字不变（判据收紧�
   assert.equal(got, golden, "有正文路径的字节序列必须与改动前一致");
   assert.ok(!got.includes("本轮无正文"), "有正文时不得出现无正文标注");
 });
+
+// ---- 门短码（api kind）：talk 头行必须看得出这一发是从哪扇门进来的 ----
+test("talk head: 带 api=（inlet 判定值）；未拿到判定值时整段省略，不伪造 other", () => {
+  const base = { reqId: "r1", model: "acme/m", via: "local", hops: 0, status: 200, stream: 1, elapsedMs: 12, question: "问", answer: "答", ts: Date.now() };
+  const headOf = (block) => String(block).split("\n")[0];
+  const h1 = headOf(formatTalkEntry({ ...base, api: "messages" }));
+  assert.match(h1, /\bapi=messages\b/, `头行应含 api=messages：${h1}`);
+  assert.match(headOf(formatTalkEntry({ ...base, api: "chat" })), /\bapi=chat\b/);
+  assert.match(headOf(formatTalkEntry({ ...base, api: "other" })), /\bapi=other\b/);
+  const h4 = headOf(formatTalkEntry(base));
+  assert.doesNotMatch(h4, /\bapi=/, `没拿到判定值时不得写 api=（更不得伪造 other）：${h4}`);
+});

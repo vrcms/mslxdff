@@ -110,7 +110,8 @@ export function upstreamEcho(res) {
 export function formatModelTrace({ type, reqId, model, data = {}, request = null, totalMs = null } = {}) {
   const base = { time: fmtShanghaiYMDHMS(new Date()), req: reqId || "-", model: model || "-", stage: type || "-" };
   let detail = "";
-  if (type === "request") detail = `incoming ${kv({ ...(request || summarizeRequest(data.body)), hops: data.hops, useAuto: data.useAuto })}`;
+  // api= 打在 incoming 行最前：门是排查第一眼要的东西，grep "incoming api=" 直接分得开三门；无值时 kv 自然不落该段（不发散成 api=other）
+  if (type === "request") detail = `incoming ${kv({ api: data.api, ...(request || summarizeRequest(data.body)), hops: data.hops, useAuto: data.useAuto })}`;
   else if (type === "ordered") detail = `route order=${(data.order || []).join(" | ")} hops=${data.hops ?? "-"} fallback=${data.canFallback ? 1 : 0}`;
   else if (type === "model-try") detail = `target=${data.model || model || "-"} idx=${data.idx ?? "-"} remaining=${data.remaining ?? "-"}`;
   else if (type === "alias") detail = `rawModel=${data.rawModel || "-"} requested=${data.requested || model || "-"}`;

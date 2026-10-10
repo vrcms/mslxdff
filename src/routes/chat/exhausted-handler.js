@@ -28,11 +28,11 @@ export async function handleExhaustedLocal({ res, body, lastErr, order, handlerC
     // 绕过 relay-pipeline 的最后一站：对话日志照常落盘（正文只进 talk/*.log，不进 events.log）
     // 本收尾点没有 attemptStartMs 可取（绕过 relay-pipeline 直连 relay）→ 不传 attemptMs，按回退路径走：
     // elapsed=relay 内部计时（与 relayMs 同值，spec 降级 scenario）；finishReason 传 out.detail.sawFinishReason 与 3.3 同源。
-    try { recordRelayTalk({ reqId: handlerCtx.reqId, model: lastErr.model, via: "local-exhausted", body, out, finishReason: out.detail?.sawFinishReason }); } catch {}
+    try { recordRelayTalk({ reqId: handlerCtx.reqId, api: handlerCtx?.api, model: lastErr.model, via: "local-exhausted", body, out, finishReason: out.detail?.sawFinishReason }); } catch {}
     // 回路语料另起一条独立 try：talk.log 是人读环形稿、capture 是机读全量语料，两者生死独立。
     // hops 走 handlerCtx.hops（serial-trial 以 {...handlerCtx} 展开传进来，与 reqId 同源）；缺值时不兜 0 ——
     // 交给 talk-full 落 null（「hops 未知」在语料里看得见，比伪造成 0 诚实），组员流量拦截靠真值。
-    try { recordAgentLoop({ reqId: handlerCtx.reqId, model: lastErr.model, via: "local-exhausted", hops: handlerCtx?.hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp }); } catch {} // attemptMs 缺省 → 回退 out.totalMs；缺 echo 的既有形状本期不补（tasks 3.4）
+    try { recordAgentLoop({ reqId: handlerCtx.reqId, api: handlerCtx?.api, model: lastErr.model, via: "local-exhausted", hops: handlerCtx?.hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp }); } catch {} // attemptMs 缺省 → 回退 out.totalMs；缺 echo 的既有形状本期不补（tasks 3.4）
     evt("result", { reqId: handlerCtx.reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
     evt("client-response", { requested, actual: lastErr.model, via: "local", fallback: false, status: out.status, reqId: handlerCtx.reqId });
     // 最后一站：relay 超时/空轮留口路径都不写响应，这里没有上层，必须自己收尾
@@ -64,9 +64,9 @@ export async function handleExhaustedAll({ res, body, lastErr, order, requested,
     // 同上：全链耗尽的最终转发也要留下问答原文
     // 同上：本收尾点没有 attemptStartMs 可取（relay 直连、无尝试起点）→ 不传 attemptMs，
     // recordRelayTalk/recordAgentLoop 内部按回退路径走 elapsed=relay 计时（与 relayMs 同值，spec 降级 scenario）；finishReason 同源传 out.detail.sawFinishReason。
-    try { recordRelayTalk({ reqId: handlerCtx.reqId, model: lastErr.model, via: "local-final", body, out, finishReason: out.detail?.sawFinishReason }); } catch {}
+    try { recordRelayTalk({ reqId: handlerCtx.reqId, api: handlerCtx?.api, model: lastErr.model, via: "local-final", body, out, finishReason: out.detail?.sawFinishReason }); } catch {}
     // 同上：全链耗尽的最终转发也要进语料（这条往往是「客户端只看到 502」时唯一的现场材料）
-    try { recordAgentLoop({ reqId: handlerCtx.reqId, model: lastErr.model, via: "local-final", hops: handlerCtx?.hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp }); } catch {} // attemptMs 缺省 → 回退 out.totalMs（见上行注释；缺 echo 的形状本期不补）
+    try { recordAgentLoop({ reqId: handlerCtx.reqId, api: handlerCtx?.api, model: lastErr.model, via: "local-final", hops: handlerCtx?.hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp }); } catch {} // attemptMs 缺省 → 回退 out.totalMs（见上行注释；缺 echo 的形状本期不补）
     evt("result", { reqId: handlerCtx.reqId, model: lastErr.model, status: out.status, via: "local", timing: lastErr.upstream._t ?? null, ttfMs: out.ttfMs, totalMs: out.totalMs, detail: out.detail ?? null });
     evt("client-response", { requested, actual: lastErr.model, via: "local", fallback: false, status: out.status, reqId: handlerCtx.reqId });
     // 最后一站：relay 超时/空轮留口路径不写响应，这里没有上层 failover，必须自己收尾

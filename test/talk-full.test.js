@@ -418,3 +418,16 @@ test("attemptMs 语义：elapsedMs 取本次尝试墙钟、meta.relayMs 恒存 r
     assert.equal(row.meta.relayMs, 2, "relay 内部计时另存 meta.relayMs");
   }, fullEnv());
 });
+
+// ---- 门短码：同一模型的三门流量混在同一份 jsonl 里，记录级 api 是唯一分判据 ----
+test("talkfull: recordAgentLoop 落 api 字段；未传则整个键缺席（旧形状兼容）", async () => {
+  await withCapture(async (dir) => {
+    const talk = bucket({ content: ["答"], n: 1 });
+    assert.equal(recordAgentLoop({ reqId: "r1", model: "acme/m", via: "local", hops: 0, body: sampleBody(), out: goodOut(talk), api: "messages" }), true);
+    let rows = await flushRows(dir, "acme/m");
+    assert.equal(rows[rows.length - 1].api, "messages", `记录级 api 没落盘：${JSON.stringify(Object.keys(rows[rows.length - 1]))}`);
+    assert.equal(recordAgentLoop({ reqId: "r2", model: "acme/m", via: "local", hops: 0, body: sampleBody(), out: goodOut(talk) }), true);
+    rows = await flushRows(dir, "acme/m");
+    assert.equal("api" in rows[rows.length - 1], false, "未拿到判定值时不得出现 api 键（缺字段只可能是旧行/漏传，不是某扇门）");
+  }, fullEnv());
+});

@@ -150,3 +150,14 @@ test("model trace: empty-turn-retry 的 step 必须出现在人读行（登记�
   const legacy = formatModelTrace({ type: "empty-turn-retry", reqId: "r1", model: "m", data: { retry: 1, step: 0, max: 2, delayMs: 2000, waitedMs: 2000 } });
   assert.match(legacy, /step=0/, "逃生阀模式 step=0 也得可见，否则 grep step= 假阴性");
 });
+
+// ---- 门短码：incoming 行带 api=，让「这发是哪扇门」在轨迹里一眼可读 ----
+test("model trace: incoming 行带 api 短码；无值时整段不写", () => {
+  const req = summarizeRequest({ messages: [{ role: "user", content: "x" }], stream: true });
+  const line = formatModelTrace({ type: "request", reqId: "r1", model: "acme/m", data: { api: "messages", hops: 0 }, request: req });
+  assert.match(line, /incoming api=messages\b/, line);
+  const chatLine = formatModelTrace({ type: "request", reqId: "r2", model: "acme/m", data: { api: "chat", hops: 0 }, request: req });
+  assert.match(chatLine, /incoming api=chat\b/, chatLine);
+  const bare = formatModelTrace({ type: "request", reqId: "r3", model: "acme/m", data: { hops: 0 }, request: req });
+  assert.doesNotMatch(bare, /api=/, `未传 api 不得出现该段：${bare}`);
+});

@@ -33,7 +33,7 @@ export function fmtEvent(e) {
   const fallbackTag = e.fallback?.fallback ? ` fallback=${e.fallback.requested_model || e.requested}->${e.fallback.actual_model || e.actual}(${e.fallback.reason || e.reason})` : "";
   switch (e?.type) {
     case "request":
-      return `${head} request       client-> ${m(e.requested || e.model)}${e.auto ? " (auto)" : ""} raw=${m(e.rawModel)} lock=${m(e.lockModel)} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""} reqId=${e.reqId || ""}`;
+      return `${head} request       client-> ${m(e.requested || e.model)}${e.auto ? " (auto)" : ""}${e.api ? ` api=${e.api}` : ""} raw=${m(e.rawModel)} lock=${m(e.lockModel)} hops=${e.hops} from ${e.ip || "?"}${e.stream ? " stream" : ""}${e.prompt ? ` content="${e.prompt}"` : ""} reqId=${e.reqId || ""}`;
     case "client-request":
       return `${head} client req    客户端请求 model=${m(e.requested)} raw=${m(e.rawModel)} lock=${m(e.lockModel)} ip=${e.ip || "?"}${e.stream ? " stream" : ""}`;
     case "ordered":

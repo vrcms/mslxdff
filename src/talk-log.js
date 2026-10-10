@@ -94,14 +94,14 @@ function pushBlock(out, label, text, cap) {
 // 撞捕获上限时紧跟头部行的人类可读提醒：不必先认识 truncated=1 这个键名也能一眼看出「可能不完整」。
 const TRUNC_NOTE = "[!] 本轮已撞捕获上限（truncated=1）：思考/正文后半段未落盘，内容可能不完整 —— 别当成模型的完整回答";
 
-/** 一条对话 = 一个可读块：头部一行元信息（ts= 是环形淘汰的唯一依据），正文三段。elapsed= 取本次尝试墙钟（design D3），finish=/relayMs= 为 ADR-0046 新读数。 */
-export function formatTalkEntry({ reqId, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts, talkCapped = false, talkChars, talkCap, finishReason, relayMs, ttftMs } = {}) {
+/** 一条对话 = 一个可读块：头部一行元信息（ts= 是环形淘汰的唯一依据），正文三段。elapsed= 取本次尝试墙钟（design D3），finish=/relayMs= 为 ADR-0046 新读数，api= 为入站协议门短码（认不出的路 = other；未拿到判定值则整段省略，绝不伪造）。 */
+export function formatTalkEntry({ reqId, api, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts, talkCapped = false, talkChars, talkCap, finishReason, relayMs, ttftMs } = {}) {
   const fval = finishReason || "-"; // 缺值占位（grill Q5）：「没给 finish」不得被读成 stop；字段恒在场
   const now = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
   const trunc = talkCapped === true;
   const head = [
     `${MARK} ts=${now}`, `time=${fmtShanghaiYMDHMS(new Date(now))}`, `req=${reqId || "-"}`, `model=${model || "-"}`,
-    via ? `via=${via}` : "", hops != null ? `hops=${hops}` : "", `status=${status ?? "-"}`,
+    api ? `api=${api}` : "", via ? `via=${via}` : "", hops != null ? `hops=${hops}` : "", `status=${status ?? "-"}`,
     stream ? "stream=1" : "stream=0", Number.isFinite(elapsedMs) ? `elapsed=${Math.round(elapsedMs)}ms` : "",
     // 尝试墙钟与 relay 内部计时同值时不重复打印（头行噪音克制，grill Q3）；两值不同（hedge/缓冲重放）才另列 relayMs
     Number.isFinite(relayMs) && Number.isFinite(elapsedMs) && Math.round(relayMs) !== Math.round(elapsedMs) ? `relayMs=${Math.round(relayMs)}ms` : "",
@@ -206,7 +206,7 @@ export function trimTalkLog(file, nowTs = Date.now()) {
  * 桶的 capped/n/cap 必须一路传到 formatTalkEntry：撞顶的那条要能看出「后半截没了」。
  * attemptMs（本次上游尝试墙钟）由调用点传入；未传（拿不到尝试起点）回退 out.totalMs —— 此时 elapsed 与 relayMs 同值（spec 降级 scenario）。
  */
-export function recordRelayTalk({ reqId, model, via, hops, body, out, echo = {}, attemptMs, ttftMs, finishReason } = {}) {
+export function recordRelayTalk({ reqId, api, model, via, hops, body, out, echo = {}, attemptMs, ttftMs, finishReason } = {}) {
   if (!talkLogEnabled()) return false;
   try {
     const talk = out?.detail?.talk;
@@ -218,7 +218,7 @@ export function recordRelayTalk({ reqId, model, via, hops, body, out, echo = {},
     if (!answer && !thinking && !tools) return false;
     const ts = Date.now();
     const block = formatTalkEntry({
-      reqId, model, via, hops, status, stream: Boolean(body?.stream), finishReason: finishReason ?? out?.detail?.sawFinishReason,
+      reqId, api, model, via, hops, status, stream: Boolean(body?.stream), finishReason: finishReason ?? out?.detail?.sawFinishReason,
       elapsedMs: Number.isFinite(Number(attemptMs)) ? Number(attemptMs) : out?.totalMs, // 新口径：本次尝试墙钟优先（design D3）
       relayMs: out?.totalMs, ttftMs, question: lastUserQuestion(body || {}),
       thinking, answer, tools, usage: out?.detail?.usage, ...echo, ts,

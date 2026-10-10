@@ -81,8 +81,7 @@ export function createRelayPipeline({
     const markFn = m2 || _mark;
     const curStartedAt = sa2 ?? defaultStartedAt ?? Date.now();
     const curStages = s2 ?? defaultStages ?? [];
-    const reqId = handlerCtx?.reqId;
-    const hops = handlerCtx?.hops;
+    const { reqId, api, hops } = handlerCtx || {};
 
     // 1. logCall(pre) — 保持原 handler 的 logCall→fallback→relay-start 时序
     try { _logCall(actual, upRes?.status); } catch {}
@@ -146,11 +145,11 @@ export function createRelayPipeline({
     const ttftMs = Number.isFinite(out?.ttfMs) && out.ttfMs >= 0 ? out.ttfMs + anchorMs : null;
     // 环形对话日志：只记有真实输出的轮次（空轮交给下面的空转判定另行报错）。
     // 纯旁路：不改闸门、不改计时、不改返回体；任何异常都吞掉，绝不影响转发。
-    try { recordRelayTalk({ reqId, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, ttftMs, finishReason: out.detail?.sawFinishReason }); } catch {}
+    try { recordRelayTalk({ reqId, api, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, ttftMs, finishReason: out.detail?.sawFinishReason }); } catch {}
     // 回路语料（talk/full）另起一条独立 try，不与上面合并：talk.log 是人读环形稿、capture 是机读全量语料，
     // 两者生死独立 —— 一边不落另一边照落，判据也不同（capture 只认 hops=0，且要带 sessionKey/clientIp 供分组与来源核对）。
     // 纯旁路同上：不改闸门、不改计时、不改返回体；out.detail.talk 是原桶（logs.js 的 dropTalk 剥的是副本），这里不再剥。
-    try { recordAgentLoop({ reqId, model: actual, via, hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp, echo: upstreamEcho(upRes), attemptMs, relayMs: out.totalMs }); } catch {}
+    try { recordAgentLoop({ reqId, api, model: actual, via, hops, body, out, sessionKey: handlerCtx?.sessionId, clientIp: handlerCtx?.clientIp, echo: upstreamEcho(upRes), attemptMs, relayMs: out.totalMs }); } catch {}
 
     // 5a0. 空转 200：流正常结束但零正文零工具调用 → 客户端会报 EMPTY_MODEL_RESPONSE
     // （"The model ended its turn without producing any output"）；转 failover 而不是
