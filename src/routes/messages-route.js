@@ -1,7 +1,7 @@
 /**
  * POST /v1/messages + /v1/messages/count_tokens — 给 Claude Code 用的 Anthropic Messages 外壳（ADR-0047）。
  * 复用 ChatPipeline 全链路（auto/hedge/failover/tool_calls/空轮重试），只做形状翻译：
- * 非流式：收集 chat JSON → 转 Anthropic message；流式：逐块实时翻成 Anthropic 具名事件。
+ * 非流式：收集 chat JSON → 转 Anthropic message（上游只会流式时先把 SSE 聚合成 chat JSON）；流式：逐块实时翻成 Anthropic 具名事件。
  *
  * 出站格式与 /v1/responses **不兼容**，故不能复用 createLiveForwarder（它写死 `data:` + `[DONE]`）：
  * Anthropic 用 `event: <type>` 具名帧、无 `[DONE]`，且需网关自发 `ping` 扛过客户端 idle watchdog。
@@ -97,6 +97,48 @@ function tryAggregate(text) {
     return null;
   }
 }
+// 客户端要非流式而上游只会流式（workbuddy 在 provider 层写死 stream:true，SSE 硬吃回来）：
+// collector 收到的 text 是 SSE 帧序列而非 JSON，JSON.parse 必炸 → 此前恒 502。逐行吃 data: 帧
+// 聚成 chat.completion JSON（与 qoder/aggregate.js、zcode 非流式聚合同构），出口复用 chatJsonToAnthropic；
+// 一帧都没有或夹带 in-band 错误帧时返回 null，落回原有 502 + errorText 路径（错误绝不聚合成正文）。
+function sseToChatJson(text, model) {
+  let content = "";
+  let finish = "";
+  let usage = null;
+  let sawChunk = false;
+  const toolSlots = new Map();
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("data:")) continue; // 注释帧/keepalive/事件名行全跳过
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    let chunk;
+    try { chunk = JSON.parse(payload); } catch { continue; }
+    if (chunk?.error) return null;
+    sawChunk = true;
+    const choice = chunk.choices?.[0] || {};
+    const delta = choice.delta || {};
+    if (choice.finish_reason) finish = choice.finish_reason;
+    if (chunk.usage) usage = chunk.usage;
+    if (typeof delta.content === "string" && delta.content) content += delta.content;
+    for (const tc of delta.tool_calls || []) {
+      const slot = Number(tc?.index ?? 0);
+      let t = toolSlots.get(slot);
+      if (!t) { t = { id: "", name: "", args: "" }; toolSlots.set(slot, t); }
+      if (tc?.id) t.id = String(tc.id);
+      if (tc?.function?.name) t.name += String(tc.function.name);
+      if (tc?.function?.arguments) t.args += String(tc.function.arguments);
+    }
+  }
+  if (!sawChunk) return null;
+  const toolCalls = [...toolSlots.values()].map((t, i) => ({ id: t.id || `call_${i}`, type: "function", function: { name: t.name, arguments: t.args || "{}" } }));
+  const message = { role: "assistant", content: content || (toolCalls.length ? null : "") };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  return { id: "", object: "chat.completion", created: Math.floor(Date.now() / 1000), model,
+    choices: [{ index: 0, message, finish_reason: finish || (toolCalls.length ? "tool_calls" : "stop") }],
+    usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+}
+
 
 /**
  * Anthropic 出站垫片：具名事件 + 无 [DONE] + 空闲自发 ping + 真 headersSent。
@@ -319,6 +361,9 @@ export async function messagesHandler(ctx) {
       if (status >= 400) return json(res, status, anthropicError("api_error", errorText(text) || String(text).slice(0, 500)));
       let chatJson = null;
       try { chatJson = JSON.parse(text); } catch { /* 非 JSON */ }
+      // 上游只会流式（workbuddy 写死 stream:true）：非流式收到的 text 是 SSE → 聚成 chat JSON 再走同一翻译出口；
+      // 空流/错误帧聚合不出 JSON 时仍落回下方原 502 路径。
+      if (!chatJson) chatJson = sseToChatJson(text, chatBody.model);
       if (!chatJson || chatJson.error || chatJson.object === "error") {
         return json(res, status >= 400 ? status : 502, anthropicError("api_error", errorText(text) || String(text).slice(0, 500)));
       }

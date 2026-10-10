@@ -392,3 +392,73 @@ test("垫片：超大非 SSE 体攒到上限即停手，错误文案如实说明
   assert.ok(text.includes("event: error"), text.slice(0, 200));
   assert.match(text, /oversized non-SSE body/);
 });
+
+test("非流式请求 + 上游只会流式（workbuddy 写死 stream:true）→ SSE 聚合成 Anthropic message，不再 502", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write('data: {"id":"cmb-1","choices":[{"index":0,"delta":{"content":"你"}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{"content":"好"}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":2}}\n\n');
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, {
+      method: "POST", headers: AUTH,
+      body: JSON.stringify({ model: "workbuddy/deepseek-v4-flash", max_tokens: 8, messages: [{ role: "user", content: "hi" }] }),
+    });
+    assert.equal(res.status, 200);
+    const j = await res.json();
+    assert.equal(j.type, "message");
+    assert.deepEqual(j.content, [{ type: "text", text: "你好" }]);
+    assert.equal(j.stop_reason, "end_turn");
+    assert.equal(j.usage.input_tokens, 7);
+    assert.equal(j.usage.output_tokens, 2);
+  } finally { await app.close(); }
+});
+
+test("非流式 + 上游 SSE 工具调用分片 → 拼成单个 tool_use 块（arguments 增量跨帧拼接）", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write('data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":""}}]}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"北京\\"}"}}]}}]}\n\n');
+    res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}\n\n');
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, {
+      method: "POST", headers: AUTH,
+      body: JSON.stringify({ model: "workbuddy/glm-5.3-flash", max_tokens: 16, messages: [{ role: "user", content: "北京天气" }], tools: [{ name: "get_weather", description: "d", input_schema: { type: "object" } }] }),
+    });
+    assert.equal(res.status, 200);
+    const j = await res.json();
+    assert.equal(j.content.length, 1);
+    assert.equal(j.content[0].type, "tool_use");
+    assert.equal(j.content[0].name, "get_weather");
+    assert.deepEqual(j.content[0].input, { city: "北京" });
+    assert.equal(j.stop_reason, "tool_use");
+  } finally { await app.close(); }
+});
+
+test("非流式 + 上游 SSE 夹 in-band 错误帧 → 502 报真实原因，绝不把错误聚合成正文", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write('data: {"choices":[{"index":0,"delta":{"content":"半截"}}]}\n\n');
+    res.write('data: {"error":{"message":"upstream dead"}}\n\n');
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, {
+      method: "POST", headers: AUTH,
+      body: JSON.stringify({ model: "workbuddy/hy4-preview", max_tokens: 8, messages: [{ role: "user", content: "hi" }] }),
+    });
+    assert.equal(res.status, 502);
+    const j = await res.json();
+    assert.equal(j.type, "error");
+    assert.equal(j.error.type, "api_error");
+    assert.ok(j.error.message.includes("upstream dead"), j.error.message);
+  } finally { await app.close(); }
+});
