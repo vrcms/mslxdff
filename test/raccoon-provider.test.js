@@ -290,3 +290,131 @@ test("续期: 同一 token 并发只允许发一次 refresh（防重复消费一
     delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
   }
 });
+
+// ===== 运行期凭据自愈（openspec: fix-raccoon-stale-token-selfheal，2026-10-10 报障回归）=====
+// 现场：daemon 只在启动时读一次 keys（providers-setup 显式传 apiKeys），重登换了盘上 token 后
+// 内存那份已被上游作废（code 200003），用户重登也没用、只能重启 —— 见 ADR-0050 已知边界 10。
+
+test("自愈: 重登换了盘上 token 后，运行中的进程当场换号重试（不必重启 daemon）", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-heal-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    // 盘上是重登后的新号；expiresAt 设远期，确保救场的是「换号自愈」而不是续期路径
+    writeRaccoonAccountFile({ uid: "u-heal", accessToken: "tok-new", refreshToken: "ref-new", expiresAt: String(Date.now() + 3600_000), deviceId: "dev-new" }, { dir: authDir });
+    const seen = [];
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-dead"], // 进程启动时读到的那份，已被新登录作废
+      fetchImpl: async (url, init) => {
+        seen.push({ url: String(url), key: keyOf(init), device: String(init?.headers?.["X-Client-Device-ID"] ?? "") });
+        if (keyOf(init) === "tok-dead") return jsonRes({ code: 200003, message: "登录已失效" });
+        return jsonRes({ choices: [{ message: { content: "ok" } }] });
+      },
+    });
+    const res = await provider.chat({ model: "raccoon/sn-kimi-k3", stream: false });
+    assert.equal(res.status, 200, "自愈后同一请求应直接成功，不再要求用户重启/重登");
+    assert.equal(seen.length, 2, `上游恰好被打两次（旧号 200003 → 新号成功），实际 ${seen.length} 次`);
+    assert.equal(seen[0].key, "tok-dead");
+    assert.equal(seen[1].key, "tok-new");
+    assert.equal(seen[1].device, "dev-new", "重试必须带新号的 device_id —— docCache 要能失效重建");
+    assert.ok(!seen.some((s) => s.url.includes("/auth/v1/refresh")), "自愈是换号不是续期，不该碰 refresh 端点");
+    const { loadProviderKeys } = await import("../src/state.js");
+    const keys = loadProviderKeys("raccoon");
+    assert.ok(keys.includes("tok-new"), "自愈后 state.keys 必须跟上文档口径");
+    assert.ok(!keys.includes("tok-dead"), "已作废的号不能留在 state.keys 里");
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});
+
+test("自愈: 盘上没有不同的 token 时绝不重打（只一次上游、照旧 401，防烧分）", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-noheal-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    writeRaccoonAccountFile({ uid: "u-same", accessToken: "tok-same", refreshToken: "r", expiresAt: String(Date.now() + 3600_000) }, { dir: authDir });
+    let calls = 0;
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-same"],
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonRes({ code: 200003, message: "登录已失效" });
+      },
+    });
+    const res = await provider.chat({ model: "raccoon/sn-kimi-k3", stream: false });
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get("x-mslxdff-raccoon-kind"), "auth");
+    assert.equal(calls, 1, "文档里没有可换的号 → 不该重读重打");
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});
+
+test("自愈: 每个请求至多一次 —— 文档里那份也不可用时不再打旋", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-once-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    writeRaccoonAccountFile({ uid: "u-doc", accessToken: "tok-doc2", refreshToken: "r", expiresAt: String(Date.now() + 3600_000) }, { dir: authDir });
+    let calls = 0;
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-a"],
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonRes({ code: 200003, message: "登录已失效" });
+      },
+    });
+    const res = await provider.chat({ model: "raccoon/sn-kimi-k3", stream: false });
+    assert.equal(res.status, 401);
+    assert.equal(calls, 2, `旧号一次 + 换号重试一次，恰好两次；实际 ${calls} 次`);
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});
+
+test("自愈: 候选号正在冷却时不捞回（不绕过 keyring 的冷却记账）", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-cool-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    writeRaccoonAccountFile({ uid: "u-cool", accessToken: "tok-cooling", refreshToken: "r", expiresAt: String(Date.now() + 3600_000) }, { dir: authDir });
+    let calls = 0;
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-dead", "tok-cooling"],
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonRes({ code: 200003, message: "登录已失效" });
+      },
+    });
+    provider.keyRing.onError("tok-cooling", 5000); // 先把它打进冷却
+    const res = await provider.chat({ model: "raccoon/sn-kimi-k3", stream: false });
+    assert.equal(res.status, 401);
+    assert.equal(calls, 1, "唯一候选在冷却 → 不换号不重试");
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});
+
+test("目录: 内存号已不在文档时先对齐再取目录（不静默回落内置表）", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "mslxdff-raccoon-cat-"));
+  process.env.MSLXDFF_RACCOON_AUTH_DIR = authDir;
+  try {
+    const { writeRaccoonAccountFile } = await import("../src/providers/raccoon/account-store.js");
+    writeRaccoonAccountFile({ uid: "u-cat", accessToken: "tok-doc-new", refreshToken: "r", expiresAt: String(Date.now() + 3600_000) }, { dir: authDir });
+    const seen = [];
+    const provider = createRaccoonProvider({
+      apiKeys: ["tok-stale"],
+      fetchImpl: async (url, init) => {
+        seen.push({ url: String(url), key: keyOf(init) });
+        return jsonRes({ code: 0, data: { models: [{ id: "sn-x", name: "sn-x", multiplier: 0 }] } });
+      },
+    });
+    const list = await provider.listModels();
+    assert.ok(Array.isArray(list) && list.length > 0);
+    const cat = seen.find((s) => s.url.includes("model_catalog"));
+    assert.ok(cat, "目录请求应真的打上游");
+    assert.equal(cat.key, "tok-doc-new", "目录必须用文档里的号，而不是拿旧号撞 401 后回落内置表");
+  } finally {
+    delete process.env.MSLXDFF_RACCOON_AUTH_DIR;
+  }
+});

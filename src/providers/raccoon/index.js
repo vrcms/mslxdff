@@ -8,7 +8,7 @@ import { forwardRaccoonChat } from "./chat.js";
 import { buildRaccoonModelList, listRaccoonModels } from "./models.js";
 import { applyRaccoonRefresh, listRaccoonAccountDocs, raccoonCredentialFromDoc, readRaccoonAccountDoc, syncRaccoonKeys, writeRaccoonAccountFile } from "./account-store.js";
 import { refreshRaccoonCredential } from "./login.js";
-import { isRaccoonExpiringSoon } from "./auth.js";
+import { isRaccoonExpiringSoon, raccoonTokenFingerprint } from "./auth.js";
 import { RACCOON_DEFAULT_COOLDOWN_MS, RACCOON_DEFAULT_QUOTA_COOLDOWN_MS } from "./const.js";
 
 /** kind → 冷却档位。auth 走短冷（重登指引已由响应体给出）；quota 走长冷（按天回血）。 */
@@ -64,16 +64,33 @@ export function createRaccoonProvider({
   const ring = createKeyRing(keys, { cooldownMs });
 
   // access_token → 账号文档（office_identity / device_id / refresh_token 跟号走，取自 auths/raccoon-<uid>.json）
+  // 缓存**可失效**：重登与续期都会换盘上的 token，只建一次会让本进程永远停在旧号（见 healKeyFromDocs）
   let docCache = null;
-  function accountFor(token) {
-    if (docCache === null) {
-      try {
-        docCache = new Map(listRaccoonAccountDocs().map((d) => [d.accessToken, d]));
-      } catch {
-        docCache = new Map();
-      }
+  function reloadDocs() {
+    try {
+      docCache = new Map(listRaccoonAccountDocs().map((d) => [d.accessToken, d]));
+    } catch {
+      docCache = new Map();
     }
+    return docCache;
+  }
+  function accountFor(token) {
+    if (docCache === null) reloadDocs();
     return docCache.get(token);
+  }
+
+  /**
+   * 「内存号 ↔ 账号文档」对齐。daemon 只在启动时读一次 keys（providers-setup 显式传 apiKeys），重登换了盘上
+   * token 后内存那份已被上游作废（code 200003）——用户重登也没用、只能重启，这里以文档为准当场换回来。
+   * 返回换上的新 token；文档无可用新号（或候选号都在冷却）返回 null，交回既有失败路径。取舍见 ADR-0050。
+   */
+  async function healKeyFromDocs(staleToken) {
+    const fresh = [...reloadDocs().values()].find((d) => d.accessToken && d.accessToken !== staleToken && !ring.isCooling(d.accessToken));
+    if (!fresh) return null;
+    ring.replace(staleToken, fresh.accessToken);
+    console.error(`[raccoon] 内存 token(${raccoonTokenFingerprint(staleToken)}) 已不在账号文档里 → 换用文档号(${raccoonTokenFingerprint(fresh.accessToken)}) 并同步 keys`);
+    try { await syncRaccoonKeys(file ? { file } : {}); } catch {}
+    return fresh.accessToken;
   }
 
   function credentialFor(token) {
@@ -121,6 +138,8 @@ export function createRaccoonProvider({
         }
         return next;
       } catch (e) {
+        // 不静默：续期失败会让该号在内存与盘上同时变旧，症状必须能在 daemon.log 里看见（只允许指纹）
+        console.error(`[raccoon] 续期失败（继续用旧 token，过期即 401）token(${raccoonTokenFingerprint(token)}): ${String(e?.message || e).slice(0, 160)}`);
         if (e?.authExpired) ring.onError(token, cooldownMs);
         return credential;
       } finally {
@@ -135,17 +154,23 @@ export function createRaccoonProvider({
     const total = ring.keys.length;
     if (!total) return notLoggedInResponse();
     let lastRes = null;
-    for (let hop = 0; hop <= total; hop++) {
+    let healed = false; // 一次请求内只自愈一次：防重试风暴，也防「文档里那份同样不可用」时打旋
+    for (let hop = 0; hop <= total + 1; hop++) {
       const key = ring.next();
       if (!key) break;
       const credential = await ensureFresh(key);
       const res = await forwardRaccoonChat({ body, credential, fetchImpl, timeoutMs, effort: opts?.effort ?? effort });
       const kind = res.headers.get("x-mslxdff-raccoon-kind");
       if (!kind) return res; // 成功或未分类：直接交出去
+      lastRes = res;
+      if (kind === "auth" && !healed) {
+        healed = true;
+        // 自愈成功就换号重试；不给失效号记冷却（ring.replace 也不把冷却带给新号）
+        if (await healKeyFromDocs(key)) continue;
+      }
       const mode = COOLDOWN_BY_KIND[kind] || "none";
       if (mode === "long") ring.onError(key, quotaCooldownMs);
       else if (mode === "short") ring.onError(key, cooldownMs);
-      lastRes = res;
       if (mode === "none") break; // 换号无意义，如实透出
       if (ring.available() === 0) break; // 没有别的可用号
     }
@@ -154,7 +179,9 @@ export function createRaccoonProvider({
   }
 
   async function listModels() {
-    const token = ring.keys[0];
+    let token = ring.keys[0];
+    // 内存号已不在文档里（重登换号）时先对齐，否则目录撞 401 后静默回落内置表，表现为「列表不是最新的」
+    if (token && !accountFor(token)) token = (await healKeyFromDocs(token)) || token;
     if (!token) return [];
     const { models } = await listRaccoonModels({ credential: credentialFor(token), fetchImpl });
     return buildRaccoonModelList({ id, models });
