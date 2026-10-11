@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
@@ -87,15 +87,26 @@ export function stopDaemon({ reason = "stop" } = {}) {
     appendFileSync(logFile(), `[lifecycle] stopDaemon called by pid=${process.pid} — killing daemon pid=${pid}\n`);
   } catch {}
   if (victimAlive) { try { writeExitMarker(daemonDir(), { reason, prevPid: pid, prevVersion: readPidVersion(), byPid: process.pid }); } catch {} }
+  let killFailed = false;
   try {
     process.kill(pid, "SIGTERM");
   } catch (err) {
-    if (err.code !== "ESRCH") throw err;
+    if (err.code === "ESRCH") {
+      // process already gone — nothing to do
+    } else if (err.code === "EPERM" && process.platform === "win32") {
+      // Windows: process.kill uses TerminateProcess which requires matching elevation.
+      // Fall back to taskkill /F which can terminate processes we don't own a handle to.
+      const r = spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true });
+      if (r.error || r.status !== 0) killFailed = true;
+    } else {
+      throw err;
+    }
   }
   try {
     unlinkSync(pidFile());
   } catch {
     // already gone
   }
+  if (killFailed) return { stopped: false, pid, reason: "EPERM — process kill denied (try running terminal as Administrator, or use restart-daemon.bat)" };
   return { stopped: true, pid, stale: !victimAlive };
 }
