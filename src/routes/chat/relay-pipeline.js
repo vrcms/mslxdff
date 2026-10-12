@@ -7,7 +7,7 @@ import { recordOutput, computeOutputRow } from "../../providers/cline/usage.js";
 import { upstreamEcho } from "../../model-trace.js"; // 回显头→日志字段（谁上的/哪个号/为什么/是否冷却）单一来源
 import { recordRelayTalk } from "../../talk-log.js"; // 环形对话日志（问答全文，最近 1 小时）：五段流水在此汇合，落盘点只这一个
 import { recordAgentLoop } from "../../talk-full.js"; // agent 回路全量语料（talk/full JSONL，缺省开）：与 talk.log 并排各调一次，见 openspec default-on-agent-loop-capture D3
-import { isEmptyTurnDetail } from "../stream-scan.js"; // 空轮判据单一真相（stream.js 用它决定封不封口，这里用它决定交不交回重试）
+import { isEmptyTurnDetail, captureTalkFlush } from "../stream-scan.js"; // 空轮判据单一真相（stream.js 用它决定封不封口，这里用它决定交不交回重试）+ 语料收场回收（fix-talk-capture-frame-loss D4）
 import { performance } from "node:perf_hooks"; // attemptMs 相减必须与 attemptStartMs 的创建点同钟（performance.now 原钟），不得走 :61 的 _perfNow —— 那个位置容得下测试桩钟（P0 混钟回归）
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
@@ -117,7 +117,9 @@ export function createRelayPipeline({
         _evt("client-abort", { reqId, model: actual, totalMs: Math.round(_perfNow() - (perf0 ?? 0)), stages: [...curStages] });
       },
     });
-
+    // 收场回收（须在 relay-done 事件快照 detail 之前）：flush 缺尾换行的末行——行缓冲把「帧未收尾」留白到下轮，
+    // 流已结束就没有下轮了；不 flush 则相对旧的逐行口径回退，且 events 的 talkChars 会比 talk/talkfull 少一帧（review P2-6）。
+    try { captureTalkFlush(out?.detail?.talk); } catch {}
     // 4. relay-done
     _evt("relay-done", {
       reqId,
@@ -145,6 +147,7 @@ export function createRelayPipeline({
     const ttftMs = Number.isFinite(out?.ttfMs) && out.ttfMs >= 0 ? out.ttfMs + anchorMs : null;
     // 环形对话日志：只记有真实输出的轮次（空轮交给下面的空转判定另行报错）。
     // 纯旁路：不改闸门、不改计时、不改返回体；任何异常都吞掉，绝不影响转发。
+    // （收场 flush 已上移至 relay-done 事件之前，见 :120。）
     try { recordRelayTalk({ reqId, api, model: actual, via, hops, body, out, echo: upstreamEcho(upRes), attemptMs, ttftMs, finishReason: out.detail?.sawFinishReason }); } catch {}
     // 回路语料（talk/full）另起一条独立 try，不与上面合并：talk.log 是人读环形稿、capture 是机读全量语料，
     // 两者生死独立 —— 一边不落另一边照落，判据也不同（capture 只认 hops=0，且要带 sessionKey/clientIp 供分组与来源核对）。

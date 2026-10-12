@@ -120,6 +120,7 @@ export function recordAgentLoop({ reqId, model, via, hops, body, out, sessionKey
         responseChars: Number.isFinite(Number(talk.n)) ? Number(talk.n) : content.length, // 桶的 n 显式写进读数
         reasoningChars: reasoning.length,                                                 // 思考与正文分列，不互相吞并
         truncated: Boolean(talk.capped),                                                  // 撞顶必须看得见
+        droppedFrames: Number(talk.dropped) || 0,                                         // 不可逆丢弃帧显式计数（行缓冲切点内多字节字符/超限半行）：0=完整（openspec fix-talk-capture-frame-loss review P1-1）
         cap: talkCapChars(),
         relayMs: elapsedOf(relayMs, out?.totalMs), // relay 内部计时恒写：与 elapsedMs（尝试墙钟）分列，「上游多久 vs 写给客户端多久」可各自判读
       },

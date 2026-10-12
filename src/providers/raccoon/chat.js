@@ -9,6 +9,7 @@ import {
   raccoonEffortFromEnv,
   raccoonThinkingType,
 } from "./const.js";
+import { effortFromBody } from "../../thinking-effort.js";
 import { RACCOON_CHAT_ACCEPT, raccoonAuthHeaders } from "./headers.js";
 import {
   aggregateRaccoonSse,
@@ -22,19 +23,23 @@ const PEEK_MAX_BYTES = 8192;
 
 /**
  * 出站请求体：剥 `raccoon/` 前缀 + 注入 `extra_body.thinking`。
- * 思考取值优先级：**请求体自带的 `extra_body.thinking.type`**（客户端显式声明）＞ 构造/调用方 `effort`
+ * 思考取值优先级：**请求体声明的档位**（`extra_body.thinking.type` / `reasoning_effort` / `reasoningEffort`
+ * / `effort` / `thinking.type`，经 src/thinking-effort.js 归一，关断值最高优先）＞ 构造/调用方 `effort`
  * ＞ env `MSLXDFF_RACCOON_THINKING` ＞ 默认「开」。
  * **绝不发 `reasoning_effort`**：上游不认该参数（实测传与不传无可测差异），发了只会多一处形态差异。
+ * 客户端声明的通用档位字段消费后一律剥除，出站只留本家原生形状 `extra_body.thinking.type`。
  */
 export function buildRaccoonWireBody(body = {}, { effort, env = process.env } = {}) {
   const wire = { ...body };
   wire.model = canonicalRaccoonModel(body?.model);
+  // 先读客户端声明再剥字段：档位不能白丢（change fix-thinking-effort-passthrough）。
+  const fromBody = effortFromBody(body);
   delete wire.reasoning_effort;
+  delete wire.reasoningEffort;
+  delete wire.effort;
+  delete wire.thinking;
   const extra = typeof body?.extra_body === "object" && body.extra_body !== null ? { ...body.extra_body } : {};
-  const declared = extra?.thinking?.type;
-  const type = declared === "enabled" || declared === "disabled"
-    ? declared
-    : raccoonThinkingType(effort ?? raccoonEffortFromEnv(env) ?? RACCOON_DEFAULT_EFFORT);
+  const type = raccoonThinkingType(fromBody || effort || raccoonEffortFromEnv(env) || RACCOON_DEFAULT_EFFORT);
   extra.thinking = { type };
   wire.extra_body = extra;
   return wire;

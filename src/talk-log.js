@@ -95,7 +95,7 @@ function pushBlock(out, label, text, cap) {
 const TRUNC_NOTE = "[!] 本轮已撞捕获上限（truncated=1）：思考/正文后半段未落盘，内容可能不完整 —— 别当成模型的完整回答";
 
 /** 一条对话 = 一个可读块：头部一行元信息（ts= 是环形淘汰的唯一依据），正文三段。elapsed= 取本次尝试墙钟（design D3），finish=/relayMs= 为 ADR-0046 新读数，api= 为入站协议门短码（认不出的路 = other；未拿到判定值则整段省略，绝不伪造）。 */
-export function formatTalkEntry({ reqId, api, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts, talkCapped = false, talkChars, talkCap, finishReason, relayMs, ttftMs } = {}) {
+export function formatTalkEntry({ reqId, api, model, via, hops, status, stream, elapsedMs, question, thinking, answer, tools, usage, upstream, account, pick, ts, talkCapped = false, talkChars, talkCap, talkDropped, finishReason, relayMs, ttftMs } = {}) {
   const fval = finishReason || "-"; // 缺值占位（grill Q5）：「没给 finish」不得被读成 stop；字段恒在场
   const now = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
   const trunc = talkCapped === true;
@@ -113,6 +113,7 @@ export function formatTalkEntry({ reqId, api, model, via, hops, status, stream, 
     upstream ? `upstream=${upstream}` : "", account ? `account=${account}` : "", pick ? `pick=${pick}` : "",
     // 截断读数只在真截断时出现（未截断不得新增噪音字段）：cap= 上限、chars= 已捕获字符数
     trunc ? `truncated=1 cap=${Number.isFinite(talkCap) && talkCap > 0 ? talkCap : "-"} chars=${Number.isFinite(talkChars) ? talkChars : "-"}` : "",
+    Number(talkDropped) > 0 ? `dropped=${Math.round(Number(talkDropped))}` : "", // 不可逆丢弃帧计数：只在真丢时出现（与 truncated 同「未丢不添噪音」口径，review P1-1）
   ].filter(Boolean).join(" ");
   const out = [head];
   if (trunc) out.push(TRUNC_NOTE);
@@ -222,7 +223,7 @@ export function recordRelayTalk({ reqId, api, model, via, hops, body, out, echo 
       elapsedMs: Number.isFinite(Number(attemptMs)) ? Number(attemptMs) : out?.totalMs, // 新口径：本次尝试墙钟优先（design D3）
       relayMs: out?.totalMs, ttftMs, question: lastUserQuestion(body || {}),
       thinking, answer, tools, usage: out?.detail?.usage, ...echo, ts,
-      talkCapped: talk?.capped === true, talkChars: talk?.n, talkCap: talk?.cap,
+      talkCapped: talk?.capped === true, talkChars: talk?.n, talkCap: talk?.cap, talkDropped: Number(talk?.dropped) || 0,
     });
     appendTalkEntry({ file: talkLogFile(model), block, atMs: ts });
     return true;

@@ -104,6 +104,10 @@ export function responsesToChatBody(req = {}) {
   if (req.temperature != null) body.temperature = req.temperature;
   if (req.top_p != null) body.top_p = req.top_p;
   if (req.parallel_tool_calls != null) body.parallel_tool_calls = req.parallel_tool_calls;
+  // 思考档位透传：Responses 口径是 reasoning.effort，chat 口径用 reasoning_effort（上游通用）。
+  // 只收非空 trimmed 字符串（空串不算声明，免得顶掉下游默认值）——见 change fix-thinking-effort-passthrough。
+  const eff = req.reasoning && typeof req.reasoning === "object" ? req.reasoning.effort : undefined;
+  if (typeof eff === "string" && eff.trim()) body.reasoning_effort = eff.trim();
   return body;
 }
 

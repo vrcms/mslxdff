@@ -7,10 +7,10 @@ import {
   chatJsonToAnthropic,
   createAnthropicChunkTranslator,
   toAnthropicUsage,
-  estimateTokens,
   anthropicError,
   newMessageId,
 } from "../src/anthropic/translate.js";
+import { estimateTokens } from "../src/anthropic/count-tokens.js";
 
 describe("messagesToChatBody — 请求映射", () => {
   test("最小请求：model + 字符串 content", () => {
@@ -102,7 +102,7 @@ describe("messagesToChatBody — 请求映射", () => {
     assert.equal(b.messages[0].content, "一份");
   });
 
-  test("thinking/redacted_thinking 与 metadata/top_k 忽略不报错", () => {
+  test("顶层 thinking 档位保留，块内 thinking 与 metadata/top_k 仍丢弃", () => {
     const b = messagesToChatBody({
       model: "m", metadata: { user_id: "u" }, top_k: 5, thinking: { type: "enabled", budget_tokens: 1000 },
       output_config: { effort: "high" }, context_management: {},
@@ -113,7 +113,10 @@ describe("messagesToChatBody — 请求映射", () => {
       ] }],
     });
     assert.equal(b.messages[0].content, "答案");
-    assert.equal(b.thinking, undefined);
+    // 顶层档位保留（change fix-thinking-effort-passthrough）：不再私自从这里扔掉
+    assert.deepEqual(b.thinking, { type: "enabled", budget_tokens: 1000 });
+    // output_config 原始对象仍不外发（上游不认该 beta 字段），但其 effort 归一到 reasoning_effort
+    assert.equal(b.reasoning_effort, "high");
     assert.equal(b.output_config, undefined);
     assert.equal(b.metadata, undefined);
     assert.equal(b.top_k, undefined);

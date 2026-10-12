@@ -19,9 +19,9 @@ import {
   messagesToChatBody,
   chatJsonToAnthropic,
   createAnthropicChunkTranslator,
-  estimateTokens,
   anthropicError,
 } from "../anthropic/translate.js";
+import { estimateTokens } from "../anthropic/count-tokens.js";
 import {
   detectSearchRequest,
   runWebSearch,

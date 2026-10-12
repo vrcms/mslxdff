@@ -7,8 +7,10 @@
  *  1) Anthropic 的 content block **只封口不复用**（Responses 侧 ensureTextItem 会复用已开项）；
  *  2) 事件是具名的（`event: <type>` + `data:`），且**没有 `data: [DONE]`**，收场只有
  *     `message_delta`+`message_stop`（成功）或一帧 `error`（失败）——见 grill-decisions.md Q2；
- *  3) 请求侧 **必须主动丢** thinking/output_config/context_management：Claude Code 对不认识的
- *     model ID 照发全套字段，而 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` 不清 thinking 与 effort。
+ *  3) 请求侧**保留思考档位**（thinking/effort/reasoning_effort/reasoningEffort/extra_body 原样透传给
+ *     pipeline，语义归一交给各 provider 与 src/thinking-effort.js），但**必须主动丢** output_config/
+ *     context_management 与消息块内的 thinking：Claude Code 对不认识的 model ID 照发全套字段，而块内
+ *     thinking 我们无法签发 signature，回传必被上游拒（ADR-0047）。
  */
 import { chunkToString } from "../responses/translate.js";
 import { isServerTool } from "./web-search.js";
@@ -44,7 +46,7 @@ function imagePartOf(block) {
   return null;
 }
 
-function toolResultTextOf(content) {
+export function toolResultTextOf(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -124,6 +126,21 @@ export function messagesToChatBody(req = {}) {
   if (req.temperature != null) body.temperature = req.temperature;
   if (req.top_p != null) body.top_p = req.top_p;
   if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) body.stop = req.stop_sequences;
+  // 思考档位原样透传（不解释语义，语义归一交给各 provider / src/thinking-effort.js）：
+  // 客户端显式声明必须一路带到上游，旧版在此丢掉 → 下游被迫补默认值（workbuddy 恒 high）。
+  if (req.thinking != null) body.thinking = req.thinking;
+  // 档位载体只收「非空 trimmed 字符串」：空串声明不算声明，不该发出去顶掉下游默认值。
+  for (const k of ["effort", "reasoning_effort", "reasoningEffort"]) {
+    const v = typeof req[k] === "string" ? req[k].trim() : "";
+    if (v) body[k] = v;
+  }
+  if (req.extra_body != null) body.extra_body = req.extra_body;
+  // output_config.effort 是 Claude Code 的另一档位载体（beta），原始对象上游不认故不外发，
+  // 但档位本身不能丢 → 归一到 reasoning_effort（客户端已显式声明时以声明为准）。
+  const ocEffort = req.output_config && typeof req.output_config === "object" ? req.output_config.effort : undefined;
+  if (ocEffort != null && body.reasoning_effort == null && body.reasoningEffort == null) {
+    body.reasoning_effort = ocEffort;
+  }
   return body;
 }
 
@@ -356,42 +373,4 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
   }
 
   return { id, created, begin, push, end, fromChatJson, getFinal, stats };
-}
-
-// ---------- count_tokens 字符估算 ----------
-
-// 图片不吃字符但占真实上下文，按固定面值计；总长设硬上限防极端请求把除法推到 Infinity
-const IMAGE_TOKENS = 2000;
-const CHARS_PER_TOKEN = 4;
-const CHAR_CAP = 32_000_000;
-
-function countMessage(m, acc) {
-  if (!m || typeof m !== "object") return;
-  const blocks = typeof m.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m.content) ? m.content : null;
-  if (!blocks) { acc.chars += JSON.stringify(m.content ?? "").length; return; }
-  for (const b of blocks) {
-    if (!b || typeof b !== "object") continue;
-    if (typeof b.text === "string") acc.chars += b.text.length;
-    else if (b.type === "tool_use") acc.chars += String(b.name || "").length + JSON.stringify(b.input ?? {}).length;
-    else if (b.type === "tool_result") acc.chars += toolResultTextOf(b.content).length; // 工具结果是大头，必须算（grill Q7）
-    else if (b.type === "thinking") acc.chars += String(b.thinking || "").length;
-    else if (b.type === "image") acc.images += 1;
-  }
-}
-
-/** 字符估算版 token 计数（Anthropic 官方：端点缺失时客户端本来就退回字符估算，精度非目标）。 */
-export function estimateTokens(req = {}) {
-  let chars = 0;
-  let images = 0;
-  const acc = { chars: 0, images: 0 };
-  const sys = typeof req.system === "string" ? [{ type: "text", text: req.system }] : Array.isArray(req.system) ? req.system : [];
-  for (const b of sys) acc.chars += b && typeof b.text === "string" ? b.text.length : 0;
-  for (const m of Array.isArray(req.messages) ? req.messages : []) countMessage(m, acc);
-  if (Array.isArray(req.tools)) acc.chars += JSON.stringify(req.tools).length;
-  chars = Math.min(acc.chars, CHAR_CAP);
-  images = acc.images;
-  // 字段名以 Anthropic 线上为准：`POST /v1/messages/count_tokens` 回 `{"input_tokens": N}`；
-  // 额外带一份 count_tokens 仅作人读兼容（Claude Code 读的是 input_tokens）。
-  const n = Math.max(1, Math.ceil(chars / CHARS_PER_TOKEN) + images * IMAGE_TOKENS);
-  return { input_tokens: n, count_tokens: n };
 }

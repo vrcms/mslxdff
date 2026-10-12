@@ -4,12 +4,13 @@ import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys, loadProviderBaseUrl, saveProviderConfig } from "../../state.js";
 import { getUndici, createAgent, envInt, collectApiKeysGeneric } from "../base.js";
 import { compatFetch } from "../../compat.js";
-import { logDir } from "../../logs.js";
+import { logDir, appendEvent } from "../../logs.js";
 import { join } from "node:path";
 import { SNAP_BASE, MODELS_CACHE_TTL_MS } from "./const.js";
 import { createAuthPool } from "./auth-pool.js";
 import { createCatalog, discoverAccountModels } from "./models.js";
 import { createChatService } from "./chat.js";
+import { createGate } from "./concurrency.js";
 
 const { UndiciFetch } = getUndici();
 
@@ -30,6 +31,7 @@ export function createCodeartsProvider({
   snapBase,
   connectTimeoutMs = envInt("MSLXDFF_CODEARTS_TIMEOUT_MS", 30_000),
   cooldownMs = envInt("MSLXDFF_CODEARTS_COOLDOWN_MS", 30_000),
+  maxConcurrent = Number.parseInt(process.env.MSLXDFF_CODEARTS_MAX_CONCURRENT ?? "", 10) || 3,
   autoClaim = process.env.MSLXDFF_CODEARTS_AUTO_CLAIM !== "0",
   fetchImpl,
   file,
@@ -59,6 +61,8 @@ export function createCodeartsProvider({
   };
   const pool = createAuthPool({ keys: allKeys, fetchImpl, stsHost, clock, saveFn });
   const catalog = createCatalog();
+  // 该上游对并发极敏感（实测 >3 即坏号/限流）；超限请求 FIFO 排队，不拒绝。
+  const gate = createGate({ limit: maxConcurrent });
 
   let agent = null; let dispatcher = null;
   try {
@@ -75,9 +79,12 @@ export function createCodeartsProvider({
     id, baseUrl: chatSvcBase, chatPath, fetchImpl, dispatcher, authPool: pool, catalog, connectTimeoutMs, clock,
   });
 
+  const onWait = (info) => {
+    try { appendEvent({ type: "codearts-queue", ...info }); } catch {}
+  };
   async function chat(body, opts = {}) {
     if (!ring.size) throw new Error("codearts: missing credential — run: mslxdff -provider codearts login");
-    return chatSvc.runChat(body, ring, opts);
+    return gate.run(() => chatSvc.runChat(body, ring, opts), onWait);
   }
   async function chatWithKeys(body, keys, opts = {}) {
     const blobs = (keys || []).filter((k) => typeof k === "string" && k.trim().startsWith("{"));
@@ -85,7 +92,7 @@ export function createCodeartsProvider({
     const tmpRing = createKeyRing(blobs, { cooldownMs });
     const tmpPool = createAuthPool({ keys: blobs, fetchImpl, stsHost, clock }); // 借用凭据不写回本节点
     const tmpSvc = createChatService({ id, baseUrl: chatSvcBase, chatPath, fetchImpl, dispatcher: null, authPool: tmpPool, catalog, connectTimeoutMs, clock });
-    return tmpSvc.runChat(body, tmpRing, opts);
+    return gate.run(() => tmpSvc.runChat(body, tmpRing, opts), onWait);
   }
 
   // 三路发现（主账号）；结果写目录（benefit 判定按账号隔离）
@@ -155,6 +162,7 @@ export function createCodeartsProvider({
     baseUrl: resolvedBase,
     _pool: pool,
     _catalog: catalog,
+    _gate: gate,
     _snapshotPath: join(logDir(), "codearts-models.json"),
   };
 }

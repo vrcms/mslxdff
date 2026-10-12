@@ -12,6 +12,8 @@
 //     "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"）；
 //     整句为**纯子串匹配**（去掉行首 `- ` 照拦），user/tool 文本不扫、换说法/中间片段/普通长文全放行
 //     → 只剥官方注入物不动用户内容；日后撞见新拦句，加进 CC_SENTENCES 即可
+import { effortFromBody, effortLevelFromBody, isEffortOff } from "../../thinking-effort.js";
+
 const DEEPSEEK_PREFIX = "deepseek";
 const DEFAULT_DEEPSEEK_EFFORT = "high";
 const CC_BILLING_LINE = /^x-anthropic-billing-header:.*\r?\n?/gim;
@@ -62,18 +64,25 @@ export function normalizeToolChoice(obj) {
 
 export function injectThinking(obj) {
   if (!isDeepSeekModel(obj?.model)) return obj;
+  // 档位词表与关断判定统一走 src/thinking-effort.js：客户端**任一**载体声明 off/none/disabled 都算关思考
+  //（旧版只认 thinking.type，会把新透传进来的 reasoning_effort:"off" 反转为开——change fix-thinking-effort-passthrough）。
   const th = obj.thinking && typeof obj.thinking === "object" ? obj.thinking : null;
-  const type = th ? String(th.type || "").trim() : "";
-  if (type && type.toLowerCase() === "disabled") {
+  const declared = effortFromBody(obj);
+  if (declared && isEffortOff(declared)) {
     delete obj.reasoning_effort;
     delete obj.reasoningEffort;
+    delete obj.effort;
+    if (th) th.type = "disabled";
+    else obj.thinking = { type: "disabled" };
     return obj;
   }
-  if (!type) {
-    if (th) th.type = "enabled";
-    else obj.thinking = { type: "enabled" };
-  }
-  if (!("reasoning_effort" in obj) && !("reasoningEffort" in obj)) obj.reasoning_effort = DEFAULT_DEEPSEEK_EFFORT;
+  if (!th) obj.thinking = { type: "enabled" };
+  else if (!String(th.type || "").trim()) th.type = "enabled";
+  // 归一档位载体：上游只认 reasoning_effort，故 camel 与 effort 都折成 snake 再删掉（免得未知字段裸奔）。
+  const level = effortLevelFromBody(obj);
+  if (!("reasoning_effort" in obj)) obj.reasoning_effort = level || DEFAULT_DEEPSEEK_EFFORT;
+  delete obj.reasoningEffort;
+  delete obj.effort;
   return obj;
 }
 

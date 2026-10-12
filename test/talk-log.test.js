@@ -362,3 +362,12 @@ test("talk head: 带 api=（inlet 判定值）；未拿到判定值时整段省�
   const h4 = headOf(formatTalkEntry(base));
   assert.doesNotMatch(h4, /\bapi=/, `没拿到判定值时不得写 api=（更不得伪造 other）：${h4}`);
 });
+
+// ---- 不可逆丢弃的显式读数（fix-talk-capture-frame-loss review P1-1）：只在真丢时出现 ----
+test("talk head: dropped=<n> 只在有丢弃时出现，0/未给一律不写（与 truncated 同口径）", () => {
+  const base = { reqId: "r1", model: "acme/m", via: "local", hops: 0, status: 200, stream: 1, elapsedMs: 12, question: "问", answer: "答", ts: Date.now() };
+  const headOf = (block) => String(block).split("\n")[0];
+  assert.match(headOf(formatTalkEntry({ ...base, talkDropped: 2 })), /\bdropped=2\b/, "有丢弃必须看得见");
+  assert.doesNotMatch(headOf(formatTalkEntry(base)), /\bdropped=/, "未给 = 未丢，不得添字段噪音");
+  assert.doesNotMatch(headOf(formatTalkEntry({ ...base, talkDropped: 0 })), /\bdropped=/, "0 也不写");
+});

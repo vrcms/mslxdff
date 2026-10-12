@@ -2,6 +2,7 @@
 // false → 聚合回 JSON。装配走 request.js，帧格式走 sse.js，两条管线共享。
 import { compatFetch, timeoutSignal } from "../../compat.js";
 import { mapModel } from "./payload.js";
+import { effortFromBody, isReasoningEnabled } from "../../thinking-effort.js";
 import { normalizeRegion } from "./constants.js";
 import { buildUpstreamRequest } from "./request.js";
 import { reshapeQoderStream } from "./stream.js";
@@ -127,6 +128,8 @@ export function createChatService({ id = "qoder", fetchImpl, timeoutMs, getModel
     try {
       if (getModelMeta) isReasoning = (await getModelMeta(sess, normalizeRegion(region), mapModel(model)))?.is_reasoning === true;
     } catch {}
+    // 客户端显式档位优先于目录推断（grill-decisions Q3）：关断→false、其余非空→true；无档位→沿用目录结论。
+    isReasoning = isReasoningEnabled(effortFromBody(body), isReasoning);
 
     let upRes; let reqUrl = "";
     const echo = (res) => withEcho(res, reqUrl, region, pick);

@@ -2,6 +2,8 @@
 // 端点契约调研自 Ebony-Vinyl/dsh-our-free-model 的 vendor/channel-pack/src/raccoon*.ts
 // （打包产物 pack.js 原文）并逐条本机实测：站点根 200、model_catalog 匿名 401、
 // chat/completions 匿名 401、login_with_qrcode_code 匿名 200 {"code":0,"data":{"status":"pending"}}。
+import { isEffortOff } from "../../thinking-effort.js";
+
 export const RACCOON_ORIGIN = "https://xiaohuanxiong.com";
 
 export const RACCOON_LLM_PREFIX = "/api/web/llm/v2";
@@ -58,12 +60,10 @@ export const RACCOON_DEFAULT_EFFORT = RACCOON_EFFORT_ON;
 
 /**
  * 思考档位 → 出站 `thinking.type`。
- * 上层档位词表跨供应商共用，收到非本家档位（high/xhigh/max/…）时归一为「开」而非报错。
+ * 词表由 src/thinking-effort.js 统一（off/none/disabled 均判关），非本家档位（high/xhigh/max/…）归一为「开」而非报错。
  */
 export function raccoonThinkingType(effort) {
-  const raw = String(effort ?? "").trim().toLowerCase();
-  if (raw === RACCOON_EFFORT_OFF || raw === "none" || raw === "off") return "disabled";
-  return "enabled";
+  return isEffortOff(effort) ? "disabled" : "enabled";
 }
 
 /**

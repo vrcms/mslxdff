@@ -71,6 +71,11 @@ export function chatToResponsesBody(chatBody) {
   // 流式意图透传：客户端要 SSE 就向上游要 SSE（reshapeResponsesSse 负责转回 chat SSE）。
   // 写死 stream:false 是历史折衷（当时聚合 JSON 直回），已由完整 SSE 转换取代。
   const out = { model: chatBody.model, input, stream: chatBody?.stream === true };
+  // 思考档位透传：responses 形状上游用 reasoning.effort（与 /v1/responses 入站同口径），
+  // 客户端声明不在此丢掉（change fix-thinking-effort-passthrough）。
+  if (typeof chatBody.reasoning_effort === "string" && chatBody.reasoning_effort.trim()) {
+    out.reasoning = { effort: chatBody.reasoning_effort.trim() };
+  }
   if (system) out.instructions = system;
   // responses 的 tools 形状为平铺 {type,name,description,parameters}，而 chat 为 {type,function:{name,...}}
   if (Array.isArray(chatBody.tools) && chatBody.tools.length) {

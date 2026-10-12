@@ -3,6 +3,7 @@
 // stream 恒 true、system 抽到顶层且不出现在 messages、parameters.max_tokens 默认 32000。
 import { uuid } from "./crypto.js";
 import { DEFAULT_MODEL, BUSINESS_PRODUCT, BUSINESS_TYPE, CONTEXT_LENGTH } from "./constants.js";
+import { effortFromBody, isReasoningEnabled } from "../../thinking-effort.js";
 
 export function mapModel(name) {
   const m = String(name || "").trim();
@@ -88,7 +89,8 @@ export function buildBody(payload, modelKey) {
   if (parameters.max_tokens === undefined) parameters.max_tokens = 32000;
 
   const tools = !(payload.tool_choice === "none") && Array.isArray(payload.tools) ? payload.tools : [];
-  const isReasoning = false;
+  // 客户端显式档位优先（change fix-thinking-effort-passthrough）：关断→false、其余非空→true；无档位→false（旧行为）。
+  const isReasoning = isReasoningEnabled(effortFromBody(payload), false);
 
   return JSON.stringify({
     request_id: requestID,

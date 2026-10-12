@@ -5,6 +5,7 @@ import { json } from "../helpers.js";
 import { performance } from "node:perf_hooks";
 import { recordRelayTalk } from "../../talk-log.js"; // 环形对话日志：exhausted 收尾直连 relay，落盘点必须自己补一份
 import { recordAgentLoop } from "../../talk-full.js"; // agent 回路全量语料（talk/full）：与 talk.log 并排各调一次，见 openspec add-agent-loop-capture D1
+import { captureTalkFlush } from "../stream-scan.js"; // 收场回收缺尾换行的末行，record* 读桶前调用（openspec fix-talk-capture-frame-loss D4）
 
 // 最后一站的收场：relay 的「不写响应」路径（超时 / 空轮延后封口）都汇到这里，没有上层 failover 了，
 // 必须把响应「恰好一次」地关掉。形状由 endHeldFailure 按 headers 是否已 flush 决定
@@ -24,6 +25,8 @@ export async function handleExhaustedLocal({ res, body, lastErr, order, handlerC
       onFirstChunk: (d) => mark(`ttf-${lastErr.model}`),
       onDownstreamAbort: () => evt("client-abort", { reqId: handlerCtx.reqId, model: lastErr.model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
     });
+    // 收场回收（须在 relay-done 事件快照 detail 之前，review P2-6）：flush 缺尾换行的末行，语料与线上字节对齐（fix-talk-capture-frame-loss D4）
+    try { captureTalkFlush(out?.detail?.talk); } catch {}
     evt("relay-done", { reqId: handlerCtx.reqId, model: lastErr.model, via: "local-exhausted", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
     // 绕过 relay-pipeline 的最后一站：对话日志照常落盘（正文只进 talk/*.log，不进 events.log）
     // 本收尾点没有 attemptStartMs 可取（绕过 relay-pipeline 直连 relay）→ 不传 attemptMs，按回退路径走：
@@ -60,6 +63,8 @@ export async function handleExhaustedAll({ res, body, lastErr, order, requested,
       onFirstChunk: (d) => mark(`ttf-${lastErr.model}`),
       onDownstreamAbort: () => evt("client-abort", { reqId: handlerCtx.reqId, model: lastErr.model, totalMs: Math.round(performance.now() - perf0), stages: [...stages] }),
     });
+    // 收场回收：与 local-exhausted 同理，须在 relay-done 事件快照 detail 之前（fix-talk-capture-frame-loss D4 / review P2-6）
+    try { captureTalkFlush(out?.detail?.talk); } catch {}
     evt("relay-done", { reqId: handlerCtx.reqId, model: lastErr.model, via: "local-final", status: out.status, ttfMs: out.ttfMs, totalMs: out.totalMs, aborted: out.aborted, interrupted: out.interrupted ?? false, detail: out.detail ?? null });
     // 同上：全链耗尽的最终转发也要留下问答原文
     // 同上：本收尾点没有 attemptStartMs 可取（relay 直连、无尝试起点）→ 不传 attemptMs，

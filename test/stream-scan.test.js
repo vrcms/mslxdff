@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { preflightMs, scanSseChunk, scanNonStreamBody, createTalkBucket, createTalkBucketIfEnabled, captureTalkSse } from "../src/routes/stream-scan.js";
+import { preflightMs, scanSseChunk, scanNonStreamBody, createTalkBucket, createTalkBucketIfEnabled, captureTalkSse, captureTalkFlush } from "../src/routes/stream-scan.js";
 
 // 量测锚点：上报用的首字必须补上「上游尝试开始 → 转发层入口」这段等待
 // （qoder 等 provider 会在这段里预读首帧，见 ADR-0036；不补就永远读成 0/1ms）
@@ -127,4 +127,116 @@ test("talkPush 按 talk.cap 判顶：撞顶置 capped=true 且停止累积", () 
   assert.equal(talk.capped, true, "超出必须显式置位");
   assert.equal(talk.content.join(""), "12345", "撞顶后的分片不再进桶");
   assert.equal(talk.n, 5);
+});
+
+// —— 回归：帧被网络 chunk 从中间切断，不得丢 tool arguments（观测层丢帧取证根因）——
+// 现网证据：raccoon/sn-deepseek-v4-1-flash 语料响应侧 43% tool 路径参数比真实输出少 1~10 字符，
+// 客户端透传字节完好、请求侧回显 0 例——丢在 captureTalkSse 的「按 chunk 逐行 parse、半行即弃」。
+test("帧被网络 chunk 从中间切断不丢内容（回归丢帧）", () => {
+  const full =
+    talkFrame({ content: "你好" }) +
+    talkFrame({ tool_calls: [{ index: 0, id: "c1", function: { name: "Read", arguments: '{"file_path":"D:\\\\www\\\\root\\\\dcflow\\\\.feature-tree\\\\branches\\\\relay.md"}' } }] }) +
+    talkFrame({ content: "世界" });
+  const base = createTalkBucket();
+  captureTalkSse(base, full);
+  assert.equal(base.tools.length, 1, "基准：一次喂入必须含该工具调用");
+  assert.ok(base.tools[0].function.arguments.includes("relay.md"), "基准：arguments 完整");
+  // 把第二条帧（工具调用）的 arguments 从中间劈成两半，落在 data 行内部（非换行处）
+  const cutAt = full.indexOf("branches") + 3;
+  const chunk1 = full.slice(0, cutAt);
+  const chunk2 = full.slice(cutAt);
+  assert.ok(!chunk1.endsWith("\n"), "切点必须落在行内，复现半帧");
+  const split = createTalkBucket();
+  captureTalkSse(split, chunk1);
+  captureTalkSse(split, chunk2);
+  assert.equal(split.tools.length, 1, "切包后工具调用不得蒸发");
+  assert.equal(split.tools[0].function.arguments, base.tools[0].function.arguments, "arguments 必须逐字全等（丢帧会少字符）");
+  assert.equal(split.content.join(""), base.content.join(""), "切包后正文必须全等");
+  assert.equal(split.dropped, 0, "拼回成功的行不得计为丢弃（dropped 只在不可逆时增长，review P1-1）");
+});
+
+test("多切点参数化：任意位置切包 vs 整包一次喂入，桶内容全等", () => {
+  const full =
+    talkFrame({ content: "甲" }) +
+    talkFrame({ reasoning_content: "乙丙丁" }) +
+    talkFrame({ tool_calls: [{ index: 0, id: "c", function: { name: "Grep", arguments: '{"pat":"x/y","g":2}' } }] }) +
+    talkFrame({ content: "戊" });
+  const base = createTalkBucket();
+  captureTalkSse(base, full);
+  let diffs = 0;
+  for (let i = 1; i < full.length; i++) {
+    const t = createTalkBucket();
+    captureTalkSse(t, full.slice(0, i));
+    captureTalkSse(t, full.slice(i));
+    const same =
+      t.content.join("") === base.content.join("") &&
+      t.reasoning.join("") === base.reasoning.join("") &&
+      JSON.stringify(t.tools) === JSON.stringify(base.tools);
+    if (!same) diffs++;
+  }
+  assert.equal(diffs, 0, `存在 ${diffs} 个切点使捕获内容少于整包喂入（丢帧）`);
+});
+
+test("末行缺换行不蒸发：captureTalkFlush 回收流末无 \\n 的完整行", () => {
+  const line = "data: " + JSON.stringify({ choices: [{ delta: { content: "收尾" } }] });
+  const t = createTalkBucket();
+  captureTalkSse(t, talkFrame({ content: "前" }) + line); // 末行缺尾 \n：模拟流在末帧后直接收场
+  assert.equal(t.content.join(""), "前", "未 flush：行未收尾先不入桶（等拼）");
+  assert.equal(t.remain, line, "未 flush：末行完好在缓冲里");
+  captureTalkFlush(t);
+  assert.equal(t.content.join(""), "前收尾", "flush 后末行必须入桶");
+  captureTalkFlush(t); captureTalkFlush(t); // 幂等：重复调用不加戏
+  assert.equal(t.content.join(""), "前收尾");
+});
+
+test("拼回行含 U+FFFD（切点落在多字节字符中间）整行弃：绝不把乱码记成模型输出", () => {
+  const bytes = Buffer.from(talkFrame({ content: "处理中" }), "utf8");
+  const cjk = bytes.indexOf(Buffer.from("処", "utf8")) >= 0 ? bytes.indexOf(Buffer.from("処", "utf8")) : bytes.indexOf(Buffer.from("处", "utf8"));
+  const c1 = bytes.subarray(0, cjk + 1).toString("utf8"); // 把首字节后的续字节切给下一 chunk → 两侧各产 U+FFFD
+  const c2 = bytes.subarray(cjk + 1).toString("utf8");
+  assert.ok(c1.includes("\uFFFD") || c2.includes("\uFFFD"), "用例前提：按字节切开确有解码损伤");
+  const t = createTalkBucket();
+  captureTalkSse(t, c1);
+  captureTalkSse(t, c2);
+  captureTalkFlush(t);
+  assert.ok(!t.content.join("").includes("\uFFFD"), "桶内不得出现替换符乱码");
+  assert.ok(!t.content.join("").includes("理中"), "宁缺毋滥：不可逆的半截内容不保");
+  assert.equal(t.dropped, 1, "不可逆丢弃必须显式计数（review P1-1：绝不静默吃字）");
+});
+
+test("三段切点 + 收场 flush：多边界拼接仍与整包全等（review P2-4）", () => {
+  const full =
+    talkFrame({ content: "甲" }) +
+    talkFrame({ tool_calls: [{ index: 0, id: "c", function: { name: "Edit", arguments: '{"a":"D:\\\\x\\\\y\\\\z.md","b":2}' } }] }) +
+    talkFrame({ reasoning_content: "丙丁" }) +
+    talkFrame({ content: "戊" });
+  const base = createTalkBucket();
+  captureTalkSse(base, full);
+  let diffs = 0;
+  for (let i = 1; i < full.length - 1; i += 5) {
+    for (let j = i + 1; j < full.length; j += 5) {
+      const t = createTalkBucket();
+      captureTalkSse(t, full.slice(0, i));
+      captureTalkSse(t, full.slice(i, j));
+      captureTalkSse(t, full.slice(j));
+      captureTalkFlush(t); // 末段缺 \n 时靠 flush 回收
+      const same =
+        t.content.join("") === base.content.join("") &&
+        t.reasoning.join("") === base.reasoning.join("") &&
+        JSON.stringify(t.tools) === JSON.stringify(base.tools) &&
+        Number(t.dropped) === 0;
+      if (!same) diffs++;
+    }
+  }
+  assert.equal(diffs, 0, `存在 ${diffs} 组双切点使捕获内容偏离整包（多边界丢帧）`);
+});
+
+test("超限半行：拼接前丢弃、显式记 dropped，且不吞本轮正常帧（review P2-5/P1-1）", () => {
+  const t = createTalkBucket();
+  captureTalkSse(t, "data: " + "x".repeat(2_000_005)); // 无尾换行的超限半行
+  assert.equal(t.remain.length > 2_000_000, true, "第一轮：超限半行先进缓冲（丢弃发生在拼接前）");
+  captureTalkSse(t, talkFrame({ content: "回来了" })); // 下一轮：先弃超限半行，再照常消费本轮完整帧
+  assert.equal(t.dropped, 1, "超限丢弃必须记数");
+  assert.equal(t.content.join(""), "回来了", "弃半行不许连累本轮正常数据");
+  assert.equal(t.remain, "");
 });

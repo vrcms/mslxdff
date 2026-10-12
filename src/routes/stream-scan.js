@@ -8,7 +8,13 @@ import { agentLoopEnabled, talkCapChars } from "../talk-full.js"; // 上限单�
 
 // 响应正文捕获桶（talk log + agent 回路共用一只）：只有 relay 建了 detail.talk 才累积，未开启时零开销。
 // 口径与 chars/reasoningChars 同源（读 delta，不读聚合帧），区别是这里存原文而不是只计数。
-// 同样的边界：SSE 帧被 chunk 切断时该帧内容丢失（JSON.parse 失败即跳过）—— 研究用途可接受。
+// 分帧口径（openspec fix-talk-capture-frame-loss）：**按行不按 chunk** —— 未以 `\n` 收尾的尾行留在
+// talk.remain 里等下个工作拼回，凑齐的完整 `data:` 行才 parse；流收场由消费方调 captureTalkFlush
+// 回收缺尾换行的末行。历史口径「帧被 chunk 切断即弃（研究用途可接受）」已废——它让 talk/talkfull
+// 的 tool arguments 随机少 1~10 字符（现网取证 43% 路径落空），误导模型侧归因。
+// 不可逆丢弃（切点落在多字节字符内部的拼回行、超限半行）不静默：桶上 dropped 计数显式可见，
+// 语料 meta.droppedFrames / talk 头行 dropped= 透出——「看起来完整其实吃字」比缺失更危险（review P1-1）。
+const TALK_REMAIN_MAX = 2_000_000; // 半行缓冲上限（UTF-16 字符数，≈4MB）：远大于任何流式 delta 单行；超限弃半行并显式记 dropped（review P2-5）
 // 上限真相是 talkCapChars()（MSLXDFF_TALK_CAP_CHARS ＞ full 开 200 万 ＞ full 关 40 万）；
 // 下面的常数只是 createTalkBucket 未传 cap 时的历史缺省，必须与「full 关」档逐字相同（有测试锁死）。
 const TALK_CAP_DEFAULT = 400_000;
@@ -34,11 +40,12 @@ function talkMergeToolCalls(talk, tcs) {
   }
 }
 
-/** 新建累积桶（n/capped 防超长生成把内存吃穿）。cap = 字符上限，未传/非法 → 400_000（现状逐字不变）。 */
+/** 新建累积桶（n/capped 防超长生成把内存吃穿）。cap = 字符上限，未传/非法 → 400_000（现状逐字不变）。
+ *  remain = 跨 chunk 半行缓冲（openspec fix-talk-capture-frame-loss 行缓冲分帧）；dropped = 不可逆丢弃帧计数（P1-1 显式读数）。 */
 export function createTalkBucket(cap) {
   const c = Math.floor(Number(cap));
   const use = Number.isFinite(c) && c > 0 ? c : TALK_CAP_DEFAULT;
-  return { reasoning: [], content: [], tools: [], n: 0, capped: false, cap: use };
+  return { reasoning: [], content: [], tools: [], n: 0, capped: false, cap: use, remain: "", dropped: 0 };
 }
 
 /**
@@ -50,25 +57,44 @@ export function createTalkBucketIfEnabled() {
   return talkLogEnabled() || agentLoopEnabled() ? createTalkBucket(talkCapChars()) : null;
 }
 
-/** 逐 chunk 累积一轮对话的思考/正文/工具调用。talk 为空 = 未开启，直接返回。 */
+/** 完整单行消费（talk 桶的唯一落点，从原 captureTalkSse 循环体抽出，口径逐字不变）。glued=该行由跨 chunk 拼回。 */
+function talkConsumeLine(talk, raw, glued = false) {
+  if (glued && raw.includes("\uFFFD")) { talk.dropped = (Number(talk.dropped) || 0) + 1; return; } // 字节级切点：解码损伤不可逆，整行弃但必须留数（根因在 stream.js chunkText 逐 chunk 无状态解码，真修另起 change）
+  const t = raw.trim();
+  if (!t.startsWith("data:")) return;
+  const d = t.slice(5).trim();
+  if (!d || d === "[DONE]") return;
+  let j = null;
+  try { j = JSON.parse(d); } catch { return; }
+  const c0 = Array.isArray(j?.choices) ? j.choices[0] : null;
+  if (!c0) return;
+  for (const src of [c0.delta, c0.message]) {
+    if (!src) continue;
+    talkPush(talk, "reasoning", src.reasoning_content ?? src.reasoning);
+    talkPush(talk, "content", src.content);
+    if (Array.isArray(src.tool_calls)) talkMergeToolCalls(talk, src.tool_calls);
+  }
+}
+
+/** 逐 chunk 累积一轮对话的思考/正文/工具调用。talk 为空 = 未开启，直接返回。跨 chunk 行缓冲见文件头。 */
 export function captureTalkSse(talk, txt) {
   if (!talk) return;
-  for (const raw of String(txt ?? "").split("\n")) {
-    const t = raw.trim();
-    if (!t.startsWith("data:")) continue;
-    const d = t.slice(5).trim();
-    if (!d || d === "[DONE]") continue;
-    let j = null;
-    try { j = JSON.parse(d); } catch { continue; }
-    const c0 = Array.isArray(j?.choices) ? j.choices[0] : null;
-    if (!c0) continue;
-    for (const src of [c0.delta, c0.message]) {
-      if (!src) continue;
-      talkPush(talk, "reasoning", src.reasoning_content ?? src.reasoning);
-      talkPush(talk, "content", src.content);
-      if (Array.isArray(src.tool_calls)) talkMergeToolCalls(talk, src.tool_calls);
-    }
-  }
+  if (talk.remain && talk.remain.length > TALK_REMAIN_MAX) { talk.remain = ""; talk.dropped = (Number(talk.dropped) || 0) + 1; } // 拼接前丢弃超限半行：内存不尖峰（review P2-5）且显式记数；本轮正常数据照常消费
+  const hadRemain = Boolean(talk.remain);
+  const buf = (hadRemain ? talk.remain : "") + String(txt ?? "");
+  talk.remain = "";
+  if (!buf) return;
+  const lines = buf.split("\n");
+  if (!buf.endsWith("\n")) talk.remain = lines.pop() ?? "";
+  for (let i = 0; i < lines.length; i++) talkConsumeLine(talk, lines[i], hadRemain && i === 0);
+}
+
+/** 流收场回收：把缓冲里缺尾换行的末行按同一单行口径入桶（截断流不静默吞末帧）。幂等；无桶/空缓冲零副作用。 */
+export function captureTalkFlush(talk) {
+  if (!talk || !talk.remain) return;
+  const raw = talk.remain;
+  talk.remain = "";
+  talkConsumeLine(talk, raw, true);
 }
 
 /** 非流式：整块 message 直接入桶（tool_calls 参数本来就是完整的）。 */
@@ -89,7 +115,7 @@ export function captureTalkFallback(talk, text) {
 
 // 逐 SSE chunk 扫描：done/finish_reason/chat 形状/工具调用/usage/正文字符
 export function scanSseChunk(detail, txt) {
-  if (detail.talk) captureTalkSse(detail.talk, txt);
+  if (detail.talk) { try { captureTalkSse(detail.talk, txt); } catch {} } // 纯旁路红线：捕获异常绝不外溢成转发失败（review P2-7：旧调用点裸奔在 try 外只是口头契约）
   try {
     if (txt.includes("[DONE]")) detail.sawDone = true;
     const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);

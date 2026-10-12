@@ -2,10 +2,16 @@
 // 显式映射常用面；未映射字段经 toProviderExtras 原样透传（providerOptions.<providerName> 会被 spread 进请求体）。
 // 共用库：workbuddy 实验通道与 upstream-engine 同源。见 .scratch/ai-sdk-upstream/SPEC.md。
 
+// HANDLED_KEYS = 「SDK 通道自己消费、不再进 providerOptions 原样 spread」的键。
+// 思考档位里 `reasoning_effort` 显式映射进 providerOptions.openaiCompatible.reasoningEffort；
+// `reasoningEffort`/`effort`/`extra_body` 由各家前置整形器（如 workbuddy payload.js）折成自家原生形状后在此拦下，
+// 免得 Claude Code 经 /v1/messages 新透传的 Anthropic 味字段裸奔到未取证的 OpenAI 兼容上游（ADR-0053）。
+// ⚠ `thinking` 必须留在集合外：workbuddy 依赖它 spread 进请求体（见 workbuddy/chat.js 文件头）。
 const HANDLED_KEYS = new Set([
   "model", "messages", "stream", "tools", "tool_choice",
   "temperature", "top_p", "max_tokens", "stop",
   "presence_penalty", "frequency_penalty", "seed", "reasoning_effort",
+  "reasoningEffort", "effort", "extra_body",
 ]);
 
 function textOf(content) {

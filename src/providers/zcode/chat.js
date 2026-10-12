@@ -1,6 +1,7 @@
 // zcode 模型转发：OpenAI 请求 → Anthropic messages（网关出站恒流式；非流式本地聚合回 OpenAI JSON）。
 // 失败响应带 x-mslxdff-zcode-kind 标记，供 provider 工厂决定冷却策略。
 import { timeoutSignal } from "../../compat.js";
+import { effortLevelFromBody } from "../../thinking-effort.js";
 import { ZCODE_MESSAGES_URL, canonicalZcodeModel, zcodeErrorKind } from "./const.js";
 import { shapeZcodeWireRequest } from "./context-shape.js";
 import { buildZcodeModelHeaders } from "./headers.js";
@@ -80,6 +81,12 @@ export function toAnthropicRequest(body = {}) {
   if (body.stop !== undefined && body.stop !== null) {
     req.stop_sequences = Array.isArray(body.stop) ? body.stop : [String(body.stop)];
   }
+  // 思考档位透传（change fix-thinking-effort-passthrough）：Anthropic 形状的 thinking 对象原样带上；
+  // effort 有则原样、无则由 reasoning_effort 回退。上游不认就如实透出 400，不替上游静默吞掉。
+  if (body.thinking && typeof body.thinking === "object") req.thinking = body.thinking;
+  // 档位载体统一走共享词表（只取真档位，不含 thinking.type 开关）：reasoning_effort ＞ reasoningEffort ＞ effort。
+  const effort = effortLevelFromBody(body);
+  if (effort) req.effort = effort;
   return req;
 }
 
