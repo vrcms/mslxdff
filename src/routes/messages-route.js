@@ -22,6 +22,7 @@ import {
   anthropicError,
 } from "../anthropic/translate.js";
 import { estimateTokens } from "../anthropic/count-tokens.js";
+import { sseToChatJson } from "../anthropic/sse-aggregate.js";
 import {
   detectSearchRequest,
   runWebSearch,
@@ -99,47 +100,6 @@ function tryAggregate(text) {
   } catch {
     return null;
   }
-}
-// 客户端要非流式而上游只会流式（workbuddy 在 provider 层写死 stream:true，SSE 硬吃回来）：
-// collector 收到的 text 是 SSE 帧序列而非 JSON，JSON.parse 必炸 → 此前恒 502。逐行吃 data: 帧
-// 聚成 chat.completion JSON（与 qoder/aggregate.js、zcode 非流式聚合同构），出口复用 chatJsonToAnthropic；
-// 一帧都没有或夹带 in-band 错误帧时返回 null，落回原有 502 + errorText 路径（错误绝不聚合成正文）。
-function sseToChatJson(text, model) {
-  let content = "";
-  let finish = "";
-  let usage = null;
-  let sawChunk = false;
-  const toolSlots = new Map();
-  for (const raw of String(text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line.startsWith("data:")) continue; // 注释帧/keepalive/事件名行全跳过
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    let chunk;
-    try { chunk = JSON.parse(payload); } catch { continue; }
-    if (chunk?.error) return null;
-    sawChunk = true;
-    const choice = chunk.choices?.[0] || {};
-    const delta = choice.delta || {};
-    if (choice.finish_reason) finish = choice.finish_reason;
-    if (chunk.usage) usage = chunk.usage;
-    if (typeof delta.content === "string" && delta.content) content += delta.content;
-    for (const tc of delta.tool_calls || []) {
-      const slot = Number(tc?.index ?? 0);
-      let t = toolSlots.get(slot);
-      if (!t) { t = { id: "", name: "", args: "" }; toolSlots.set(slot, t); }
-      if (tc?.id) t.id = String(tc.id);
-      if (tc?.function?.name) t.name += String(tc.function.name);
-      if (tc?.function?.arguments) t.args += String(tc.function.arguments);
-    }
-  }
-  if (!sawChunk) return null;
-  const toolCalls = [...toolSlots.values()].map((t, i) => ({ id: t.id || `call_${i}`, type: "function", function: { name: t.name, arguments: t.args || "{}" } }));
-  const message = { role: "assistant", content: content || (toolCalls.length ? null : "") };
-  if (toolCalls.length) message.tool_calls = toolCalls;
-  return { id: "", object: "chat.completion", created: Math.floor(Date.now() / 1000), model,
-    choices: [{ index: 0, message, finish_reason: finish || (toolCalls.length ? "tool_calls" : "stop") }],
-    usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
 }
 
 
@@ -348,10 +308,14 @@ export async function messagesHandler(ctx) {
   }));
   const pipeline = createChatPipeline(ctx);
   const fakeReq = withBody(req, chatBody);
+  // ADR-0055：请求侧 token 估算 thunk（路由层也 memoize，与决策 4「每请求至多算一次」对齐；
+  // translator 内部还有一层 memoize，双保险）。
+  let estCache;
+  const estInput = () => (estCache ??= estimateTokens(body).input_tokens);
   const forwardClose = (shim) => { try { req.on?.("close", () => shim.emit("close")); } catch { /* ignore */ } };
   try {
     if (chatBody.stream) {
-      const translator = createAnthropicChunkTranslator(chatBody.model, { thinking: emitThinking() });
+      const translator = createAnthropicChunkTranslator(chatBody.model, { thinking: emitThinking(), estInput });
       const live = createAnthropicForwarder(res, translator);
       forwardClose(live);
       await pipeline.execute({ req: fakeReq, res: live });
@@ -372,11 +336,11 @@ export async function messagesHandler(ctx) {
       }
       // 上游偶发非 chat 形状（无 choices）：包成单 text 块，绝不 500（照 responses-route.js 先例）
       if (!Array.isArray(chatJson.choices)) {
-        const r = chatJsonToAnthropic({ choices: [{ message: { content: String(text).slice(0, 8000) } }] }, chatBody.model);
+        const r = chatJsonToAnthropic({ choices: [{ message: { content: String(text).slice(0, 8000) } }] }, chatBody.model, { estInput });
         alog("done-nonchat", JSON.stringify({ ms: Date.now() - t0, bytes: text.length }));
         return json(res, 200, r);
       }
-      const out = chatJsonToAnthropic(chatJson, chatBody.model);
+      const out = chatJsonToAnthropic(chatJson, chatBody.model, { estInput });
       alog("done-json", JSON.stringify({ ms: Date.now() - t0, status, blocks: out.content.length, stop: out.stop_reason, usage: out.usage }));
       return json(res, 200, out);
     }

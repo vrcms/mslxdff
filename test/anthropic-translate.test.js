@@ -227,9 +227,9 @@ describe("chatJsonToAnthropic — 非流式响应", () => {
     assert.deepEqual(empty.content, [{ type: "text", text: "" }]);
   });
 
-  test("usage 缺失全 0；缓存命中从 input 扣除（Anthropic 口径两者分开计）", () => {
+  test("usage 缺失走兜底（无 estInput 时 input=0、output 按生成内容估出，ADR-0055）；缓存命中从 input 扣除（Anthropic 口径两者分开计）", () => {
     assert.deepEqual(chatJsonToAnthropic({ choices: [{ message: { content: "x" } }] }, "m").usage, {
-      input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+      input_tokens: 0, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
     });
     assert.deepEqual(toAnthropicUsage({ prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 60 } }), {
       input_tokens: 40, output_tokens: 7, cache_read_input_tokens: 60, cache_creation_input_tokens: 0,

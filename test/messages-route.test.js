@@ -499,3 +499,87 @@ test("非流式 + 上游 SSE 夹 in-band 错误帧 → 502 报真实原因，绝
     assert.ok(j.error.message.includes("upstream dead"), j.error.message);
   } finally { await app.close(); }
 });
+
+// ---------- ADR-0055：/v1/messages 的 token 读数（CJK 估算 + usage 兜底）端到端 ----------
+
+const zhBody = (extra = {}) => JSON.stringify({
+  model: "m", max_tokens: 64, messages: [{ role: "user", content: "汉".repeat(1000) }], ...extra,
+});
+
+test("ADR-0055 count_tokens：1000 中文字读数 ≥950（旧口径 chars/4 报 ≈250）", async () => {
+  const app = await boot(chatJsonHandler);
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages/count_tokens`, { method: "POST", headers: AUTH, body: zhBody() });
+    const j = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(j.input_tokens >= 950, `实得 ${JSON.stringify(j)}`);
+  } finally { await app.close(); }
+});
+
+test("ADR-0055 非流式：上游整条不报 usage → 响应 usage 由估算兜底（不再恒 0）", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "chatcmpl-nou", choices: [{ index: 0, message: { role: "assistant", content: "你好呀，这是一段中文回复" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, { method: "POST", headers: AUTH, body: zhBody() });
+    const j = await res.json();
+    assert.ok(j.usage.input_tokens > 0, `input 应被兜底，实得 ${JSON.stringify(j.usage)}`);
+    assert.ok(j.usage.output_tokens > 0, `output 应被兜底，实得 ${JSON.stringify(j.usage)}`);
+  } finally { await app.close(); }
+});
+
+test("ADR-0055 非流式：上游报了 usage → 数值原样，估算不得覆盖实测", async () => {
+  const app = await boot(chatJsonHandler); // chatJsonHandler 报 prompt_tokens:12 / completion_tokens:3
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, { method: "POST", headers: AUTH, body: zhBody() });
+    const j = await res.json();
+    assert.equal(j.usage.input_tokens, 12);
+    assert.equal(j.usage.output_tokens, 3);
+  } finally { await app.close(); }
+});
+
+test("ADR-0055 上游只会流式（SSE 不带 usage）→ 聚合后仍走兜底，不再被合成的 0 钉死", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end('data: {"choices":[{"delta":{"content":"中文回复内容"}}]}\n\ndata: [DONE]\n\n');
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, { method: "POST", headers: AUTH, body: zhBody() });
+    const j = await res.json();
+    assert.ok(j.usage.input_tokens > 0, `实得 ${JSON.stringify(j.usage)}`);
+    assert.ok(j.usage.output_tokens > 0, `实得 ${JSON.stringify(j.usage)}`);
+  } finally { await app.close(); }
+});
+
+test("ADR-0055 上游谎报全 0 usage → 路由级仍兜底，不被 0 钉死", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: "中文回复" }, finish_reason: "stop" }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }));
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, { method: "POST", headers: AUTH, body: zhBody() });
+    const j = await res.json();
+    assert.ok(j.usage.input_tokens > 0 && j.usage.output_tokens > 0, `实得 ${JSON.stringify(j.usage)}`);
+  } finally { await app.close(); }
+});
+
+test("ADR-0055 流式路由：message_start 首帧即带非 0 input_tokens（估算），message_delta 收场同源", async () => {
+  const app = await boot((req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write('data: {"choices":[{"delta":{"content":"回复内容"}}]}\n\n');
+    res.end('data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\ndata: [DONE]\n\n');
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/messages`, { method: "POST", headers: AUTH, body: zhBody({ stream: true }) });
+    const text = await res.text();
+    const frame = (type) => {
+      const block = text.split("\n\n").find((b) => b.includes(`event: ${type}`));
+      const d = block?.split("\n").find((l) => l.startsWith("data:"));
+      return d ? JSON.parse(d.slice(5).trim()) : null;
+    };
+    const si = frame("message_start")?.message?.usage?.input_tokens ?? 0;
+    const di = frame("message_delta")?.usage?.input_tokens ?? 0;
+    assert.ok(si > 0 && si === di, `start=${si} delta=${di}`);
+  } finally { await app.close(); }
+});

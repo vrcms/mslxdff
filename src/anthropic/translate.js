@@ -1,148 +1,26 @@
 /**
- * Anthropic Messages ⇄ OpenAI chat 翻译层（/v1/messages 外壳，ADR-0047）。
+ * Anthropic Messages 出站翻译层：chat → Anthropic message / SSE 具名事件（/v1/messages 外壳，ADR-0047）。
  * 纯函数，无网络、无副作用；出站形状依据 code.claude.com/docs/en/llm-gateway-protocol
  * 与参考实现 lamdt1/ms-copilot365-2api/app/formatters/anthropic_sse.py。
+ * 分档（ADR-0055，为守本文件 ≤20KB 体积硬门；对外 import 路径全走本文件、调用方零改动）：
+ *  · 请求侧 Anthropic → chat 在 ./request-body.js；
+ *  · 消息/工具 id 与协议错误体在 ./shared.js；
+ *  · token 估算的单一来源在 ../text-tokens.js（上游未报 usage 时由它兜底）。
  *
  * 与 src/responses/translate.js 的三点关键差异：
  *  1) Anthropic 的 content block **只封口不复用**（Responses 侧 ensureTextItem 会复用已开项）；
  *  2) 事件是具名的（`event: <type>` + `data:`），且**没有 `data: [DONE]`**，收场只有
  *     `message_delta`+`message_stop`（成功）或一帧 `error`（失败）——见 grill-decisions.md Q2；
- *  3) 请求侧**保留思考档位**（thinking/effort/reasoning_effort/reasoningEffort/extra_body 原样透传给
- *     pipeline，语义归一交给各 provider 与 src/thinking-effort.js），但**必须主动丢** output_config/
- *     context_management 与消息块内的 thinking：Claude Code 对不认识的 model ID 照发全套字段，而块内
- *     thinking 我们无法签发 signature，回传必被上游拒（ADR-0047）。
+ *  3) 请求侧**保留思考档位**、**必须主动丢** output_config/context_management 与消息块内 thinking
+ *     （块内 thinking 我们无法签发 signature，回传必被上游拒）——细则见 ./request-body.js 头（ADR-0047）。
  */
 import { chunkToString } from "../responses/translate.js";
-import { isServerTool } from "./web-search.js";
+import { createTokenCounter } from "../text-tokens.js";
+import { newMessageId, newToolUseId } from "./shared.js";
 
-let seq = 0;
-export function newMessageId() {
-  return `msg_${Date.now().toString(36)}${(seq++).toString(36)}`;
-}
-export function newToolUseId() {
-  return `toolu_${Date.now().toString(36)}${(seq++).toString(36)}`;
-}
-
-/** Anthropic 协议错误体形状（非流式 JSON 与流式 in-band error 帧共用）。 */
-export function anthropicError(type, message) {
-  return { type: "error", error: { type: String(type || "api_error"), message: String(message || "error").slice(0, 500) } };
-}
-
-// ---------- 请求：Anthropic → chat ----------
-
-// system 允许字符串或 text 块数组；块间空行连接（缓存语义不保留，上游是 OpenAI）
-function systemTextOf(system) {
-  if (typeof system === "string") return system;
-  if (!Array.isArray(system)) return "";
-  return system.map((b) => (b && typeof b.text === "string" ? b.text : "")).filter(Boolean).join("\n\n");
-}
-
-function imagePartOf(block) {
-  const src = block?.source || {};
-  if (src.type === "base64" && src.data) {
-    return { type: "image_url", image_url: { url: `data:${src.media_type || "image/png"};base64,${src.data}` } };
-  }
-  if (src.type === "url" && src.url) return { type: "image_url", image_url: { url: String(src.url) } };
-  return null;
-}
-
-export function toolResultTextOf(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((p) => (typeof p === "string" ? p : p && typeof p.text === "string" ? p.text : ""))
-      .filter(Boolean)
-      .join("\n");
-  }
-  return content == null ? "" : String(content);
-}
-
-/** Anthropic Messages 请求体 → OpenAI chat 请求体（直接喂既有 ChatPipeline）。 */
-export function messagesToChatBody(req = {}) {
-  const model = String(req.model || "").trim();
-  if (!model) throw new Error("messages: 缺少 model");
-  const messages = [];
-  const sys = systemTextOf(req.system);
-  if (sys) messages.push({ role: "system", content: sys });
-
-  // 重复 tool_use_id 保首个、丢后续：客户端重试/重放历史会把同一工具结果存两份，
-  // 部分上游按 call_id 查重直接 400（同 responses/translate.js:57-59 的实测教训）。
-  const seenToolResult = new Set();
-
-  for (const m of Array.isArray(req.messages) ? req.messages : []) {
-    if (!m || typeof m !== "object") continue;
-    // role=system/developer 必须保留：Claude Code ≥2.1.286 的 mid-conversation system beta 就往 messages[] 里塞系统指令，
-    const role = m.role === "assistant" ? "assistant" : m.role === "system" || m.role === "developer" ? "system" : "user";
-    const blocks = typeof m.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m.content) ? m.content : [];
-    let text = "";
-    const imgs = [];
-    const toolCalls = [];
-    for (const b of blocks) {
-      if (!b || typeof b !== "object") continue;
-      if (b.type === "text") text += typeof b.text === "string" ? b.text : "";
-      else if (b.type === "image") { const p = imagePartOf(b); if (p) imgs.push(p); }
-      else if (b.type === "tool_use") {
-        let args = "{}";
-        try { args = JSON.stringify(b.input ?? {}); } catch { args = "{}"; }
-        toolCalls.push({ id: String(b.id || newToolUseId()), type: "function", function: { name: String(b.name || ""), arguments: args } });
-      } else if (b.type === "tool_result") {
-        // tool 消息必须先于同轮 user 文本进数组：OpenAI 侧要求 role:tool 紧跟其 assistant
-        const key = String(b.tool_use_id || "");
-        if (key) { if (seenToolResult.has(key)) continue; seenToolResult.add(key); }
-        const body = toolResultTextOf(b.content);
-        messages.push({ role: "tool", tool_call_id: key, content: b.is_error ? `[tool_error] ${body}` : body });
-      }
-      // thinking / redacted_thinking 忽略：我们无法签发 signature，回传必被上游拒（ADR-0047）
-    }
-    if (!text && !imgs.length && !toolCalls.length) continue;
-    const msg = { role, content: imgs.length ? [...(text ? [{ type: "text", text }] : []), ...imgs] : text };
-    if (toolCalls.length) msg.tool_calls = toolCalls;
-    messages.push(msg);
-  }
-  // 空会话直接 400：绝不伪造一句 "hi" 打上游（那会把假提问写进用户上下文并白烧一发额度）
-  if (!messages.some((x) => x.role !== "system")) throw new Error("messages: 缺少用户消息");
-
-  const body = { model, messages, stream: Boolean(req.stream) };
-  // 流式必须让上游把 usage 放进收尾帧，否则 message_delta.usage 恒 0（OpenAI 规范字段）。
-  // 个别上游不认 stream_options 会 400 → `MSLXDFF_ANTHROPIC_STREAM_USAGE=0` 关掉。
-  if (body.stream && process.env.MSLXDFF_ANTHROPIC_STREAM_USAGE !== "0") body.stream_options = { include_usage: true };
-  // Anthropic 的 server tool（web_search_*/web_fetch_*/…）没有 input_schema，折成假 function 会
-  // 让上游收到「空参数空描述」的工具（严格端点直接 422），本网关不实现的发前一律剥除（ADR-0049）。
-  const fnTools = (Array.isArray(req.tools) ? req.tools : []).filter((t) => !isServerTool(t));
-  if (fnTools.length) {
-    body.tools = fnTools.map((t) => ({
-      type: "function",
-      function: { name: String(t?.name || ""), description: String(t?.description || ""), parameters: t?.input_schema || {} },
-    }));
-  }
-  const keptNames = new Set(fnTools.map((t) => String(t?.name || "")));
-  const tc = req.tool_choice;
-  if (tc === "auto" || (tc && typeof tc === "object" && tc.type === "auto")) body.tool_choice = "auto";
-  else if (tc && typeof tc === "object" && tc.type === "any") body.tool_choice = "required";
-  // 点名一个已被剥掉的工具时降为 auto：上游会按不存在的函数强制点名，那样一定拿不到有用回答
-  else if (tc && typeof tc === "object" && tc.type === "tool") body.tool_choice = keptNames.has(String(tc.name || "")) ? { type: "function", function: { name: String(tc.name || "") } } : "auto";
-  else if (tc && typeof tc === "object" && tc.type === "none") body.tool_choice = "none";
-  if (req.max_tokens != null && Number.isFinite(Number(req.max_tokens))) body.max_tokens = Number(req.max_tokens);
-  if (req.temperature != null) body.temperature = req.temperature;
-  if (req.top_p != null) body.top_p = req.top_p;
-  if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) body.stop = req.stop_sequences;
-  // 思考档位原样透传（不解释语义，语义归一交给各 provider / src/thinking-effort.js）：
-  // 客户端显式声明必须一路带到上游，旧版在此丢掉 → 下游被迫补默认值（workbuddy 恒 high）。
-  if (req.thinking != null) body.thinking = req.thinking;
-  // 档位载体只收「非空 trimmed 字符串」：空串声明不算声明，不该发出去顶掉下游默认值。
-  for (const k of ["effort", "reasoning_effort", "reasoningEffort"]) {
-    const v = typeof req[k] === "string" ? req[k].trim() : "";
-    if (v) body[k] = v;
-  }
-  if (req.extra_body != null) body.extra_body = req.extra_body;
-  // output_config.effort 是 Claude Code 的另一档位载体（beta），原始对象上游不认故不外发，
-  // 但档位本身不能丢 → 归一到 reasoning_effort（客户端已显式声明时以声明为准）。
-  const ocEffort = req.output_config && typeof req.output_config === "object" ? req.output_config.effort : undefined;
-  if (ocEffort != null && body.reasoning_effort == null && body.reasoningEffort == null) {
-    body.reasoning_effort = ocEffort;
-  }
-  return body;
-}
+// re-export：拆档不改对外接口，调用方与测试仍从本文件取这些符号
+export { messagesToChatBody, toolResultTextOf } from "./request-body.js";
+export { newMessageId, newToolUseId, anthropicError } from "./shared.js";
 
 // ---------- usage / stop_reason ----------
 
@@ -151,20 +29,27 @@ export function messagesToChatBody(req = {}) {
  * Anthropic 的 `input_tokens` **不含**缓存读命中的部分（两者分开计费），而上游
  * `prompt_tokens` 是含缓存的总输入 —— 故命中数要从 input 里扣掉，否则客户端把同一段
  * 前缀算两遍（读数虚高）。
+ * `fallback()` 只在**上游整条未报**（缺字段，或 prompt/output/cache_read/cache_creation 四项全为 0）时才用：
+ * 真实模型对非空 prompt 不可能报 0，照抄 0 会让客户端的上下文计度停在原地、永不压实（ADR-0055 决策 3）。
  */
-export function toAnthropicUsage(u = {}) {
+export function toAnthropicUsage(u = {}, fallback = null) {
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   const src = u && typeof u === "object" ? u : {};
   const prompt = num(src.prompt_tokens ?? src.input_tokens);
   const output = num(src.completion_tokens ?? src.output_tokens);
   const cacheRead = num(src.cache_read_input_tokens ?? src.prompt_tokens_details?.cached_tokens ?? src.input_tokens_details?.cached_tokens);
   const cacheWrite = num(src.cache_creation_input_tokens ?? src.prompt_tokens_details?.cache_creation_input_tokens);
-  return {
+  const usage = {
     input_tokens: Math.max(0, prompt - cacheRead - cacheWrite),
     output_tokens: output,
     cache_read_input_tokens: cacheRead,
     cache_creation_input_tokens: cacheWrite,
   };
+  // cache 非零也算「报了」：SDK 通道（upstream-engine/sdk/sse.js 的 usageToOpenAI）会输出
+  // `{prompt_tokens:0, …, prompt_tokens_details:{cached_tokens:N}}` 这种形状，若当未报整条覆盖，
+  // 客户端「input + cache_read」会把同一段前缀算两遍（正是上面扣减要防的事，评审 P2）。
+  if (fallback && !(prompt > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0)) return { ...usage, ...(fallback() || {}) };
+  return usage;
 }
 
 function toStopReason(finish, hasToolUse) {
@@ -200,7 +85,7 @@ export function textFromChatContent(c) {
   return t;
 }
 
-export function chatJsonToAnthropic(chatJson = {}, model = "") {
+export function chatJsonToAnthropic(chatJson = {}, model = "", opts = {}) {
   const choice = chatJson.choices?.[0] || {};
   const message = choice.message || {};
   const content = [];
@@ -217,8 +102,19 @@ export function chatJsonToAnthropic(chatJson = {}, model = "") {
     content: content.length ? content : [{ type: "text", text: "" }],
     stop_reason: toStopReason(choice.finish_reason, content.some((b) => b.type === "tool_use")),
     stop_sequence: null,
-    usage: toAnthropicUsage(chatJson.usage),
+    usage: toAnthropicUsage(chatJson.usage, () => fallbackUsage(opts, content)),
   };
+}
+
+// 上游整条未报 usage 时的兜底（ADR-0055 决策 3）：请求侧用注入的 estInput，生成侧按已产出的块估。
+function fallbackUsage(opts = {}, content = []) {
+  const counter = createTokenCounter();
+  for (const b of content) {
+    if (b?.type === "text") counter.add(b.text || "");
+    else if (b?.type === "tool_use") counter.add(JSON.stringify(b.input ?? {})); // 只计参数：与流式 pushTool 同口径（name 从不进 gen）
+  }
+  const n = typeof opts.estInput === "function" ? Number(opts.estInput()) : 0;
+  return { input_tokens: Number.isFinite(n) && n > 0 ? Math.floor(n) : 0, output_tokens: counter.tokens() };
 }
 
 // ---------- 流式响应：chat SSE chunk → Anthropic 具名事件 ----------
@@ -239,6 +135,18 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
   const emitThinking = opts.thinking === true;
   const created = Math.floor(Date.now() / 1000);
   const ev = (type, extra = {}) => ({ type, ...extra });
+
+  // 请求侧 token 估算（ADR-0055 决策 3/5）：路由注入 `opts.estInput()`，memoize —— `message_start` 必须在
+  // 首块前就带 input_tokens，全文只能扫一遍；上游后报实测 usage 时估算只留在首帧，不进 message_delta。
+  let estCached = null;
+  const estInput = () => {
+    if (estCached == null) {
+      const n = typeof opts.estInput === "function" ? Number(opts.estInput()) : 0;
+      estCached = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    }
+    return estCached;
+  };
+  const gen = createTokenCounter(); // 生成侧累计（text + thinking + tool 参数增量）
 
   let buf = "";
   let nextIndex = 0;
@@ -266,6 +174,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
     const out = [];
     if (!open || open.kind !== "text") openBlock("text", { type: "text", text: "" }, out);
     open.text += delta;
+    gen.add(delta); // 生成侧只累计字数、末帧一次套公式：逐帧套会把参照实现的 +1 下限乘上帧数
     out.push(ev("content_block_delta", { index: open.index, delta: { type: "text_delta", text: delta } }));
     return out;
   }
@@ -273,6 +182,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
     const out = [];
     if (!open || open.kind !== "thinking") openBlock("thinking", { type: "thinking", thinking: "", signature: "" }, out);
     open.text += delta;
+    gen.add(delta); // thinking 也按 output 计费（ADR-0055 grill Q6）
     out.push(ev("content_block_delta", { index: open.index, delta: { type: "thinking_delta", thinking: delta } }));
     return out;
   }
@@ -293,15 +203,15 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
     if (tc?.id) t.id = String(tc.id);
     if (tc?.function?.name) t.name += String(tc.function.name);
     const frag = tc?.function?.arguments ? String(tc.function.arguments) : "";
-    if (frag) { dbg.toolDeltas++; t.args += frag; }
+    if (frag) { dbg.toolDeltas++; t.args += frag; gen.add(frag); }
     if (!t.announced && t.id && t.name) announceTool(t, out);
     else if (t.announced && frag && open && open.index === t.index) out.push(ev("content_block_delta", { index: t.index, delta: { type: "input_json_delta", partial_json: frag } }));
-    else if (t.announced && frag) dbg.lateToolDeltas++; // 块已封口后才来的参数增量：发出即违规帧，丢弃并留读数
+    else if (t.announced && frag) dbg.lateToolDeltas++; // 块已封口后才来的参数增量：发出即违规帧，丢弃但上面已计入 gen（output_tokens 取计费口径：模型确实生成了这些字节）
     return out;
   }
 
   function begin() {
-    return [ev("message_start", { message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })];
+    return [ev("message_start", { message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: estInput(), output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })];
   }
 
   function push(data) {
@@ -329,6 +239,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
       if (rc) {
         dbg.thinkingChars += rc.length;
         if (emitThinking) out.push(...pushThinking(rc)); // 只发 thinking_delta，无 signature 可发
+        else gen.add(rc); // `MSLXDFF_ANTHROPIC_THINKING=0` 时思考字节仍是真实生成，兜底 output 照计（在此加、不在 pushThinking 内加，避免双计）
       }
     }
     return out;
@@ -341,7 +252,7 @@ export function createAnthropicChunkTranslator(model = "", opts = {}) {
       if (!t.announced && (t.id || t.name || t.args)) announceTool(t, out); // 只有 arguments 无 name 的退化收尾
     }
     closeOpen(out);
-    out.push(ev("message_delta", { delta: { stop_reason: toStopReason(fr, sawToolUse), stop_sequence: null }, usage: toAnthropicUsage(usage || lastUsage) }));
+    out.push(ev("message_delta", { delta: { stop_reason: toStopReason(fr, sawToolUse), stop_sequence: null }, usage: toAnthropicUsage(usage || lastUsage, () => ({ input_tokens: estInput(), output_tokens: gen.tokens() })) }));
     out.push(ev("message_stop"));
     return out;
   }
