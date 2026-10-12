@@ -3,7 +3,8 @@ import { AGENT_HOST, EP_MODELS, FUNCTION, DEFAULT_MODEL } from "./constants.js";
 import { soloHeaders } from "./headers.js";
 import { joinModelId } from "../model-id.js";
 
-const CTX = 131072;
+// 窗口自报已删（ADR-0054）：此前对所有模型硬编码 context_length=131072，无任何依据；
+// 现交由 /v1/models 富化的四级解析统一裁决——本 provider 不自报，未知落 1M 兜底。
 const CREATED = 1753600000;
 const OWNER = "trae-solo";
 
@@ -19,7 +20,7 @@ export const STATIC_MODEL_IDS = [
 ];
 
 export function staticModels(id = "traework") {
-  return STATIC_MODEL_IDS.map((m) => ({ id: joinModelId(id, m), object: "model", created: CREATED, owned_by: OWNER, context_length: CTX }));
+  return STATIC_MODEL_IDS.map((m) => ({ id: joinModelId(id, m), object: "model", created: CREATED, owned_by: OWNER }));
 }
 
 export function normalizeModelName(s) {
@@ -78,7 +79,7 @@ export function createModelsService({
     if (cache && now - fetchedAt < CACHE_TTL_MS) return cache;
     try {
       const dyn = await fetchDynamic();
-      cache = dyn.map((m) => ({ id: joinModelId(id, m.id), object: "model", created: CREATED, owned_by: OWNER, context_length: CTX, name: m.name }));
+      cache = dyn.map((m) => ({ id: joinModelId(id, m.id), object: "model", created: CREATED, owned_by: OWNER, name: m.name }));
       fetchedAt = now;
       return cache;
     } catch {

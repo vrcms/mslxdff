@@ -1,8 +1,10 @@
-// /v1/models 能力富化（ADR-0022）：把 models.dev 目录（+ workbuddy 原生字段兜底）
-// 的能力合并进 /v1/models 每条 data 条目的 `capabilities` 子对象，客户端与 CLI 一眼可读。
+// /v1/models 能力富化（ADR-0022 + ADR-0054）：把 models.dev 目录（+ workbuddy 原生字段兜底）
+// 的能力合并进每条 data 条目的 `capabilities` 子对象；上下文窗口由 context-lookup 四级解析
+// 统一裁决并双层同源写入（顶层 context_length 与 capabilities.context 恒同值）。
 // 逃生门：GET /v1/models?raw=1 保持 ADR-0016 的原始透传形状；codex 调用者恒原始 + 空 models:[]。
-// 全程 best-effort：目录不可用 → 原样返回，绝不让 /models 因富化失败挂掉。
+// 全程 best-effort：富化失败不阻塞 /models，context 一致化不依赖目录（冷缓存照常生效）。
 import { globalCapabilities } from "./index.js";
+import { resolveContextLength } from "./context-lookup.js";
 
 // "cline/deepseek/deepseek-v4-flash" → { provider: "cline", raw: "deepseek/deepseek-v4-flash" }；裸 id 归 opencode
 export function splitModelId(id) {
@@ -82,46 +84,59 @@ function lookupCapsDeep(svc, provider, raw) {
  * wbSource 显式 null 禁用 workbuddy 兜底（测试用）。
  */
 export async function mergeModelsList(data, { capsSvc, wbSource } = {}) {
-  const svc = capsSvc === undefined ? globalCapabilities() : capsSvc;
   const entries = Array.isArray(data?.data) ? data.data : [];
-  if (!svc || !entries.length) return data;
-  // 只用内存/磁盘缓存热身；冷缓存绝不阻塞请求（后台拉新，下次请求即富化）
-  try {
-    const warmed = svc.readyWarm ? await svc.readyWarm() : await svc.ready();
-    if (!warmed) return data;
-  } catch {
-    return data;
-  }
-  // 第一遍：目录直查；workbuddy 未命中记下，第二遍走上游原生字段
-  const resolved = new Map(); // index -> caps
-  const needWb = []; // [index, raw]
-  entries.forEach((entry, i) => {
-    const id = String(entry?.id || "");
-    if (!id) return;
-    const { provider, raw } = splitModelId(id);
-    const caps = lookupCapsDeep(svc, provider, raw);
-    if (caps) resolved.set(i, caps);
-    else if (provider === "workbuddy" && wbSource !== null) needWb.push([i, raw]);
-  });
-  if (needWb.length) {
+  if (!entries.length) return data;
+  const svc = capsSvc === undefined ? globalCapabilities() : capsSvc;
+  // 目录冷缓存/抛错不阻塞：context 一致化（L1/L2/L4）不依赖目录，照常生效（ADR-0054）
+  let catalogReady = false;
+  if (svc) {
     try {
-      const { workbuddyCapsFromModels, workbuddyAllModels } = await import("./index.js");
-      const wbMap = await workbuddyCapsFromModels(wbSource || workbuddyAllModels)();
-      for (const [i, raw] of needWb) {
-        const caps = wbMap?.[raw] || null;
-        if (caps) resolved.set(i, caps);
-      }
+      catalogReady = svc.readyWarm ? await svc.readyWarm() : await svc.ready();
     } catch {
-      // workbuddy 源不可用：这些条目保持无能力，不拖垮整个列表
+      catalogReady = false;
     }
   }
-  if (!resolved.size) return data;
+  // L3 目录直查（仅就绪时）；workbuddy 未命中第二遍走上游原生字段
+  const resolved = new Map(); // index -> caps
+  if (catalogReady) {
+    const needWb = []; // [index, raw]
+    entries.forEach((entry, i) => {
+      const id = String(entry?.id || "");
+      if (!id) return;
+      const { provider, raw } = splitModelId(id);
+      const caps = lookupCapsDeep(svc, provider, raw);
+      if (caps) resolved.set(i, caps);
+      else if (provider === "workbuddy" && wbSource !== null) needWb.push([i, raw]);
+    });
+    if (needWb.length) {
+      try {
+        const { workbuddyCapsFromModels, workbuddyAllModels } = await import("./index.js");
+        const wbMap = await workbuddyCapsFromModels(wbSource || workbuddyAllModels)();
+        for (const [i, raw] of needWb) {
+          const caps = wbMap?.[raw] || null;
+          if (caps) resolved.set(i, caps);
+        }
+      } catch {
+        // workbuddy 源不可用：这些条目保持无能力，不拖垮整个列表
+      }
+    }
+  }
+  // 产物：capabilities（caps 语义字段 + 解析出的 context）+ 顶层 context_length 同源同值（ADR-0054 决定 2：
+  // 两层要么同写要么同不写，绝不给客户端两种答案）；caps 未命中只补 { context }，不硬造能力声明（能力不知道就沉默）
   const next = entries.map((entry, i) => {
-    const caps = resolved.get(i);
-    if (!caps) return entry;
+    if (!entry || typeof entry !== "object") return entry; // 异形条目原样透传，不凭空造成员
+    const caps = resolved.get(i) || null;
+    const ctx = resolveContextLength({ entry, id: String(entry?.id || ""), caps });
+    if (!caps && !ctx) return entry; // env 关兜底 + 全未命中：回旧口径
     const { raw } = splitModelId(String(entry?.id || ""));
-    const payload = capsPayloadFor(caps, raw);
-    return payload ? { ...entry, capabilities: payload } : entry;
+    const capsPart = caps ? capsPayloadFor(caps, raw) : null;
+    const capabilities = capsPart
+      ? (ctx ? { ...capsPart, context: ctx } : capsPart)
+      : (ctx ? { context: ctx } : null);
+    if (!capabilities) return entry;
+    const out = ctx ? { ...entry, context_length: ctx } : { ...entry };
+    out.capabilities = capabilities;
+    return out;
   });
   return { ...data, data: next };
 }

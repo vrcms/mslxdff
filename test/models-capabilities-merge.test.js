@@ -21,6 +21,18 @@ function fakeSvc(entries) {
   };
 }
 
+// L4 兜底默认值会读 env；兜底断言的测试用 withFallback 钉死行为（undefined=恢复未设）
+async function withFallback(v, fn) {
+  const ENV = "MSLXDFF_MODEL_CONTEXT_FALLBACK";
+  const old = process.env[ENV];
+  if (v === undefined) delete process.env[ENV];
+  else process.env[ENV] = v;
+  try { return await fn(); } finally {
+    if (old === undefined) delete process.env[ENV];
+    else process.env[ENV] = old;
+  }
+}
+
 const CAPS = {
   reasoning: true,
   effortType: "effort",
@@ -70,12 +82,13 @@ test("capsPayloadFor: 只填有值字段 + endpoints/upstreamApi", () => {
   assert.equal(capsPayloadFor(null, "x"), null);
 });
 
-test("mergeModelsList: 裸 id 精确命中", async () => {
+test("mergeModelsList: 裸 id 精确命中（context 双层同源）", async () => {
   const data = { object: "list", data: [{ id: "big-pickle", object: "model" }] };
   const svc = fakeSvc([["opencode", "big-pickle", CAPS]]);
   const out = await mergeModelsList(data, { capsSvc: svc, wbSource: null });
   assert.equal(out.data[0].capabilities.reasoning, true);
   assert.equal(out.data[0].capabilities.context, 128000);
+  assert.equal(out.data[0].context_length, 128000, "顶层与 capabilities 同值（ADR-0054）");
 });
 
 test("mergeModelsList: -free 后缀剥离回退", async () => {
@@ -92,14 +105,16 @@ test("mergeModelsList: 二级厂商前缀回退（cline/deepseek/x）", async ()
   assert.equal(out.data[0].capabilities.toolCall, true);
 });
 
-test("mergeModelsList: 未收录模型保持原样（无 capabilities 键）", async () => {
+test("mergeModelsList: 未收录模型补兜底 context（双层同源），不硬造能力声明", async () => {
   const data = { object: "list", data: [{ id: "totally-unknown-model", object: "model" }] };
   const svc = fakeSvc([]);
-  const out = await mergeModelsList(data, { capsSvc: svc, wbSource: null });
-  assert.ok(!("capabilities" in out.data[0]));
+  const out = await withFallback(undefined, () => mergeModelsList(data, { capsSvc: svc, wbSource: null }));
+  assert.deepEqual(out.data[0].capabilities, { context: 1_000_000 });
+  assert.equal(out.data[0].context_length, 1_000_000);
+  assert.ok(!("reasoning" in out.data[0].capabilities)); // 能力不知道就沉默
 });
 
-test("mergeModelsList: workbuddy 兜底走上游原生字段源", async () => {
+test("mergeModelsList: workbuddy 兜底走上游原生字段源（L3=wb caps），顶层同步一致", async () => {
   const data = { object: "list", data: [{ id: "workbuddy/hy3", object: "model" }] };
   const svc = fakeSvc([]); // models.dev 无 workbuddy
   const wbSource = async () => ({
@@ -109,20 +124,42 @@ test("mergeModelsList: workbuddy 兜底走上游原生字段源", async () => {
   const out = await mergeModelsList(data, { capsSvc: svc, wbSource });
   assert.equal(out.data[0].capabilities.imageInput, true);
   assert.equal(out.data[0].capabilities.context, 131072);
+  assert.equal(out.data[0].context_length, 131072, "双层同源（ADR-0054）");
 });
 
-test("mergeModelsList: 冷目录不阻塞（readyWarm false → 原样返回）", async () => {
-  const data = { object: "list", data: [{ id: "big-pickle", object: "model" }] };
+test("mergeModelsList: 冷目录不阻塞（readyWarm false → L3 跳过，L1+L4 照常生效）", async () => {
+  const data = { object: "list", data: [
+    { id: "big-pickle", object: "model" },
+    { id: "raccoon/sn-kimi-k3", object: "model", context_length: 256000 },
+  ] };
   const svc = { readyWarm: async () => false, get: () => null };
-  const out = await mergeModelsList(data, { capsSvc: svc, wbSource: null });
-  assert.ok(!("capabilities" in out.data[0]));
+  const out = await withFallback(undefined, () => mergeModelsList(data, { capsSvc: svc, wbSource: null }));
+  assert.deepEqual(out.data[0].capabilities, { context: 1_000_000 });
+  assert.equal(out.data[1].capabilities.context, 256000, "冷缓存下 L1 自报照常生效");
 });
 
-test("mergeModelsList: 目录抛错 → 原样返回不挂", async () => {
+test("mergeModelsList: 目录抛错 → 不挂，仍补 L1+L4", async () => {
   const data = { object: "list", data: [{ id: "big-pickle", object: "model" }] };
   const svc = { readyWarm: async () => { throw new Error("boom"); }, get: () => null };
+  const out = await withFallback(undefined, () => mergeModelsList(data, { capsSvc: svc, wbSource: null }));
+  assert.deepEqual(out.data[0].capabilities, { context: 1_000_000 });
+});
+
+test("mergeModelsList: 条目自报（L1）优先于目录（L3），caps 其余字段保留", async () => {
+  const data = { object: "list", data: [{ id: "raccoon/sn-kimi-k3", object: "model", context_length: 1_000_000 }] };
+  const svc = fakeSvc([["raccoon", "sn-kimi-k3", CAPS]]); // CAPS.context=128000
   const out = await mergeModelsList(data, { capsSvc: svc, wbSource: null });
+  assert.equal(out.data[0].capabilities.context, 1_000_000);
+  assert.equal(out.data[0].context_length, 1_000_000);
+  assert.equal(out.data[0].capabilities.reasoning, true, "caps 命中时其余能力字段照常富化");
+});
+
+test("mergeModelsList: env=0 关兜底且全未命中 → 原样（旧口径），两层都不写", async () => {
+  const data = { object: "list", data: [{ id: "totally-unknown-model", object: "model" }] };
+  const svc = fakeSvc([]);
+  const out = await withFallback("0", () => mergeModelsList(data, { capsSvc: svc, wbSource: null }));
   assert.ok(!("capabilities" in out.data[0]));
+  assert.ok(!("context_length" in out.data[0]));
 });
 
 test("mergeModelsList: 空 data/畸形输入原样返回", async () => {

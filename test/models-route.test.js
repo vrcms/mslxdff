@@ -115,6 +115,21 @@ test("non-codex client keeps byte-identical shape (no models key)", async () => 
     await app.close();
   }
 });
+test("?raw=1 完全不富化：无 capabilities、也不补 L4 兜底窗口（ADR-0054 承诺锁）", async () => {
+  const app = await boot({ models: ["big-pickle"] });
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/v1/models?raw=1`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const json = await res.json();
+    const m = json.data.find((x) => x.id === "big-pickle");
+    assert.ok(m, "raw=1 仍返回条目");
+    assert.equal("capabilities" in m, false, "raw=1 不富化能力（regex 只认 (^|&)raw=1(&|$)，误写成 /raw=1/ 子串会被此断言放过的路径由本用例反向锁）");
+    assert.equal("context_length" in m, false, "raw=1 不补 L4（stub 条目未自报窗口，富化链必须整体不跑）");
+  } finally {
+    await app.close();
+  }
+});
 
 test("401 without token", async () => {
   const app = await boot();

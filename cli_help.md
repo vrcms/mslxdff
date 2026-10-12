@@ -1388,6 +1388,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_MODELS_DEV_URL` | `https://models.opencode.ai/api.json` | 模型能力目录源（ADR-0016，opencode 官方同源；备选 `https://models.dev/api.json`） |
 | `MSLXDFF_MODELS_DEV_TTL_MS` | `86400000` (24h) | 能力目录缓存 TTL（过期重拉；`0`=每请求拉） |
 | `MSLXDFF_MODELS_DEV_CACHE` | `~/.config/mslxdff/models-dev.json` | 能力目录磁盘缓存路径（fetch 失败回退旧缓存） |
+| `MSLXDFF_MODEL_CONTEXT_FALLBACK` | `1000000` | `/v1/models` 上下文窗口四级解析的 L4 兜底值（ADR-0054：未知报 1M，高估比低估安全）；`0`/负数=关闭兜底，未知模型不报 context（回旧口径），空串与非法值按默认，正小数向下取整、`(0,1)` 视为非法 |
 | `MSLXDFF_MAX_STREAM_MS` | `120000` (2m) | 流式总时长上限 |
 | `MSLXDFF_FREE_ANON` | — | 空或非 `0/off/false` 则启用 free 模型 public 429 后的匿名重试 |
 | `MSLXDFF_FREE_ANON_RETRIES` | `3` | 匿名重试次数 |
