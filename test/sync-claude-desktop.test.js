@@ -113,3 +113,21 @@ test("--official 只摘登记不删配置，appliedId 归空；他人条目仍�
   const again = retireClaudeDesktopProfile({ port: 8989, dir: target });
   assert.equal(again.action, "unchanged");
 });
+
+test("splitArgs：--1m 的值成对吞掉、不进 positional（与 --max 同纪律，实测踩过值被当模型 id）", async () => {
+  const { splitArgs } = await import("../src/cli/commands/claude-desktop.js");
+  const { positional, flags, values, missing } = splitArgs(["m1", "--1m", "auto", "m2", "--max", "3"]);
+  assert.deepEqual(positional, ["m1", "m2"]);
+  assert.equal(values["--1m"], "auto");
+  assert.equal(values["--max"], "3");
+  assert.ok(flags.includes("--1m"));
+  assert.equal(missing, "");
+  assert.equal(splitArgs(["--1m"]).missing, "--1m");
+});
+
+test("applyClaudeDesktop：--1m invalid 在任何写盘前抛错（spec《参数校验先于任何写盘》）", async () => {
+  const { applyClaudeDesktop } = await import("../src/claude-desktop/apply.js");
+  const target = join(dir, "lib6");
+  await assert.rejects(() => applyClaudeDesktop({ picks: ["x"], token: "t", dir: target, oneM: ",," }), /--1m 取值非法/);
+  assert.equal(existsSync(target), false, "非法值不得留下任何目录/文件");
+});

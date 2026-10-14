@@ -22,7 +22,7 @@ export async function handleSetto(args) {
   const idx = args.findIndex((x) => x === "-setto" || x === "--setto");
   const target = args[idx + 1];
   if (!["workbuddy", "opencode", "chatgpt", "codex", "claude", "claude-desktop", "claudedesktop"].includes(target)) {
-    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId] [--behaves-as <id>] | mslxdff -setto claude-desktop [modelId ...] [--max N] [--no-alias] [--check] [--official]  (claude: 不带 modelId = 写入 modelPicks 勾选集全集，--all 与之同义 / claude-desktop: 写 Claude Desktop 3P profile + 角色槽 alias)");
+    console.error("usage: mslxdff -setto workbuddy [modelId] | mslxdff -setto opencode [modelId|--all] | mslxdff -setto chatgpt [modelId] | mslxdff -setto claude [modelId] [--behaves-as <id>] | mslxdff -setto claude-desktop [modelId ...] [--max N] [--max-effort <lvl>] [--1m <off|auto|all|列表>] [--no-alias] [--check] [--official]  (claude: 不带 modelId = 写入 modelPicks 勾选集全集，--all 与之同义 / claude-desktop: 写 Claude Desktop 3P profile + 角色槽 alias，--1m 缺省 auto=有据才打 1M 标，详见 ADR-0056)");
     process.exit(1);
   }
   if (target === "claude-desktop" || target === "claudedesktop") {

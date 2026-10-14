@@ -18,7 +18,15 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
   const rawModel = body.model || "";
 
   let normalizedRequested = normalizeModel(lockModel || rawModel || "");
-  const aliasResolved = getModelAlias(normalizedRequested);
+  // [1m] 后缀回退（Claude Desktop 1M 条目 / Claude Code 1M 记法，ADR-0056）：alias 直查未命中时
+  // 剥去尾部 [1m] 再查一次。仅用于本次查找——不回写、不注册 alias，未命中路径逐字不变（design D2）。
+  // 两个 alias 查找点（首轮 + mslxdff/ 前缀二段）共用同一回退，否则 `mslxdff/<槽位>[1m]` 不等价（评审 1 P1）。
+  const resolveAlias = (id) => {
+    const hit = getModelAlias(id);
+    if (hit) return hit;
+    return /\[1m\]$/i.test(id) ? getModelAlias(id.replace(/\[1m\]$/i, "")) : null;
+  };
+  let aliasResolved = resolveAlias(normalizedRequested);
   if (aliasResolved) {
     normalizedRequested = aliasResolved;
   }
@@ -29,7 +37,7 @@ export function analyzePolicy({ headers = {}, body = {} } = {}) {
     const rawPart = requested.slice("mslxdff/".length);
     aliasInfo = `${requested} -> ${rawPart} (mslxdff provider stripped)`;
     requested = rawPart;
-    const alias2 = getModelAlias(requested);
+    const alias2 = resolveAlias(requested);
     if (alias2) {
       aliasInfo = `${rawModel} -> ${alias2} (mslxdff + alias)`;
       requested = alias2;

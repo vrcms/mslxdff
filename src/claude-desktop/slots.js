@@ -76,11 +76,77 @@ export function aliasPairs(rows = []) {
  * 桌面端 profile 的 `inferenceModels` 形状（官方 models 页：条目可为 id 字符串或对象，
  * 对象里 `name` 是发给 provider 的真 id、`labelOverride` 是菜单显示名）。
  * 显示名带上真模型名，用户在 App 下拉里能认出「这条其实是 qwenwork/pro」。
+ * `supports1m===true` 的行（--1m 裁决产物，decideRows1m 打标）追加官方成对键
+ * `supports1m+prefer1m`（= 菜单单条、新会话直接 1M 窗口，ADR-0056）；
+ * 键序恒为 name→labelOverride→supports1m→prefer1m→maxEffort —— 幂等按原文比对，键序必须稳定。
  */
 export function toInferenceModels(rows = [], { maxEffort } = {}) {
   return (Array.isArray(rows) ? rows : []).map((r) => {
     const e = { name: String(r.slot), labelOverride: String(r.label || r.model) };
+    if (r.supports1m === true) { e.supports1m = true; e.prefer1m = true; }
     if (maxEffort) e.maxEffort = String(maxEffort);
     return e;
   });
+}
+
+/** `--1m` auto 模式阈值：/v1/models 已裁决窗口 ≥ 此值才打标（ADR-0056）。 */
+export const ONE_M_THRESHOLD = 1_000_000;
+
+/**
+ * `-setto claude-desktop --1m <值>` 的纯函数解析：
+ * `off|auto|all` 保留字（大小写不敏感）、空值缺省 auto；其余非空值一律按列表处理（单条即长度 1）——
+ * 列表值不与行集做存在性预校验，未命中经 decideRows1m 的 unmatched 以 ⚠ 呈现而非硬拒（spec《--1m 参数解析》）。
+ * 仅 trim 后为空/纯分隔符（`,,`）判 invalid，CLI 须在写盘前拒绝。
+ */
+export function parseOneMMode(raw) {
+  const s = String(raw ?? "").trim();
+  const low = s.toLowerCase();
+  if (s === "" || low === "auto") return { mode: "auto", list: [] };
+  if (low === "off") return { mode: "off", list: [] };
+  if (low === "all") return { mode: "all", list: [] };
+  const list = s.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!list.length) return { mode: "invalid" };
+  return { mode: "list", list };
+}
+
+/**
+ * --1m 裁决（纯函数，不改入参）：rows → { rows, unmatched, preserved }。
+ * `oneM` 为 parseOneMMode 产物；`contexts` 为证据 Adapter 的 Map<小写 id, 窗口数>；
+ * `preserve` 为盘上既有 1M 标 Map<小写槽位, true>。auto 语义：有证据且 ≥1M 才新增标、
+ * 有证据且 <1M 才清标；**无证据（整体失败或该行不在目录）≠ 负面证据 —— 保留既有标**，
+ * 网关停机的一轮不得静默抹掉上次写好的（评审 1 P1-2）。
+ */
+export function decideRows1m({ rows = [], oneM = { mode: "off", list: [] }, contexts = null, preserve = null } = {}) {
+  const mode = oneM && oneM.mode ? oneM.mode : "off";
+  const list = (Array.isArray(oneM && oneM.list) ? oneM.list : []).map((x) => String(x).toLowerCase());
+  const matched = new Set();
+  const preserved = [];
+  const out = (Array.isArray(rows) ? rows : []).map((r) => {
+    let mark = false;
+    if (mode === "all") {
+      mark = true;
+    } else if (mode === "list") {
+      const slot = String(r?.slot || "").toLowerCase();
+      const model = String(r?.model || "").toLowerCase();
+      const hitSlot = slot && list.includes(slot);
+      const hitModel = model && list.includes(model);
+      if (hitSlot || hitModel) {
+        mark = true;
+        if (hitSlot) matched.add(slot);
+        if (hitModel) matched.add(model);
+      }
+    } else if (mode === "auto") {
+      const key = String(r?.model || "").toLowerCase();
+      const n = contexts ? contexts.get(key) : undefined; // 短路写 `&&` 会把整体失败喂成 null → 误走「清标」分支（全量测试抓到）
+      if (n === undefined) {
+        mark = Boolean(preserve && preserve.get(String(r?.slot || "").toLowerCase()));
+        if (mark) preserved.push(String(r?.slot || "").toLowerCase());
+      } else {
+        mark = n >= ONE_M_THRESHOLD;
+      }
+    }
+    return mark ? { ...r, supports1m: true } : { ...r };
+  });
+  const unmatched = mode === "list" ? list.filter((v) => !matched.has(v)) : [];
+  return { rows: out, unmatched, preserved };
 }

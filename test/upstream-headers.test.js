@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createUpstreamClient } from "../src/upstream.js";
+import { counterFromTimeHex } from "../src/opencode-identity.js";
 
 function stubServer(handler) {
   const srv = createServer((req, res) => {
@@ -102,27 +103,23 @@ test("无 messages 时回退进程级固定 session（不再每请求随机）",
   } finally{ await closeSrv(srv); }
 });
 
-test("id 12 位 hex 前缀与 opencode Identifier 同构（timestamp*4096+counter 截 48bit）", async () => {
+test("id 时间段是倒序时钟：低 12 位反解出的 counter 必须落在免费层接受窗口 [0,63]", async () => {
+  // 2026-10-13 现网取证：正序时钟 id 形状过正则但反解出 counter=4094 → 403 FreeTierError。
+  // 这条断言锁的就是那件事——闸门只认反解回来的 per-ms 计数，不认形状。
   let seen;
   const srv=await stubServer((req,res)=>{
     seen=req.headers;
     res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");
   });
   try{
-    const before=Date.now();
     const client=createUpstreamClient({baseUrl:urlOf(srv)});
     await client.chat({stream:false});
-    const after=Date.now();
-    const value=BigInt("0x"+seen["x-opencode-session"].slice(4,16));
-    const MASK=(1n<<48n)-1n;
-    // 基点按毫秒枚举 before-1..after：id 生成若跨 1ms 边界（首跑冷启动 ~40ms 常见），
-    // 只对 before/after 两点验会误判 diff=4097（实现 opencodeIdTail 无错，窗口算法此前的漏判）
-    let ok=false;
-    for(let t=before-1;t<=after && !ok;t++){
-      const base=BigInt(t)*0x1000n&MASK;
-      const diff=value>=base?value-base:value+(1n<<48n)-base;
-      ok=diff<4096n;
+    for (const pair of [["session", seen["x-opencode-session"]], ["request", seen["x-opencode-request"]]]) {
+      const [name, id] = pair;
+      const hex = String(id).slice(4, 16);
+      assert.match(hex, /^[0-9a-f]{12}$/, `${name} 时间段必须 12 位小写 hex`);
+      const c = counterFromTimeHex(hex);
+      assert.ok(c >= 0 && c <= 63, `${name} 反解 counter=${c} 越出免费层窗口 [0,63]（上游回 403 FreeTierError）`);
     }
-    assert.ok(ok,"12 位 hex 必须可解出 timestamp*4096+counter");
   } finally{ await closeSrv(srv); }
 });

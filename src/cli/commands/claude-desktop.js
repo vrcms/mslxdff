@@ -2,7 +2,7 @@ import { loadToken, loadModelPicks, loadPreferredModel } from "../../state.js";
 import { getPreferredModel } from "../../auto.js";
 import { effectivePort } from "../policy.js";
 import { claudeDesktopConfigDir, readClaudeDesktopProfile } from "../../sync-claude-desktop.js";
-import { ROLE_SLOTS, planSlots, slotRole } from "../../claude-desktop/slots.js";
+import { ROLE_SLOTS, planSlots, slotRole, parseOneMMode } from "../../claude-desktop/slots.js";
 import { detectManagedPolicy, readAppCatalogIds, appDataDirOf, currentAliases, probeMessages } from "../../claude-desktop/doctor.js";
 import { normalizeModel } from "../../reasoning.js";
 import { applyClaudeDesktop, retireClaudeDesktop } from "../../claude-desktop/apply.js";
@@ -57,7 +57,7 @@ export async function handleClaudeDesktop(args = [], flag = "-claude-desktop") {
         const name = typeof m === "string" ? m : String(m?.name || "");
         const label = typeof m === "string" ? "" : String(m?.labelOverride || "");
         const target = aliases[name];
-        const mark = !isSlot(name) ? "⚠ 非角色槽（App 可能拒）" : target ? `→ ${target}` : "⚠ 无 alias（请求会被当未知模型丢组员转发→超时 502）";
+        const mark = (!isSlot(name) ? "⚠ 非角色槽（App 可能拒）" : target ? `→ ${target}` : "⚠ 无 alias（请求会被当未知模型丢组员转发→超时 502）") + (typeof m !== "string" && m?.supports1m === true ? "  1M" : "");
         console.log(`    ${name.padEnd(28)} ${slotRole(name).padEnd(7)} ${label ? `[${label}]`.padEnd(30) : ""}${mark}`);
       }
       const missing = models.map((m) => (typeof m === "string" ? m : String(m?.name || ""))).filter((n) => n && !aliases[n]);
@@ -151,7 +151,7 @@ function printUsage() {
   mslxdff -claude-desktop status        看 profile / 托管策略 / 槽位 alias 是否齐（只读盘）
   mslxdff -claude-desktop slots         看 App 签名模型目录认得哪些槽位 id（内置清单与实况比对）
   mslxdff -claude-desktop check [id...] 逐槽向本机 /v1/messages 探活（等价 App 那个 Test connection，但给原因）
-  写配置: mslxdff -setto claude-desktop [modelId ...] [--max N] [--no-alias] [--official]`);
+  写配置: mslxdff -setto claude-desktop [modelId ...] [--max N] [--max-effort <lvl>] [--1m <off|auto|all|列表>] [--no-alias] [--check] [--official]`);
 }
 
 /**
@@ -166,11 +166,16 @@ export async function handleClaudeDesktopSetto(args = [], idx = -1) {
   if (missing) bad(`${missing} 需要取值`);
   const maxRaw = values["--max"];
   const effortRaw = values["--max-effort"];
-  const unknown = flags.filter((f) => !["--max", "--max-effort", "--no-alias", "--check", "--official", "--port"].includes(f));
-  if (unknown.length) bad(`未知参数: ${unknown.join(" ")}（可用：--max N / --max-effort <lvl> / --no-alias / --check / --official）`);
+  const unknown = flags.filter((f) => !["--max", "--max-effort", "--1m", "--no-alias", "--check", "--official", "--port"].includes(f));
+  if (unknown.length) bad(`未知参数: ${unknown.join(" ")}（可用：--max N / --max-effort <lvl> / --1m off|auto|all|列表 / --no-alias / --check / --official）`);
   if (maxRaw !== undefined && !(Number(maxRaw) > 0)) bad("--max 需要一个正整数（要写几条槽位），例如 --max 3");
   const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   if (effortRaw !== undefined && !EFFORTS.includes(String(effortRaw))) bad(`--max-effort 只能是 ${EFFORTS.join(" | ")}`);
+  // --1m 上下文标记（ADR-0056）：不传=auto；显式传空值与「不传」区分、写盘前拒（评审 2 P1#1）；invalid=纯分隔符值
+  const oneMRaw = values["--1m"];
+  if (oneMRaw !== undefined && !String(oneMRaw).trim()) bad("--1m 取值为空：不传该参数即缺省 auto；或显式传 off | auto | all | <逗号分隔槽位/模型id>");
+  const oneMParsed = parseOneMMode(oneMRaw);
+  if (oneMParsed.mode === "invalid") bad("--1m 取值非法：只接受 off | auto | all | <逗号分隔槽位/模型id>");
 
   const port = effectivePort(args);
   let token = "";
@@ -208,6 +213,7 @@ export async function handleClaudeDesktopSetto(args = [], idx = -1) {
       token,
       max: maxRaw !== undefined ? Number(maxRaw) : undefined,
       maxEffort: effortRaw !== undefined ? String(effortRaw) : undefined,
+      oneM: oneMParsed,
       noAlias: flags.includes("--no-alias"),
       probe: flags.includes("--check"),
     });
@@ -221,8 +227,9 @@ export async function handleClaudeDesktopSetto(args = [], idx = -1) {
   console.log(`  登记:    ${r.metaFile}  appliedId=${r.configId}`);
   console.log(`  baseUrl: http://127.0.0.1:${port}  （App 自己拼 /v1/messages）  scheme=bearer`);
   console.log(`  inferenceModels: ${r.rows.length} 行（槽位 → 真模型）`);
-  for (const row of r.rows) console.log(`    ${row.slot.padEnd(28)} ${slotRole(row.slot).padEnd(7)} → ${row.model}`);
+  for (const row of r.rows) console.log(`    ${row.slot.padEnd(28)} ${slotRole(row.slot).padEnd(7)} → ${row.model}${row.supports1m ? "  1M" : ""}`);
   if (r.overflow) console.log(`  ⚠ 勾选集 ${r.rows.length + r.overflow} 条 > 槽位上限 ${r.slotCap}，已截断 ${r.overflow} 条（${r.dropped.slice(0, 3).join(", ")}${r.dropped.length > 3 ? " …" : ""}）；想换哪条上槽用 -setto claude-desktop <modelId> ...`);
+  for (const line of oneMOutputLines(r.oneM, r.rows.length)) console.log(line);
   if (!r.aliasSkipped) {
     console.log(`  alias: ${r.aliasAdded.length} 条新增/确认、${r.aliasOverwritten.length} 条覆盖 → ${r.aliasFile}（daemon 热读，不用重启）`);
     for (const a of r.aliasOverwritten) console.log(`    ⚠ 覆盖 ${a.slot}: ${a.from} → ${a.to}`);
@@ -250,7 +257,7 @@ export function splitArgs(rest = []) {
   let missing = "";
   for (let i = 0; i < rest.length; i++) {
     const a = String(rest[i]);
-    if (a === "--max" || a === "--max-effort" || a === "--port") {
+    if (a === "--max" || a === "--max-effort" || a === "--port" || a === "--1m") {
       flags.push(a);
       const v = rest[++i];
       if (v === undefined || String(v).startsWith("-")) { missing = a; break; }
@@ -261,4 +268,17 @@ export function splitArgs(rest = []) {
     positional.push(a);
   }
   return { positional, flags, values, missing };
+}
+
+/** --1m 输出行（纯函数=可单测，spec《写入与 status 的 1M 呈现》+ 评审 1 P1-2 保留标披露）。 */
+export function oneMOutputLines(oneM, rowsCount) {
+  if (!oneM || oneM.mode === "off") return [];
+  const kept = oneM.preserved && oneM.preserved.length ? `；已保留盘上 ${oneM.preserved.length} 条既有 1M 标（无证据≠负面证据）` : "";
+  if (oneM.mode === "auto" && oneM.evidenceOk) return [`  1M: ${oneM.markedCount}/${rowsCount} 条打标（证据：本机 /v1/models 已裁决窗口 ≥1M）${oneM.preserved && oneM.preserved.length ? `，其中 ${oneM.preserved.length} 条为保留` : ""}`];
+  if (oneM.mode === "auto") return [`  ℹ 网关证据不可用${oneM.evidenceReason ? `（${oneM.evidenceReason}）` : ""}，本轮未新增打标 —— 先 mslxdff -d 起网关重跑，或 --1m all 用户担保打标${kept}`];
+  if (oneM.mode === "all") return [`  1M: 全 ${oneM.markedCount} 条打标（用户担保，未查证据）`];
+  const lines = [];
+  if (oneM.mode === "list" && oneM.markedCount) lines.push(`  1M: ${oneM.markedCount} 条打标（列表模式，不查窗口证据）`);
+  if (oneM.mode === "list" && oneM.unmatched && oneM.unmatched.length) lines.push(`  ⚠ --1m 列表值未命中任何行: ${oneM.unmatched.join(", ")}`);
+  return lines;
 }
