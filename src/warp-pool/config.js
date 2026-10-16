@@ -2,9 +2,9 @@
 import { join } from "node:path";
 import { logDir } from "../logs.js";
 
-/** 缺省关：2026-10-16 真机实测证伪「N 设备 = N 桶」（免费版 WARP 的 IPv4 出口是共享 NAT，见 ADR-0059 修订）。 */
+/** 缺省开 + 429 时换身份换出口：他项目真机实测「同一身份连发 3 次 429，身份一换同一个请求立刻 200」⇒ 换身份＝换桶。 */
 export const DEFAULTS = {
-  enabled: false,
+  enabled: true,
   mode: "leader",
   count: 4,
   basePort: 10800,
@@ -14,6 +14,7 @@ export const DEFAULTS = {
   registerMinGapMs: 6_000,
   registerMaxGapMs: 15_000,
   probePath: "/zen/v1/models",
+  rotate: true,
 };
 
 const OFF = ["0", "off", "false", "no", "disable", "disabled"];
@@ -50,6 +51,7 @@ export function resolveWarpConfig(env = process.env, { logDirFn = logDir } = {})
   const bin = envStr(env, "MSLXDFF_WARP_BIN", "");
   const autodownload = envBool(env, "MSLXDFF_WARP_AUTODOWNLOAD", DEFAULTS.autodownload);
   const probePath = envStr(env, "MSLXDFF_WARP_PROBE_PATH", DEFAULTS.probePath);
+  const rotate = envBool(env, "MSLXDFF_WARP_ROTATE", DEFAULTS.rotate);
 
   return {
     enabled,
@@ -63,6 +65,7 @@ export function resolveWarpConfig(env = process.env, { logDirFn = logDir } = {})
     bin,
     autodownload,
     probePath,
+    rotate,
     registerMinGapMs: DEFAULTS.registerMinGapMs,
     registerMaxGapMs: DEFAULTS.registerMaxGapMs,
     /** 节点端口列表：basePort .. basePort+count-1 */

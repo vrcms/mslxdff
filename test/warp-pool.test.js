@@ -10,10 +10,11 @@ import { DEFAULTS, resolveWarpConfig } from "../src/warp-pool/config.js";
 import { loadNode, loadNodes, renderWireproxyConf, saveNode } from "../src/warp-pool/nodes.js";
 import { backoffMs, buildRegisterBody, parseRegisterResponse, registerWarpDevice } from "../src/warp-pool/register.js";
 import { createSelector } from "../src/warp-pool/strategy.js";
-import { createRotatingDispatcher, headerValue } from "../src/warp-pool/rotate.js";
+import { createRotatingDispatcher, headerValue, tapHandler } from "../src/warp-pool/rotate.js";
 import { createHealthMonitor } from "../src/warp-pool/health.js";
 import { parseExitIp, createReviver, labelExits } from "../src/warp-pool/revive.js";
 import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-pool/index.js";
+import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
@@ -35,10 +36,12 @@ test("keys：WireGuard 密钥形状合法且每次不同", () => {
 
 // ---------- config ----------
 
-test("config：缺省关（2026-10-16 真机实测证伪「N 设备 = N 桶」后改回）；显式开且 leader 才建池", () => {
+test("config：缺省开 + leader 才建池；显式关可退；轮换缺省开", () => {
   const def = resolveWarpConfig({}, { logDirFn });
-  assert.equal(def.enabled, false, "缺省关：不设 env 就不该有人偷偷被切到共享出口");
-  assert.equal(def.active, false);
+  assert.equal(def.enabled, true, "缺省开：429 时换身份换出口是缺省行为");
+  assert.equal(def.active, true, "缺省 leader ⇒ 建池");
+  assert.equal(def.rotate, true, "缺省开轮换（换身份＝换桶）");
+  assert.equal(resolveWarpConfig({ MSLXDFF_WARP_POOL: "0" }, { logDirFn }).active, false, "显式关必须生效");
   assert.equal(resolveWarpConfig({ MSLXDFF_WARP_POOL: "1" }, { logDirFn }).active, true, "显式开必须生效");
 
   const on = resolveWarpConfig({ MSLXDFF_WARP_POOL: "1" }, { logDirFn });
@@ -496,4 +499,106 @@ test("revive：labelExits 取证失败不算错（不影响节点进池），只
   const g = await labelExits({ ports: [10801, 10802], fetchImpl: async () => { throw new Error("boom"); }, log: (m) => logs.push(m) });
   assert.deepEqual(g, []);
   assert.ok(logs.some((l) => l.includes("出口取证失败")));
+});
+
+// ---------- identity（429 → 换身份换出口） ----------
+
+test("identity：readExitIp 只认 ip= 行，取不到返回空串（绝不抛）", async () => {
+  const ok = await readExitIp({ port: 1, fetchImpl: async () => ({ ok: true, text: async () => "fl=1\nip=104.28.1.2\nts=1\n" }) });
+  assert.equal(ok, "104.28.1.2");
+  assert.equal(await readExitIp({ port: 1, fetchImpl: async () => { throw new Error("boom"); } }), "");
+});
+
+test("identity：轮换必须实测确认出口变了——没变就重跑整个 cycle", async () => {
+  const reads = ["1.1.1.1", "1.1.1.1", "9.9.9.9"];
+  const applied = [];
+  const r = createIdentityRotator({
+    register: async () => ({ privateKey: "P=" }),
+    apply: async (n) => applied.push(n.port),
+    readIp: async () => reads.shift() ?? "9.9.9.9",
+    sleep: async () => {},
+    log: () => {},
+  });
+  r.note(10800, "1.1.1.1");
+  assert.deepEqual(await r.rotate(10800, { force: true }), { ok: true, ip: "9.9.9.9", attempts: 3 });
+  assert.equal(applied.length, 3, "每次都重新落盘 + 起隧道");
+  assert.equal(r.ipOf(10800), "9.9.9.9");
+});
+
+test("identity：出口始终没变 ⇒ 明确失败，且不得抹掉已知出口；minGapMs 掐住重复轮换", async () => {
+  let t = 1000;
+  const r = createIdentityRotator({
+    register: async () => ({ privateKey: "P=" }),
+    apply: async () => {},
+    readIp: async () => "2.2.2.2",
+    sleep: async () => {},
+    maxAttempts: 2,
+    now: () => t,
+    log: () => {},
+  });
+  r.note(10801, "2.2.2.2");
+  assert.equal((await r.rotate(10801, { force: true })).ok, false);
+  assert.equal(r.ipOf(10801), "2.2.2.2", "失败不得抹掉已知出口");
+  assert.equal((await r.rotate(10801, { minGapMs: 60_000 })).skipped, true, "刚轮换过 ⇒ 掐住（防把 CF 刷黑）");
+  t += 61_000;
+  assert.equal((await r.rotate(10801, { minGapMs: 60_000 })).skipped, undefined, "过了最小间隔放行");
+});
+
+test("identity：同端口并发轮换去重（429 风暴里 N 个失败请求只换一次身份）", async () => {
+  let calls = 0;
+  const r = createIdentityRotator({
+    register: async () => { calls += 1; return { privateKey: "P=" }; },
+    apply: async () => {},
+    readIp: async () => `9.9.9.${calls}`,
+    sleep: async () => {},
+    log: () => {},
+  });
+  r.note(10802, "0.0.0.0");
+  const [a, b] = await Promise.all([r.rotate(10802, { force: true }), r.rotate(10802, { force: true })]);
+  assert.equal(calls, 1, "在途轮换必须去重");
+  assert.equal(a, b, "后来者拿到同一个 Promise");
+  assert.equal(r.busy(10802), false, "轮换结束必须解除 busy");
+});
+
+test("identity：noteExits 批量记账；wireRotation 轮换期间先冷却、换好放回", async () => {
+  const marks = [];
+  const tunnels = new Map([[10803, { stop: () => marks.push("stop") }]]);
+  const rot = wireRotation({
+    dispatcher: { entries: () => [{ index: 0, port: 10803 }], markFailure: (i) => marks.push(`fail${i}`), markOk: (i) => marks.push(`ok${i}`) },
+    register: async () => ({ privateKey: "P=" }),
+    tunnels,
+    bringUp: async (n) => marks.push(`up${n.port}`),
+    swap: (p, n) => marks.push(`swap${p}:${n.port}`),
+    log: () => {},
+    readIp: async () => "9.9.9.9",
+    sleep: async () => {},
+  });
+  rot.noteExits([{ ip: "104.28.1.1", nodes: [10803, 10804] }, { ip: "104.28.1.2", nodes: [10805] }]);
+  assert.equal(rot.ipOf(10804), "104.28.1.1");
+  assert.equal(rot.ipOf(10805), "104.28.1.2");
+  assert.equal(rot.stats().length, 3);
+  assert.equal((await rot.rotate(10803, { force: true })).ok, true);
+  assert.deepEqual(marks, ["fail0", "stop", "swap10803:10803", "up10803", "ok0"], "先冷却 → 停旧 → 换盘 → 起新 → 放回");
+  assert.equal(tunnels.has(10803), false, "旧隧道已从表里摘掉");
+});
+
+test("rotate：tapHandler 截上游状态码 + 其余方法原样转发；dispatcher 把 429 连同端口号上报", () => {
+  const seen = [];
+  const orig = { onHeaders: (s) => s, onData: () => "d", onComplete: () => "c" };
+  const h = tapHandler(orig, (s) => seen.push(s));
+  assert.equal(h.onHeaders(429, [], () => {}, "Too Many Requests"), 429, "返回值必须透传");
+  assert.equal(h.onData("x"), "d");
+  assert.equal(h.onComplete(), "c");
+  assert.deepEqual(seen, [429]);
+  assert.equal(tapHandler(orig, null), orig, "没有 tap 必须原样返回");
+
+  const events = [];
+  const d = createRotatingDispatcher({
+    nodes: [{ port: 10800, uri: "http://127.0.0.1:10800" }],
+    agentFactory: (uri) => ({ uri, dispatch: (o, handler) => { handler.onHeaders(429); return true; }, close: async () => {} }),
+    fallbackAgent: { dispatch: () => true, close: async () => {} },
+    onStatus: (status, port) => events.push([status, port]),
+  });
+  d.dispatch({ headers: [] }, { onHeaders: () => "ok" });
+  assert.deepEqual(events, [[429, 10800]], "429 必须连同端口号报给轮换器（否则不知道该换哪台设备）");
 });

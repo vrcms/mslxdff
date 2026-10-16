@@ -20,9 +20,21 @@ export function headerValue(headers, name) {
   return "";
 }
 
+/** 让 dispatcher 看见上游状态码：复制一层 handler，只截 onHeaders，其余方法原样转发（全部调用都落在副本上，this 一致）。 */
+export function tapHandler(handler, tap) {
+  if (!tap || !handler || typeof handler !== "object") return handler;
+  const out = Object.assign(Object.create(Object.getPrototypeOf(handler)), handler);
+  const orig = handler.onHeaders;
+  out.onHeaders = function (statusCode, headers, resume, statusText) {
+    try { tap(statusCode); } catch {}
+    return typeof orig === "function" ? orig.call(this, statusCode, headers, resume, statusText) : undefined;
+  };
+  return out;
+}
+
 /**
  * @param {{ nodes?: Array<{port:number, uri:string}>, strategy?: "session"|"request",
- *           cooldownMs?: number, now?: () => number, log?: (s:string)=>void,
+ *           cooldownMs?: number, now?: () => number, log?: (s:string)=>void, onStatus?: (status:number, port:number)=>void,
  *           agentOptions?: object, selector?: object }} [opts]
  */
 export function createRotatingDispatcher({
@@ -31,6 +43,7 @@ export function createRotatingDispatcher({
   cooldownMs = 600_000,
   now = Date.now,
   log = () => {},
+  onStatus = null,
   agentFactory,
   fallbackAgent,
   agentOptions = { connections: 8, keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, pipelining: 1 },
@@ -40,7 +53,7 @@ export function createRotatingDispatcher({
   if (typeof ProxyAgent !== "function") throw new Error("undici ProxyAgent 不可用：无法建立出口池");
   // 空池兜底：直连（等价 R3 里被顶掉的 keepAlive 池）。
   const fallback = fallbackAgent !== undefined ? fallbackAgent : typeof Agent === "function" ? new Agent(agentOptions) : null;
-  let list = [];
+  let list = build(nodes);
 
   function build(nodesIn) {
     return (nodesIn || []).map((n, i) => ({
@@ -96,11 +109,11 @@ export function createRotatingDispatcher({
         throw new Error("warp-pool：节点池为空且无直连兜底");
       }
       const avail = availableIndexes();
-      // 全池冷却时兜底用第一个，避免直接失败（宁可撞限流也别把请求打死）。
-      if (!avail.length) return list[0].agent.dispatch(opts, handler);
+      // 全池冷却 ⇒ 直连兜底优先：硬派给已知不可用的节点 = 把请求挂到超时。
+      if (!avail.length) return (fallback || list[0].agent).dispatch(opts, handler);
       const sessionKey = strategy === "session" ? headerValue(opts?.headers, SESSION_HEADER) : "";
-      const idx = selector.pick(avail, sessionKey);
-      return list[idx].agent.dispatch(opts, handler);
+      const e = list[selector.pick(avail, sessionKey)];
+      return e.agent.dispatch(opts, tapHandler(handler, onStatus ? (sc) => onStatus(sc, e.port) : null));
     },
 
     /** 运行期换上一批出口（bootstrap 完成后调用）；旧 Agent 池关闭。 */

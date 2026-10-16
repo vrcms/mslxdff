@@ -1,7 +1,6 @@
 // warp-pool · 装配入口。
 //
-// 定位（见 MODULES.md §0/§10）：WARP 池是**增量**出口，不是替代成员自身出口。开关缺省**关**——
-// 2026-10-16 真机实测证伪「N 设备 = N 桶」（免费版 WARP 的 IPv4 出口是共享 NAT）；设 MSLXDFF_WARP_POOL=1 才建池。
+// 定位（MODULES.md §0/§10）：WARP 池是**增量**出口，不是替代成员自身出口；缺省**开**，MSLXDFF_WARP_POOL=0 关。
 import { resolveWarpConfig } from "./config.js";
 import { createRotatingDispatcher } from "./rotate.js";
 import { createHealthMonitor } from "./health.js";
@@ -9,6 +8,7 @@ import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 import { createReviver, labelExits } from "./revive.js";
+import { wireRotation } from "./identity.js";
 
 /** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
 const REDIAL_MIN_GAP_MS = 5 * 60_000;
@@ -44,7 +44,10 @@ export function createWarpPool({
   const cfg = resolveWarpConfig(env);
   if (!cfg.active) return null;
 
-  const dispatcher = createRotatingDispatcher({ nodes: [], strategy: cfg.strategy, cooldownMs: cfg.cooldownMs, log });
+  /** 身份轮换器：429 时换一台 WARP 设备换出口 IP（串行换身份，见 identity.js 头注）。 */
+  let rotator = null;
+
+  const dispatcher = createRotatingDispatcher({ nodes: [], strategy: cfg.strategy, cooldownMs: cfg.cooldownMs, log, onStatus: (status, port) => { if (status === 429 && cfg.rotate && rotator) void rotator.rotate(port); } });
   /** @type {Map<number, {stop: () => void}>} */
   const tunnels = new Map();
 
@@ -87,6 +90,16 @@ export function createWarpPool({
     });
     tunnels.set(node.port, t);
   }
+
+  // 429 ＝ 上游按出口 IP 计的名额耗尽 ⇒ 换一台设备的身份换出口（换身份＝换桶）。
+  rotator = wireRotation({
+    dispatcher,
+    register,
+    tunnels,
+    bringUp,
+    swap: (port, node) => { removeNode(cfg.dir, port); saveNode(cfg.dir, node); },
+    log,
+  });
 
   async function bootstrap() {
     if (closed) return;
@@ -149,7 +162,7 @@ export function createWarpPool({
     }
 
     // 5. 出口取证：把每台设备的真实出口地址打进日志（免费版 WARP 的 IPv4 是共享 NAT，N 台设备很可能折叠成同一个出口）
-    if (live.length) await labelExits({ ports: live.map((n) => n.port), log });
+    if (live.length) rotator.noteExits(await labelExits({ ports: live.map((n) => n.port), log }));
   }
 
   const monitor = createHealthMonitor({
@@ -224,6 +237,7 @@ export function createWarpPool({
         dir: cfg.dir,
         tunnels: tunnels.size,
         nodes: dispatcher.stats(),
+        exits: rotator ? rotator.stats() : [],
       };
     },
   };
