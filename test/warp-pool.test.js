@@ -4,18 +4,20 @@ import assert from "node:assert/strict";
 import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 
 import { generateWgKeyPair, isWgKey } from "../src/warp-pool/keys.js";
 import { DEFAULTS, resolveWarpConfig } from "../src/warp-pool/config.js";
-import { loadNode, loadNodes, renderWireproxyConf, saveNode } from "../src/warp-pool/nodes.js";
+import { loadNode, loadNodes, nodePaths, renderWireproxyConf, saveNode } from "../src/warp-pool/nodes.js";
 import { backoffMs, buildRegisterBody, parseRegisterResponse, registerWarpDevice } from "../src/warp-pool/register.js";
 import { createSelector } from "../src/warp-pool/strategy.js";
 import { createRotatingDispatcher, headerValue, tapHandler } from "../src/warp-pool/rotate.js";
 import { createHealthMonitor } from "../src/warp-pool/health.js";
-import { parseExitIp, createReviver, labelExits } from "../src/warp-pool/revive.js";
+import { parseExitIp, createReviver, labelExits, tailReason } from "../src/warp-pool/revive.js";
 import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-pool/index.js";
 import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
+import { isOurWireproxy, parseCmdline, portInUse, reclaimPort } from "../src/warp-pool/ports.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -448,15 +450,25 @@ test("wireproxy：writeTunnelConf 缺私钥直接抛——绝不写出「Private
   assert.throws(() => writeTunnelConf(dir, { port: 10813, v4: "172.16.0.2" }), /缺 WireGuard 私钥/);
 });
 
-test("revive：首次退出立即复活；连败按 30s→10min 指数退避（进程挂了才复活，不重注册）", async () => {
+test("revive：首次退出立即复活；复活后有稳定期（防「起一条死一条」刷屏），失败按 30s→10min 退避", async () => {
   let t = 1_000_000;
   const calls = [];
-  const r = createReviver({ revive: async (p) => (calls.push(p), true), now: () => t, minGapMs: 30_000, maxGapMs: 600_000 });
+  const armed = [];
+  const r = createReviver({
+    revive: async (p) => (calls.push(p), true),
+    isAlive: () => true,
+    now: () => t,
+    sleep: async () => {},
+    schedule: (fn, ms) => (armed.push([fn, ms]), { unref() {} }),
+    minGapMs: 30_000,
+    maxGapMs: 600_000,
+  });
   assert.equal(await r.onExit(10800), true, "首次必须立即复活");
   assert.deepEqual(calls, [10800]);
-  assert.equal(await r.onExit(10800), true, "复活成功后账已清 ⇒ 再退出仍立即复活");
-  t += 1;
-  const r2 = createReviver({ revive: async () => false, now: () => t, minGapMs: 30_000, maxGapMs: 600_000 });
+  assert.equal(await r.onExit(10800), false, "稳定期内的再退出先等一轮，不再立刻重启");
+  assert.deepEqual(armed.map((a) => a[1]), [30_000], "必须自己安排下一次重试，不能只打印「下次最早 Ns 后」");
+
+  const r2 = createReviver({ revive: async () => false, now: () => t, sleep: async () => {}, settleMs: 0, schedule: () => ({ unref() {} }), minGapMs: 30_000, maxGapMs: 600_000 });
   assert.equal(await r2.onExit(10801), false);
   assert.equal(await r2.onExit(10801), false, "退避窗口内不重复尝试");
   t += 30_000;
@@ -465,6 +477,50 @@ test("revive：首次退出立即复活；连败按 30s→10min 指数退避（�
   t += 60_000;
   await r2.onExit(10801);
   assert.equal(r2.stats()[0].attempts, 3, "退避按 30s→60s→… 递增");
+
+  const r3 = createReviver({ revive: async () => false, now: () => t, sleep: async () => {}, settleMs: 0, schedule: () => ({ unref() {} }), log: () => {} });
+  await r3.onExit(10802);
+  r3.stop();
+  assert.deepEqual(r3.stats(), [], "stop() 必须清账（池关闭后不许再有复活动作）");
+});
+
+test("revive：复活后被 isAlive 逮到「立刻又退出」⇒ 不认成功（真机教训：spawn 成功 ≠ 隧道活下来）", async () => {
+  const logs = [];
+  let t = 0;
+  const r = createReviver({
+    revive: async () => true,
+    isAlive: () => false,
+    settleMs: 1_200,
+    sleep: async () => {},
+    now: () => t,
+    schedule: () => ({ unref() {} }),
+    minGapMs: 30_000,
+    log: (m) => logs.push(m),
+  });
+  assert.equal(await r.onExit(10800), false, "不许拿「spawn 被调用了」冒充「活下来了」");
+  assert.ok(logs.some((l) => l.includes("立刻又退出")), "必须把「又退出」说清楚，否则人只会看到一片「已复活」");
+  assert.equal(r.stats()[0].attempts, 1);
+  t += 1;
+  assert.equal(await r.onExit(10800), false, "紧接着再退出必须走退避，不许立刻再来一轮");
+  assert.equal(r.stats()[0].attempts, 1, "退避窗口内的那次不算尝试");
+});
+
+test("revive：settleMs 后真的活着才算复活成功；失败的尝试要累计", async () => {
+  let t = 0;
+  let alive = true;
+  const r = createReviver({ revive: async () => true, isAlive: () => alive, settleMs: 1_200, sleep: async () => {}, now: () => t, schedule: () => ({ unref() {} }), minGapMs: 30_000, log: () => {} });
+  assert.equal(await r.onExit(10800), true);
+  assert.equal(r.stats()[0].attempts, 0, "成功即清账");
+  alive = false;
+  t += 31_000;
+  assert.equal(await r.onExit(10800), false);
+  assert.equal(r.stats()[0].attempts, 1, "失败的尝试必须累计，退避才会涨");
+});
+
+test("revive：tailReason 取子进程末行当退出原因（wireproxy 的报错都在 stderr）", () => {
+  assert.equal(tailReason("2026/10/16 listen tcp 127.0.0.1:10801: bind: address already in use\n"), "2026/10/16 listen tcp 127.0.0.1:10801: bind: address already in use");
+  assert.equal(tailReason("\n \n"), "");
+  assert.equal(tailReason(""), "");
 });
 
 test("revive：noteHealthy 清账；两个端口互不影响（一条死不该拖累另一条）", async () => {
@@ -601,4 +657,102 @@ test("rotate：tapHandler 截上游状态码 + 其余方法原样转发；dispat
   });
   d.dispatch({ headers: [] }, { onHeaders: () => "ok" });
   assert.deepEqual(events, [[429, 10800]], "429 必须连同端口号报给轮换器（否则不知道该换哪台设备）");
+});
+
+// ---------- ports（端口占用 / 上一代残留进程） ----------
+
+test("ports：只认「正在跑我们自己那条 conf」的 wireproxy——判据收紧，绝不误杀别人的进程", () => {
+  const conf = "/root/.config/mslxdff/warp-pool/node-10801.conf";
+  assert.equal(isOurWireproxy(["wireproxy", "-c", conf], conf), true);
+  assert.equal(isOurWireproxy(["/usr/local/bin/wireproxy", "-c", conf], conf), true);
+  assert.equal(isOurWireproxy(["wireproxy", "-c", "/tmp/other.conf"], conf), false, "conf 不是我们的 ⇒ 不许动");
+  assert.equal(isOurWireproxy(["/usr/bin/sshd", "-c", conf], conf), false, "可执行文件不是 wireproxy ⇒ 不许动");
+  assert.equal(isOurWireproxy([], conf), false);
+  assert.equal(isOurWireproxy(null, conf), false);
+});
+
+test("ports：parseCmdline 切 NUL 分隔的 /proc/<pid>/cmdline", () => {
+  assert.deepEqual(parseCmdline("wireproxy\0-c\0/a/node-1.conf\0"), ["wireproxy", "-c", "/a/node-1.conf"]);
+  assert.deepEqual(parseCmdline(""), []);
+  assert.deepEqual(parseCmdline(null), []);
+});
+
+test("ports：reclaimPort 只清自家残留、先礼后兵（SIGTERM 足够就不 SIGKILL）；非 linux 一律不动手", async () => {
+  const conf = nodePaths("/w", 10802).conf; // 用被测代码同一套拼路径（Windows 上是反斜杠，Linux 是斜杠）
+  const argv = {
+    11: ["wireproxy", "-c", conf],
+    12: ["wireproxy", "-c", nodePaths("/w", 9999).conf],
+    13: ["/sbin/init", "-c", conf],
+  };
+  const killed = [];
+  const dead = new Set();
+  const common = {
+    dir: "/w",
+    port: 10802,
+    platform: "linux",
+    pids: () => [11, 12, 13],
+    cmdline: (p) => argv[p],
+    kill: (pid, sig) => {
+      if (sig === 0) {
+        if (dead.has(pid)) throw new Error("gone");
+        return;
+      }
+      killed.push([pid, sig]);
+      dead.add(pid);
+    },
+    sleep: async () => {},
+    log: () => {},
+  };
+  assert.deepEqual(await reclaimPort(common), [11], "只挑出跑本池 conf 的那条残留");
+  assert.deepEqual(killed, [[11, "SIGTERM"]], "SIGTERM 就死了就不必 SIGKILL");
+  assert.deepEqual(await reclaimPort({ ...common, platform: "win32" }), [], "非 linux 直接放弃（不猜别人的端口）");
+});
+
+function fakeSocket(mode) {
+  return {
+    setTimeout: (ms, fn) => {
+      if (mode === "timeout") setTimeout(fn, 0);
+    },
+    destroy: () => {},
+    once: (evt, fn) => {
+      if (evt === mode) setTimeout(fn, 0);
+      return undefined;
+    },
+  };
+}
+
+test("ports：portInUse 连得上=占用 / 被拒或超时=空闲（起隧道前的守卫，据此拒绝硬起）", async () => {
+  assert.equal(await portInUse(1, { connectFn: () => fakeSocket("connect") }), true);
+  assert.equal(await portInUse(1, { connectFn: () => fakeSocket("error") }), false);
+  assert.equal(await portInUse(1, { connectFn: () => fakeSocket("timeout"), timeoutMs: 5 }), false, "连不上也不能把启动卡住");
+});
+
+test("index：端口被别的进程占着 ⇒ 拒绝起隧道（硬起只会 bind 失败 + 无限重启刷屏）", async () => {
+  const dir = tmp();
+  const started = [];
+  const logs = [];
+  const srv = createServer();
+  await new Promise((r) => srv.listen(10960, "127.0.0.1", r));
+  try {
+    const pool = createWarpPool({
+      env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10960" },
+      log: (m) => logs.push(m),
+      ensureBin: async () => "C:/fake/wireproxy",
+      register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::e", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
+      start: ({ port }) => {
+        started.push(port);
+        return { port, stop() {} };
+      },
+      probe: async () => ({ ok: true, status: 200 }),
+      wait: async () => {},
+      rnd: () => 0,
+    });
+    await pool.ready;
+    assert.deepEqual(started, [], "端口被占 ⇒ 一条隧道都不许起");
+    assert.ok(logs.some((l) => l.includes("已被非本池进程占用")), "必须说清为什么不硬起");
+    assert.equal(pool.stats().tunnels, 0);
+    await pool.close();
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
 });

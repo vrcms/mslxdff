@@ -7,7 +7,8 @@ import { createHealthMonitor } from "./health.js";
 import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
-import { createReviver, labelExits } from "./revive.js";
+import { createReviver, labelExits, tailReason } from "./revive.js";
+import { portInUse, reclaimPort } from "./ports.js";
 import { wireRotation } from "./identity.js";
 
 /** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
@@ -55,11 +56,19 @@ export function createWarpPool({
   async function reviveTunnel(port) {
     if (closed) return false;
     const node = loadNodes(cfg.dir, [port])[0];
-    if (!node) return false;
-    await bringUp(node);
-    return tunnels.has(port);
+    if (!node) {
+      log(`[warp-pool] :${port} 放弃复活：磁盘上没有该节点的身份（node-${port}.json 缺失或缺私钥）`);
+      return false;
+    }
+    try {
+      await bringUp(node);
+    } catch (e) {
+      log(`[warp-pool] :${port} 复活起隧道失败：${String(e?.message || e)}`);
+      return false;
+    }
+    return true; // 真活没活由 createReviver 在 settleMs 后用 isAlive 复查，这里不许冒充成功
   }
-  const reviver = createReviver({ revive: reviveTunnel, log });
+  const reviver = createReviver({ revive: reviveTunnel, isAlive: (port) => { const t = tunnels.get(port); return !!t && t.alive !== false; }, log });
   let binPath = "";
   let closed = false;
   let lastRedialAt = 0;
@@ -74,21 +83,28 @@ export function createWarpPool({
     }
   });
 
+  /** 起一条隧道的完整动作：清残留 → 写 conf → 确认端口真空着 → spawn → 记表。 */
   async function bringUp(node) {
+    await reclaimPort({ dir: cfg.dir, port: node.port, log }); // 清上一代孤儿（daemon 被强杀时子进程不会自己退）
     writeTunnelConf(cfg.dir, node);
     if (tunnels.has(node.port)) return;
+    if (await portInUse(node.port)) {
+      throw new Error(`端口 :${node.port} 已被非本池进程占用，拒绝再起（硬起只会 bind 失败、无限重启刷屏）`);
+    }
     const t = start({
       binPath,
       dir: cfg.dir,
       port: node.port,
       log,
-      onExit: ({ port, code }) => {
+      onExit: ({ port, code, signal, tail }) => {
         tunnels.delete(port);
-        log(`[warp-pool] 隧道 :${port} 退出（code=${code}），尝试复活`);
+        const why = tailReason(tail) || "进程没留下任何输出";
+        log(`[warp-pool] :${port} 隧道意外退出（退出码 ${code}${signal ? `，信号 ${signal}` : ""}）：${why}`);
         void reviver.onExit(port);
       },
     });
     tunnels.set(node.port, t);
+    log(`[warp-pool] :${node.port} 隧道已起：HTTP 代理 http://127.0.0.1:${node.port} → 经 WARP 出网（pid ${t.pid ?? "?"}）`);
   }
 
   // 429 ＝ 上游按出口 IP 计的名额耗尽 ⇒ 换一台设备的身份换出口（换身份＝换桶）。
@@ -110,14 +126,14 @@ export function createWarpPool({
       const why = !cfg.bin && !resolveAsset()
         ? `本平台（${process.platform}-${process.arch}）无预编译 wireproxy，如需启用请设 MSLXDFF_WARP_BIN`
         : String(e?.message || e);
-      log(`[warp-pool] 出口池跳过：${why}`);
+      log(`[warp-pool] 出口池本次跳过（不启用，请求走直连）：${why}`);
       return;
     }
     if (closed) return;
 
     // 1. 复用磁盘上已注册的节点
     let nodes = loadNodes(cfg.dir, cfg.ports);
-    log(`[warp-pool] 已有节点 ${nodes.length}/${cfg.count}`);
+    log(`[warp-pool] 复用磁盘上已注册的身份 ${nodes.length}/${cfg.count} 个（端口 ${cfg.ports.join(", ")}；缺的现场注册）`);
 
     // 2. 补足：逐个注册（拉长间隔，避免 CF 注册限流与同网段撞车）
     const used = new Set(nodes.map((n) => n.port));
@@ -131,9 +147,9 @@ export function createWarpPool({
         const node = nodeFromReg(port, reg, now);
         saveNode(cfg.dir, node);
         nodes.push(node);
-        log(`[warp-pool] 注册节点 :${port}（v6=${reg.v6}）`);
+        log(`[warp-pool] 注册新身份 :${port} 成功（设备 v6=${reg.v6}，WireGuard 密钥对在本地生成）`);
       } catch (e) {
-        log(`[warp-pool] 注册节点 :${port} 失败：${String(e?.message || e)}`);
+        log(`[warp-pool] :${port} 注册身份失败，本轮跳过这个端口：${String(e?.message || e)}`);
       }
     }
 
@@ -142,7 +158,7 @@ export function createWarpPool({
       try {
         await bringUp(n);
       } catch (e) {
-        log(`[warp-pool] 起隧道 :${n.port} 失败：${String(e?.message || e)}`);
+        log(`[warp-pool] :${n.port} 起隧道失败，这个端口本轮不可用：${String(e?.message || e)}`);
       }
     }
 
@@ -152,13 +168,13 @@ export function createWarpPool({
       if (!tunnels.has(n.port)) continue;
       const r = await probe({ port: n.port, baseUrl, path: cfg.probePath });
       if (r.ok) live.push(n);
-      else log(`[warp-pool] 节点 :${n.port} 隧道未通（${r.status || r.error || "?"}），不进池`);
+      else log(`[warp-pool] :${n.port} 隧道没探通（${r.status || r.error || "?"}），不进池：进池会把请求挂到超时，比直连更糟`);
     }
     if (live.length) {
       await dispatcher.setNodes(live.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
-      log(`[warp-pool] 出口池就绪：${live.length} 个节点`);
+      log(`[warp-pool] 出口池就绪：${live.length} 条隧道可用（选路策略 ${cfg.strategy}${cfg.rotate ? "，撞 429 会自动换身份换出口" : ""}）`);
     } else {
-      log("[warp-pool] 无可用节点，保持直连");
+      log("[warp-pool] 没有一条隧道探通 ⇒ 池为空，全部请求照旧直连（不影响可用性，只是没多出口）");
     }
 
     // 5. 出口取证：把每台设备的真实出口地址打进日志（免费版 WARP 的 IPv4 是共享 NAT，N 台设备很可能折叠成同一个出口）
@@ -221,6 +237,7 @@ export function createWarpPool({
       if (closed) return;
       closed = true;
       monitor.stop();
+      reviver.stop();
       for (const t of tunnels.values()) {
         try {
           t.stop();
