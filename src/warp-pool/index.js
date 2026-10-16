@@ -11,7 +11,7 @@ import { createRotatingDispatcher } from "./rotate.js";
 import { createHealthMonitor } from "./health.js";
 import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
-import { ensureBinary, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
+import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 /** 重拨节流：连续失败指数退避。缺省开之后，网络不通的机器绝不能让重注册把 CF 刷到 429。 */
 const REDIAL_MIN_GAP_MS = 5 * 60_000;
 const REDIAL_MAX_GAP_MS = 30 * 60_000;
@@ -34,6 +34,7 @@ export function createWarpPool({
   register = registerWarpDevice,
   ensureBin = ensureBinary,
   start = startTunnel,
+  probe = probeTunnel,
   now = Date.now,
   rnd = Math.random,
   wait = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -129,8 +130,16 @@ export function createWarpPool({
       }
     }
 
-    // 4. 换上真实出口（失败/退出中的节点仍会被 health 摘除）
-    const live = nodes.filter((n) => tunnels.has(n.port));
+    // 4. **入池前实测探活**：只判「进程还活着」不够——WARP 握手不通时 wireproxy 进程照样在跑却转不动流量
+    //    （实测经它 curl 挂到超时，不是快速失败）。那种节点一旦进池，dispatcher 会把**所有** opencode
+    //    请求派给它 ⇒ opencode 整体被黑洞而非直连兜底。探活打上游 models 路径，不烧 token。
+    const live = [];
+    for (const n of nodes) {
+      if (!tunnels.has(n.port)) continue;
+      const r = await probe({ port: n.port, baseUrl, path: cfg.probePath });
+      if (r.ok) live.push(n);
+      else log(`[warp-pool] 节点 :${n.port} 隧道未通（${r.status || r.error || "?"}），不进池`);
+    }
     if (live.length) {
       await dispatcher.setNodes(live.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
       log(`[warp-pool] 出口池就绪：${live.length} 个节点`);

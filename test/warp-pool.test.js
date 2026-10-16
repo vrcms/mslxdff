@@ -310,6 +310,7 @@ test("index：leader 模式用注入件走完 bootstrap（不触网、不起进�
       started.push(port);
       return { port, stop() {} };
     },
+    probe: async () => ({ ok: true, status: 200 }),
     wait: async (ms) => waits.push(ms),
     rnd: () => 0,
   });
@@ -346,6 +347,7 @@ test("index：缺省（不设任何 env）即建池——组长升级/重启即�
       started.push(port);
       return { port, stop() {} };
     },
+    probe: async () => ({ ok: true, status: 200 }),
     wait: async () => {},
     rnd: () => 0,
   });
@@ -378,4 +380,42 @@ test("redialPlan：隧道全活不重拨；有死隧道且过退避才放行（�
     { dead: [10801], reason: "ok" },
     "刚好满退避间隔 ⇒ 放行",
   );
+});
+
+test("index：入池前实测探活——探活不过的隧道绝不进池", async () => {
+  const dir = tmp();
+  const pool = createWarpPool({
+    env: { MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "2", MSLXDFF_WARP_BASE_PORT: "10970" },
+    log: () => {},
+    ensureBin: async () => "C:/fake/wireproxy",
+    register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::b", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
+    start: ({ port }) => ({ port, stop() {} }),
+    probe: async ({ port }) => ({ ok: port === 10971, status: port === 10971 ? 200 : 0 }),
+    wait: async () => {},
+    rnd: () => 0,
+  });
+  await pool.ready;
+  assert.equal(pool.stats().tunnels, 2, "两条隧道进程都活着");
+  const nodes = pool.stats().nodes;
+  assert.equal(nodes.length, 1, "只有探活通过的节点才进池");
+  assert.equal(nodes[0].port, 10971);
+  await pool.close();
+});
+
+test("index：探活全不过 ⇒ 池为空（dispatcher 直连兜底，绝不把请求派给转不动流量的隧道）", async () => {
+  const dir = tmp();
+  const pool = createWarpPool({
+    env: { MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10980" },
+    log: () => {},
+    ensureBin: async () => "C:/fake/wireproxy",
+    register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::c", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
+    start: ({ port }) => ({ port, stop() {} }),
+    probe: async () => ({ ok: false, status: 0, error: "handshake timeout" }),
+    wait: async () => {},
+    rnd: () => 0,
+  });
+  await pool.ready;
+  assert.equal(pool.stats().tunnels, 1, "隧道进程活着");
+  assert.equal(pool.stats().nodes.length, 0, "探活不过 ⇒ 池必须为空，否则 opencode 被黑洞");
+  await pool.close();
 });
