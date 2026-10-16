@@ -91,6 +91,7 @@ function runCommand(cmd, args, { log = () => {} } = {}) {
 
 /** 写出某节点的 wireproxy 配置（含私钥 ⇒ 0600）。 */
 export function writeTunnelConf(dir, node) {
+  if (!node?.privateKey) throw new Error(`节点 :${node?.port} 缺 WireGuard 私钥，拒绝写出一份跑不起来的配置`);
   const { conf } = nodePaths(dir, node.port);
   return writeSecret(conf, renderWireproxyConf({ ...node, port: node.port }));
 }
@@ -135,7 +136,7 @@ export function startTunnel({ binPath: exe, dir, port, log = () => {}, onExit = 
 }
 
 /** 探活一个已起的隧道：经该端口访问上游 models 路径（不烧 token）。 */
-export async function probeTunnel({ port, baseUrl = "https://opencode.ai", path = "/zen/v1/models", fetchImpl = compatFetch, timeoutMs = 8000, headers = {} } = {}) {
+export async function probeTunnel({ port, baseUrl = "https://opencode.ai", path = "/zen/v1/models", fetchImpl = compatFetch, timeoutMs = 8000, headers = {}, wantText = false } = {}) {
   const { ProxyAgent } = getUndici();
   const agent = new ProxyAgent({ uri: `http://127.0.0.1:${port}`, connections: 2, keepAliveTimeout: 10_000 });
   try {
@@ -144,7 +145,10 @@ export async function probeTunnel({ port, baseUrl = "https://opencode.ai", path 
       signal: AbortSignal.timeout(timeoutMs),
       dispatcher: agent,
     });
-    return { ok: res.ok, status: res.status };
+    const base = { ok: res.ok, status: res.status };
+    if (!wantText) return base;
+    const text = await res.text().catch(() => "");
+    return { ...base, text: String(text).slice(0, 2000) };
   } catch (e) {
     return { ok: false, status: 0, error: String(e?.message || e) };
   } finally {

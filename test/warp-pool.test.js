@@ -7,12 +7,14 @@ import { join } from "node:path";
 
 import { generateWgKeyPair, isWgKey } from "../src/warp-pool/keys.js";
 import { DEFAULTS, resolveWarpConfig } from "../src/warp-pool/config.js";
-import { loadNode, renderWireproxyConf, saveNode } from "../src/warp-pool/nodes.js";
+import { loadNode, loadNodes, renderWireproxyConf, saveNode } from "../src/warp-pool/nodes.js";
 import { backoffMs, buildRegisterBody, parseRegisterResponse, registerWarpDevice } from "../src/warp-pool/register.js";
 import { createSelector } from "../src/warp-pool/strategy.js";
 import { createRotatingDispatcher, headerValue } from "../src/warp-pool/rotate.js";
 import { createHealthMonitor } from "../src/warp-pool/health.js";
+import { parseExitIp, createReviver, labelExits } from "../src/warp-pool/revive.js";
 import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-pool/index.js";
+import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -33,11 +35,11 @@ test("keys：WireGuard 密钥形状合法且每次不同", () => {
 
 // ---------- config ----------
 
-test("config：缺省即开（组长升级/重启即生效）；显式关 / member 模式才不建池", () => {
+test("config：缺省关（2026-10-16 真机实测证伪「N 设备 = N 桶」后改回）；显式开且 leader 才建池", () => {
   const def = resolveWarpConfig({}, { logDirFn });
-  assert.equal(def.enabled, true, "缺省即开：组长不设任何 env 也生效");
-  assert.equal(def.active, true, "缺省 mode=leader ⇒ 直接生效");
-  assert.equal(resolveWarpConfig({ MSLXDFF_WARP_POOL: "0" }, { logDirFn }).active, false, "显式关必须不建池");
+  assert.equal(def.enabled, false, "缺省关：不设 env 就不该有人偷偷被切到共享出口");
+  assert.equal(def.active, false);
+  assert.equal(resolveWarpConfig({ MSLXDFF_WARP_POOL: "1" }, { logDirFn }).active, true, "显式开必须生效");
 
   const on = resolveWarpConfig({ MSLXDFF_WARP_POOL: "1" }, { logDirFn });
   assert.equal(on.active, true);
@@ -335,11 +337,11 @@ test("index：createWarpDispatcher 未启用时返回 undefined（调用方可�
   assert.equal(createWarpDispatcher({ env: { MSLXDFF_WARP_MODE: "member" }, log: () => {} }), undefined, "缺省开但成员模式不建池");
 });
 
-test("index：缺省（不设任何 env）即建池——组长升级/重启即生效的路径", async () => {
+test("index：开关开 + leader 即建池（组长升级/重启即生效的路径）", async () => {
   const dir = tmp();
   const started = [];
   const pool = createWarpPool({
-    env: { MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10950" },
+    env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10950" },
     log: () => {},
     ensureBin: async () => "C:/fake/wireproxy",
     register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::9", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
@@ -351,7 +353,7 @@ test("index：缺省（不设任何 env）即建池——组长升级/重启即�
     wait: async () => {},
     rnd: () => 0,
   });
-  assert.ok(pool, "不设 MSLXDFF_WARP_POOL 也必须建池（缺省即开）");
+  assert.ok(pool, "显式开必须建池");
   await pool.ready;
   assert.deepEqual(started, [10950]);
   assert.equal(pool.stats().tunnels, 1);
@@ -385,7 +387,7 @@ test("redialPlan：隧道全活不重拨；有死隧道且过退避才放行（�
 test("index：入池前实测探活——探活不过的隧道绝不进池", async () => {
   const dir = tmp();
   const pool = createWarpPool({
-    env: { MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "2", MSLXDFF_WARP_BASE_PORT: "10970" },
+    env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "2", MSLXDFF_WARP_BASE_PORT: "10970" },
     log: () => {},
     ensureBin: async () => "C:/fake/wireproxy",
     register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::b", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
@@ -405,7 +407,7 @@ test("index：入池前实测探活——探活不过的隧道绝不进池", asy
 test("index：探活全不过 ⇒ 池为空（dispatcher 直连兜底，绝不把请求派给转不动流量的隧道）", async () => {
   const dir = tmp();
   const pool = createWarpPool({
-    env: { MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10980" },
+    env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10980" },
     log: () => {},
     ensureBin: async () => "C:/fake/wireproxy",
     register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::c", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
@@ -418,4 +420,80 @@ test("index：探活全不过 ⇒ 池为空（dispatcher 直连兜底，绝不�
   assert.equal(pool.stats().tunnels, 1, "隧道进程活着");
   assert.equal(pool.stats().nodes.length, 0, "探活不过 ⇒ 池必须为空，否则 opencode 被黑洞");
   await pool.close();
+});
+
+test("nodes：saveNode/loadNode 必须往返 privateKey（2026-10-16 真机事故：漏读回 ⇒ conf 写成「PrivateKey = undefined」⇒ 复用节点的隧道全起不来）", () => {
+  const dir = tmp();
+  const key = generateWgKeyPair();
+  saveNode(dir, { port: 10810, id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::1", endpoint: "engage:2408", peerKey: "PK=", privateKey: key.privateKey });
+  const back = loadNode(dir, 10810);
+  assert.equal(back.privateKey, key.privateKey, "私钥必须读回：bringUp 靠它渲染 conf");
+  const conf = renderWireproxyConf(back);
+  assert.ok(conf.includes(`PrivateKey = ${key.privateKey}`), "conf 必须带真私钥");
+  assert.equal(conf.includes("PrivateKey = undefined"), false, "绝不能写出 undefined 私钥");
+});
+
+test("nodes：缺私钥的节点必须被 loadNodes 丢弃（宁可重新注册，也不写一份跑不起来的 conf）", () => {
+  const dir = tmp();
+  saveNode(dir, { port: 10811, id: "id", token: "tk" }); // 旧格式/无私钥
+  saveNode(dir, { port: 10812, id: "id", token: "tk", privateKey: "PRIV=" });
+  assert.deepEqual(loadNodes(dir, [10811, 10812]).map((n) => n.port), [10812]);
+});
+
+test("wireproxy：writeTunnelConf 缺私钥直接抛——绝不写出「PrivateKey = undefined」让它静默跑不起来", () => {
+  const dir = tmp();
+  assert.throws(() => writeTunnelConf(dir, { port: 10813, v4: "172.16.0.2" }), /缺 WireGuard 私钥/);
+});
+
+test("revive：首次退出立即复活；连败按 30s→10min 指数退避（进程挂了才复活，不重注册）", async () => {
+  let t = 1_000_000;
+  const calls = [];
+  const r = createReviver({ revive: async (p) => (calls.push(p), true), now: () => t, minGapMs: 30_000, maxGapMs: 600_000 });
+  assert.equal(await r.onExit(10800), true, "首次必须立即复活");
+  assert.deepEqual(calls, [10800]);
+  assert.equal(await r.onExit(10800), true, "复活成功后账已清 ⇒ 再退出仍立即复活");
+  t += 1;
+  const r2 = createReviver({ revive: async () => false, now: () => t, minGapMs: 30_000, maxGapMs: 600_000 });
+  assert.equal(await r2.onExit(10801), false);
+  assert.equal(await r2.onExit(10801), false, "退避窗口内不重复尝试");
+  t += 30_000;
+  assert.equal(await r2.onExit(10801), false, "满 30s 后再试一次");
+  assert.equal(r2.stats()[0].attempts, 2);
+  t += 60_000;
+  await r2.onExit(10801);
+  assert.equal(r2.stats()[0].attempts, 3, "退避按 30s→60s→… 递增");
+});
+
+test("revive：noteHealthy 清账；两个端口互不影响（一条死不该拖累另一条）", async () => {
+  let t = 0;
+  const tried = [];
+  const r = createReviver({ revive: async (p) => (tried.push(p), false), now: () => t, minGapMs: 30_000 });
+  await r.onExit(10800);
+  await r.onExit(10801);
+  assert.deepEqual(tried, [10800, 10801], "各自独立尝试");
+  assert.equal(r.stats().length, 2);
+  r.noteHealthy(10800);
+  assert.deepEqual(r.stats().map((s) => s.port), [10801], "noteHealthy 只清该端口");
+});
+
+test("revive：parseExitIp 只认 ip= 行（CF trace 正文形态）", () => {
+  assert.equal(parseExitIp("fl=1\nip=104.28.243.105\nts=1\n"), "104.28.243.105");
+  assert.equal(parseExitIp("ip=2606:4700:110::1\n"), "2606:4700:110::1");
+  assert.equal(parseExitIp(""), "");
+  assert.equal(parseExitIp("no ip line here"), "", "没有 ip= 行必须是空串，不能瞎猜");
+});
+
+test("revive：labelExits 汇总各节点出口，全同则告警（真机教训：N 设备折叠成一个共享出口）", async () => {
+  const logs = [];
+  const same = await labelExits({ ports: [10801, 10802], fetchImpl: async () => ({ ok: true, text: async () => "ip=104.28.243.105\n" }), log: (m) => logs.push(m) });
+  assert.deepEqual(same, [{ ip: "104.28.243.105", nodes: [10801, 10802] }]);
+  assert.ok(logs.some((l) => l.includes("出口不分散")), "全同必须告警");
+
+});
+
+test("revive：labelExits 取证失败不算错（不影响节点进池），只记数", async () => {
+  const logs = [];
+  const g = await labelExits({ ports: [10801, 10802], fetchImpl: async () => { throw new Error("boom"); }, log: (m) => logs.push(m) });
+  assert.deepEqual(g, []);
+  assert.ok(logs.some((l) => l.includes("出口取证失败")));
 });

@@ -1,18 +1,16 @@
 // warp-pool · 装配入口。
 //
-// 定位（见 MODULES.md §0）：WARP 池是**增量**出口，不是替代成员自身出口；
-// 开关缺省即开（MSLXDFF_WARP_POOL 缺省 1；设 0 则零副作用）；只有组长（MSLXDFF_WARP_MODE=leader）才真建池。
-//
-// 关键约束：bootstrap（注册设备 + 起隧道）很慢（注册有 6–15s 间隔、可能退避 60–120s），
-// 因此**绝不阻塞 daemon 启动**——createWarpPool 同步返回，dispatcher 先是空池（直连兜底），
-// bootstrap 完成后 setNodes() 换上真实出口。
+// 定位（见 MODULES.md §0/§10）：WARP 池是**增量**出口，不是替代成员自身出口。开关缺省**关**——
+// 2026-10-16 真机实测证伪「N 设备 = N 桶」（免费版 WARP 的 IPv4 出口是共享 NAT）；设 MSLXDFF_WARP_POOL=1 才建池。
 import { resolveWarpConfig } from "./config.js";
 import { createRotatingDispatcher } from "./rotate.js";
 import { createHealthMonitor } from "./health.js";
 import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
-/** 重拨节流：连续失败指数退避。缺省开之后，网络不通的机器绝不能让重注册把 CF 刷到 429。 */
+import { createReviver, labelExits } from "./revive.js";
+
+/** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
 const REDIAL_MIN_GAP_MS = 5 * 60_000;
 const REDIAL_MAX_GAP_MS = 30 * 60_000;
 
@@ -22,9 +20,13 @@ function gapMs(cfg, rnd = Math.random) {
   return Math.round(cfg.registerMinGapMs + rnd() * span);
 }
 
+/** 注册响应 → 节点对象（bootstrap 与重拨共用，避免同一份字段表写两遍）。 */
+function nodeFromReg(port, reg, now) {
+  return { port, id: reg.id, token: reg.token, v4: reg.v4, v6: reg.v6, endpoint: reg.endpoint, peerKey: reg.peerKey, privateKey: reg.privateKey, registeredAt: new Date(now()).toISOString() };
+}
 
 /**
- * 建池。开关缺省即开，故「未启用」= 显式 MSLXDFF_WARP_POOL=0 或 非 leader；那时返回 null，调用方据此不注入。
+ * 建池。开关缺省关，故「未启用」= 未设 MSLXDFF_WARP_POOL=1 或 非 leader；那时返回 null，调用方据此不注入。
  * @returns {null | { dispatcher: object, ready: Promise<void>, close: () => Promise<void>, stats: () => object }}
  */
 export function createWarpPool({
@@ -45,6 +47,16 @@ export function createWarpPool({
   const dispatcher = createRotatingDispatcher({ nodes: [], strategy: cfg.strategy, cooldownMs: cfg.cooldownMs, log });
   /** @type {Map<number, {stop: () => void}>} */
   const tunnels = new Map();
+
+  /** 复活：用磁盘已有 conf 重起，不重注册（进程挂了 ≠ 设备失效，省 CF 配额）。 */
+  async function reviveTunnel(port) {
+    if (closed) return false;
+    const node = loadNodes(cfg.dir, [port])[0];
+    if (!node) return false;
+    await bringUp(node);
+    return tunnels.has(port);
+  }
+  const reviver = createReviver({ revive: reviveTunnel, log });
   let binPath = "";
   let closed = false;
   let lastRedialAt = 0;
@@ -69,7 +81,8 @@ export function createWarpPool({
       log,
       onExit: ({ port, code }) => {
         tunnels.delete(port);
-        log(`[warp-pool] 隧道 :${port} 退出（code=${code}）`);
+        log(`[warp-pool] 隧道 :${port} 退出（code=${code}），尝试复活`);
+        void reviver.onExit(port);
       },
     });
     tunnels.set(node.port, t);
@@ -102,17 +115,7 @@ export function createWarpPool({
       try {
         if (nodes.length > 0) await wait(gapMs(cfg, rnd));
         const reg = await register({ log });
-        const node = {
-          port,
-          id: reg.id,
-          token: reg.token,
-          v4: reg.v4,
-          v6: reg.v6,
-          endpoint: reg.endpoint,
-          peerKey: reg.peerKey,
-          privateKey: reg.privateKey,
-          registeredAt: new Date(now()).toISOString(),
-        };
+        const node = nodeFromReg(port, reg, now);
         saveNode(cfg.dir, node);
         nodes.push(node);
         log(`[warp-pool] 注册节点 :${port}（v6=${reg.v6}）`);
@@ -130,9 +133,7 @@ export function createWarpPool({
       }
     }
 
-    // 4. **入池前实测探活**：只判「进程还活着」不够——WARP 握手不通时 wireproxy 进程照样在跑却转不动流量
-    //    （实测经它 curl 挂到超时，不是快速失败）。那种节点一旦进池，dispatcher 会把**所有** opencode
-    //    请求派给它 ⇒ opencode 整体被黑洞而非直连兜底。探活打上游 models 路径，不烧 token。
+    // 入池前实测探活：WARP 握手不通时 wireproxy 进程照样在跑却转不动流量（挂到超时），那种节点进池会黑洞全部请求
     const live = [];
     for (const n of nodes) {
       if (!tunnels.has(n.port)) continue;
@@ -146,6 +147,9 @@ export function createWarpPool({
     } else {
       log("[warp-pool] 无可用节点，保持直连");
     }
+
+    // 5. 出口取证：把每台设备的真实出口地址打进日志（免费版 WARP 的 IPv4 是共享 NAT，N 台设备很可能折叠成同一个出口）
+    if (live.length) await labelExits({ ports: live.map((n) => n.port), log });
   }
 
   const monitor = createHealthMonitor({
@@ -154,9 +158,7 @@ export function createWarpPool({
     probePath: cfg.probePath,
     log,
     onExhausted: async () => {
-      // 重拨 = 重新注册 = 换新出口 IP（代价与限流见 MODULES.md）。
-      // 隧道全活却探活全挂 ⇒ 网络路径问题（实测墙内到 CF 的 UDP 被选择性屏蔽），
-      // 重注册换不来出路，只会把 CF 注册接口刷到 429 拉黑——故必须过 redialPlan 这道门。
+      // 重拨 = 重新注册换出口。只重拨「进程已死」的隧道：全活却全挂 = 网络路径问题，重注册只会把 CF 刷到 429
       const plan = redialPlan({ ports: cfg.ports, alivePorts: [...tunnels.keys()], lastRedialAt, redialGapMs, now });
       if (plan.reason === "all-alive") {
         log("[warp-pool] 隧道均存活但全池不通，判定为网络路径问题，跳过重拨");
@@ -177,17 +179,7 @@ export function createWarpPool({
           tunnels.delete(port);
           removeNode(cfg.dir, port);
           const reg = await register({ log });
-          saveNode(cfg.dir, {
-            port,
-            id: reg.id,
-            token: reg.token,
-            v4: reg.v4,
-            v6: reg.v6,
-            endpoint: reg.endpoint,
-            peerKey: reg.peerKey,
-            privateKey: reg.privateKey,
-            registeredAt: new Date(now()).toISOString(),
-          });
+          saveNode(cfg.dir, nodeFromReg(port, reg, now));
           await bringUp({ port, ...reg });
         } catch (e) {
           log(`[warp-pool] 重拨 :${port} 失败：${String(e?.message || e)}`);
@@ -195,7 +187,7 @@ export function createWarpPool({
         await wait(gapMs(cfg, rnd));
       }
       if (!closed && [...tunnels.keys()].length) {
-        // 重拨确实把隧道拉起来了 ⇒ 退避复位，别让一次网络抖动永久拖慢恢复。
+        // 重拨确实把隧道拉起来了 ⇒ 退避复位
         redialGapMs = REDIAL_MIN_GAP_MS;
         await dispatcher.setNodes([...tunnels.keys()].map((port) => ({ port, uri: `http://127.0.0.1:${port}` })));
       }
@@ -237,19 +229,14 @@ export function createWarpPool({
   };
 }
 
-
-/**
- * 只取轮换 dispatcher 的便捷入口（隧道进程由模块内的 process exit 钩子兜底清理）。
- * 未启用（开关关 / 非 leader）时返回 undefined —— 调用方直接透传即是"关闭态"。
- */
+/** 只取轮换 dispatcher 的便捷入口；未启用时返回 undefined（调用方直接透传即"关闭态"）。 */
+/** 隧道进程由模块内的 process exit 钩子兜底清理。 */
 export function createWarpDispatcher(opts) {
   return createWarpPool(opts)?.dispatcher;
 }
 
 /**
- * 重拨门（纯函数，便于单测）：只有「有隧道进程已死」且「距上次重拨超过当前退避间隔」才放行。
- * 隧道全活却探活全挂 ⇒ 网络路径问题（实测：墙内到 CF 的 UDP 被选择性屏蔽），
- * 此时重拨换不来出路，只会把 CF 注册接口刷到 429 拉黑。
+ * 重拨门（纯函数，便于单测）：只「有隧道进程已死」且「距上次重拨超过退避间隔」才放行——全活却全挂是网络问题。
  * @returns {{ dead: number[], reason: "ok" | "all-alive" | "throttled" }}
  */
 export function redialPlan({ ports = [], alivePorts = [], lastRedialAt = 0, redialGapMs = REDIAL_MIN_GAP_MS, now = Date.now } = {}) {

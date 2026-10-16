@@ -2,9 +2,9 @@
 import { join } from "node:path";
 import { logDir } from "../logs.js";
 
-/** 缺省即开：组长升级/重启后无需改任何环境变量即可生效；不想用的节点设 MSLXDFF_WARP_POOL=0。 */
+/** 缺省关：2026-10-16 真机实测证伪「N 设备 = N 桶」（免费版 WARP 的 IPv4 出口是共享 NAT，见 ADR-0059 修订）。 */
 export const DEFAULTS = {
-  enabled: true,
+  enabled: false,
   mode: "leader",
   count: 4,
   basePort: 10800,

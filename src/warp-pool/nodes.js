@@ -40,6 +40,7 @@ export function loadNode(dir, port) {
       v6: String(j.v6 || ""),
       endpoint: String(j.endpoint || ""),
       peerKey: String(j.peerKey || ""),
+      privateKey: String(j.privateKey || ""), // 必须读回：bringUp 靠它渲染 conf，漏了就是 PrivateKey = undefined（2026-10-16 真机事故：复用节点的隧道全起不来）
       registeredAt: String(j.registeredAt || ""),
       ...(j.cooldownUntil ? { cooldownUntil: Number(j.cooldownUntil) } : {}),
     };
@@ -65,7 +66,7 @@ export function loadNodes(dir, ports) {
   const out = [];
   for (const p of ports) {
     const n = loadNode(dir, p);
-    if (n && n.id && n.token) out.push(n);
+    if (n && n.id && n.token && n.privateKey) out.push(n);
   }
   return out;
 }
