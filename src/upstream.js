@@ -103,6 +103,7 @@ export function createUpstreamClient({
   fetchImpl,
   hooks,
   keepAlive = true,
+  dispatcher,
 } = {}) {
   const { buildHeaders, anonFirst } = createOpencodeHeaderBuilder({ authToken });
   function shouldTryAnonFree() {
@@ -125,6 +126,7 @@ export function createUpstreamClient({
   // 深模块：网络层委托 StreamingTransport
   const transport = createTransport({
     keepAlive,
+    dispatcher,
     fetchImpl,
     timeoutMs: connectTimeoutMs,
     retry,

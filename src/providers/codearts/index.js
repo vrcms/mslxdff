@@ -98,20 +98,27 @@ export function createCodeartsProvider({
   // 三路发现（主账号）；结果写目录（benefit 判定按账号隔离）
   let discovering = null;
   async function discover(force = false) {
-    const primary = pool.pickPrimary();
-    if (!primary) throw new Error("codearts: no alive account — run: mslxdff -provider codearts login");
-    if (!force && !catalog.isStale(primary.userId, clock())) return catalog.accountModels(primary.userId);
+    const candidates = pool.aliveAccounts();
+    if (!candidates.length) throw new Error("codearts: no alive account — run: mslxdff -provider codearts login");
     if (discovering) return discovering;
     discovering = (async () => {
-      try {
-        const account = await pool.getCredential(primary.blob);
-        const { models, builtinOk, benefitOk } = await discoverAccountModels({ account, snapBase: resolvedBase, benefitHost, autoClaim, fetchImpl });
-        catalog.setAccount(account.userId, models, { keepBenefit: builtinOk && !benefitOk, now: clock() });
-        return models;
-      } finally {
-        discovering = null;
+      let lastErr = null;
+      // 逐个账号试（blob 顺序 = 主账号优先）：state 里可能留着已被轮转消费的僵尸凭证（实测 STS5.1806
+      // "the refresh token has been used"，login 只追加不清旧，死号会永远排在第一个）。一个死号绝不能
+      // 把整个目录变成空表——福利套餐轮换出的新模型全靠这里发现。
+      for (const candidate of candidates) {
+        if (!force && !catalog.isStale(candidate.userId, clock())) return catalog.accountModels(candidate.userId);
+        try {
+          const account = await pool.getCredential(candidate.blob);
+          const { models, builtinOk, benefitOk } = await discoverAccountModels({ account, snapBase: resolvedBase, benefitHost, autoClaim, fetchImpl });
+          catalog.setAccount(account.userId, models, { keepBenefit: builtinOk && !benefitOk, now: clock() });
+          return models;
+        } catch (err) {
+          lastErr = err; // 死号/该号三路全空 → 换下一个号
+        }
       }
-    })();
+      throw lastErr || new Error("codearts: no account could list models — run: mslxdff -provider codearts login");
+    })().finally(() => { discovering = null; });
     return discovering;
   }
 

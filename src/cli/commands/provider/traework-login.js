@@ -139,18 +139,17 @@ export async function handleTraeworkLogin(id, sub, rest = [], deps = {}) {
   const { saveTraeworkAccount } = await import("../../../providers/traework/account-store.js");
   const save = deps.saveAccount || saveTraeworkAccount;
   const saved = await save({ uid, enterpriseId, nickname, accessToken: token, refreshToken, expiresAt, domain: "trae.cn", apiHost: API_HOST, machineId, deviceId });
-  // 自动签到 + 查积分
+  // 自动签到 + 查积分（到账与否只认「领取后复查」，口径见 providers/traework/checkin.js 头注）
   try {
-    const { checkinStatus, checkinClaim, entUsage } = await import("../../../providers/traework/checkin.js");
-    const cred = { accessToken: token, deviceId };
+    const { checkinStatus, checkinClaimVerified, entUsage } = await import("../../../providers/traework/checkin.js");
+    // 必须带 uid：UG 接口的市场身份（x-device-id 等）是按 uid 派生的，缺 uid 只能拿到不可复现的兜底值
+    const cred = { accessToken: token, uid, deviceId };
     const st = await checkinStatus({ cred, fetchImpl });
     log(`签到状态: checked_in=${st.checkedIn} credits=${st.credits} enable=${st.enable}`);
-    if (!st.checkedIn && st.enable) {
-      await checkinClaim({ cred, fetchImpl });
-      log("签到: success");
-    }
+    const r = await checkinClaimVerified({ cred, fetchImpl, before: st });
+    log(r.claimed ? "签到: ✓ 已到账" : r.already ? "签到: 今日已签过" : `签到: ✗ 未到账（${r.msg || "复查 checked_in=false"}）→ 稍后 mslxdff -provider traework checkin 重试`);
     const ent = await entUsage({ cred, fetchImpl });
-    log(`当前积分: ${ent.remain}`);
+    log(`积分额度上限: ${ent.totalCredits}（${ent.packCount} 个权益包 · 非剩余可用）`);
   } catch (e) { log(`签到/查积分: ${String(e?.message || e).slice(0, 200)}`); }
   log("");
   log("=".repeat(60));
@@ -160,43 +159,6 @@ export async function handleTraeworkLogin(id, sub, rest = [], deps = {}) {
   log(`  账号数: ${saved.accounts}`);
   log("=".repeat(60));
   log("下一步：mslxdff -restart（用户终端跑），然后 mslxdff -provider traework models 验证");
-  if (!deps.noExit) process.exit(0);
-  return true;
-}
-
-// 手动签到：-provider traework checkin
-export async function handleTraeworkCheckin(id, sub, rest = [], deps = {}) {
-  if (String(id || "").toLowerCase() !== "traework") return false;
-  if (sub !== "checkin") return false;
-  const fetchImpl = deps.fetchImpl || compatFetch;
-  const log = deps.log || ((m) => console.log(m));
-  const { loadProviderConfig, loadProviderKeys, defaultStateFile } = await import("../../../state.js");
-  const cfg = loadProviderConfig("traework");
-  const keys = deps.keys || loadProviderKeys("traework");
-  const authList = deps.auths || cfg?.auths || [];
-  if (!keys.length || !authList.length) { console.error("没有 traework 账号，请先 mslxdff -provider traework login"); process.exit(1); }
-  const { checkinStatus, checkinClaim, entUsage } = await import("../../../providers/traework/checkin.js");
-  for (let i = 0; i < Math.min(keys.length, authList.length); i++) {
-    const auth = authList[i];
-    const at = keys[i];
-    if (!auth?.uid || !at) continue;
-    const cred = { accessToken: at, deviceId: auth?.deviceId || "", uid: auth.uid };
-    log(`账号 ${auth.uid.slice(0, 8)}...`);
-    try {
-      const st = await checkinStatus({ cred, fetchImpl });
-      log(`  签到状态: checked_in=${st.checkedIn} credits=${st.credits} enable=${st.enable}`);
-      if (!st.checkedIn && st.enable) {
-        await checkinClaim({ cred, fetchImpl });
-        log(`  签到: success`);
-        const st2 = await checkinStatus({ cred, fetchImpl });
-        log(`  签到后积分: ${st2.credits}`);
-      }
-      const ent = await entUsage({ cred, fetchImpl });
-      log(`  总积分: ${ent.remain}`);
-    } catch (e) {
-      log(`  失败: ${String(e?.message || e).slice(0, 120)}`);
-    }
-  }
   if (!deps.noExit) process.exit(0);
   return true;
 }

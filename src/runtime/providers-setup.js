@@ -13,6 +13,7 @@ import { createOpenCodeProvider } from "../providers/opencode.js";
 import { loadProviderKeys, loadProviderAuths, loadProviderConfigs } from "../state.js";
 import { refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerLimitCooldownMs, peerHeatMs, banWindowMs, banThreshold } from "../cli/policy.js";
 import { errMsg } from "../cli/util.js";
+import { createWarpDispatcher } from "../warp-pool/index.js";
 
 
 import { shouldEnableCustomProvider, loadAuthDocs } from "./provider-gate.js";
@@ -49,6 +50,8 @@ export async function setupProviders() {
   let upstream;
   const baseUrl = process.env.UPSTREAM_BASE_URL || "https://opencode.ai";
   let providers = [];
+
+  const warpDispatcher = createWarpDispatcher({ baseUrl });
   if (providerPlugin) {
     if (!upstream) {
       try {
@@ -60,9 +63,9 @@ export async function setupProviders() {
         appendEvent({ ts: Date.now(), type: "plugin-upstream-error", plugin: providerPlugin.name, error: errMsg(err) });
       }
     }
-    if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks });
+    if (!upstream) upstream = createUpstreamClient({ hooks: upstreamHooks, dispatcher: warpDispatcher });
   } else {
-    const opencodeClient = createUpstreamEngine({ hooks: upstreamHooks });
+    const opencodeClient = createUpstreamEngine({ hooks: upstreamHooks, dispatcher: warpDispatcher });
     const opencodeModels = createModelsService({
       baseUrl,
       headers: opencodeClient.headers,

@@ -30,8 +30,11 @@ Usage:
   mslxdff -provider add <id> <baseUrl> <key> [allowedModel...]  add a generic OpenAI-compatible provider (myapi/gpt-4, baseUrl https://api.example.com/v1; extra models = allowlist)
   mslxdff -provider add workbuddy https://copilot.tencent.com <key> [allow...]  add WorkBuddy专用供应商（workbuddy/hy3 前缀路由，auths 与 keys 一一对应）
   mslxdff -provider <id> [key...|add|remove|list|clear|share|set-url]  configure provider API keys/URL (multiple keys = rotating, set-url for generic)
+  ⚠ 覆盖式 set keys 有双闸（src/cli/commands/provider/keys-guard.js）：认不出的子命令动词一律拒写（防「-provider <id> quota」这类没接线的命令把 keys 当参数覆盖）；auth 号型六家（workbuddy/traework/qoder/qwenwork/globalqwenwork/raccoon）的 keys 是 login 派生的 accessToken，手填需显式 --force
   mslxdff -provider <id> allowlist [list|set|add|remove|clear]  manage allowed models (empty=allow all, non-empty=only listed) 
   mslxdff -workbuddy checkin        daily 100 credits（双域幂等，已签 code 10001 视为成功）
+  mslxdff -provider traework checkin  补领 TRAE SOLO 今日 100 积分（到账只认领取后复查 checked_in，谎报不记成功）
+  mslxdff -provider traework quota [--json]  只读查签到状态与积分额度（走状态接口，不发模型请求不烧配额；输出是额度上限非剩余）
   mslxdff -providers list          list all configured upstream providers (opencode, openrouter, generic, workbuddy)
   mslxdff -creategroup <name>      create a group on this node (the group name is the password)
   mslxdff -addtogroup [<host> [<name>]] [--broadband]  join a group via its leader host (default port 8989) — broadband: 宽带动态IP成员（经Leader中继，无需公网入站）；省略参数＝手机宽带向导（问地址+组名，自动起服务，报出口 IP）

@@ -1,3 +1,5 @@
+import { keysWriteDenial } from "./keys-guard.js";
+
 export async function handleProviderKeys(id, sub, rest, args) {
   if (sub === "list" || sub === "status") {
     const { loadProviderKeys, loadProviderConfig, loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("../../../state.js");
@@ -108,6 +110,11 @@ export async function handleProviderKeys(id, sub, rest, args) {
     process.exit(0);
   }
   if (sub && !sub.startsWith("-")) {
+    const denial = keysWriteDenial(id, sub, rest);
+    if (denial) {
+      for (const l of denial) console.error(l);
+      process.exit(1);
+    }
     const { loadProviderKeys, loadProviderConfig, saveProviderConfig, saveProviderKeys, loadProviderConfigs } = await import("../../../state.js");
     const keys = rest.filter((k) => !k.startsWith("-"));
     if (!keys.length) {

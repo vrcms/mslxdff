@@ -3,7 +3,7 @@
 import crypto from "node:crypto";
 import { joinUrl } from "../base.js";
 import { createTransport } from "../../transport/index.js";
-import { SNAP_BASE, EP_CHAT_V2, chatBaseHeaders, MAAS_TYPE_HEADER, MAAS_BENEFIT } from "./const.js";
+import { SNAP_BASE, EP_CHAT_V2, chatBaseHeaders, MAAS_TYPE_HEADER, MAAS_BENEFIT, MAX_TOKENS_CEILING } from "./const.js";
 import { signRequest } from "./sign.js";
 import { newChatId, preflightResponse, sseToOpenAIResponse, aggregateToCompletion, UpstreamEventError } from "./stream.js";
 
@@ -36,8 +36,14 @@ export function buildUpstreamBody(body, { chatId, upstreamModel }) {
     chat_id: chatId,
   };
   for (const k of PASSTHROUGH_KEYS) {
+    if (k === "max_completion_tokens") continue; // v2 端点不认这个名字（透传 → InferHub.001001005.400，2026-10-16 现网 A/B 复现）
     if (body?.[k] !== undefined && body?.[k] !== null) out[k] = body[k];
   }
+  // Responses 风格客户端只发 max_completion_tokens：映射成 v2 认的 max_tokens（显式 max_tokens 优先）
+  if (out.max_tokens === undefined && body?.max_completion_tokens != null) out.max_tokens = body.max_completion_tokens;
+  // 超上限的 max_tokens 上游一律回 InferHub.001001005.400（参数非法），在这里夹住（env 可放宽）
+  const ceiling = Number.parseInt(process.env.MSLXDFF_CODEARTS_MAX_TOKENS_CEILING ?? "", 10) || MAX_TOKENS_CEILING;
+  if (typeof out.max_tokens === "number" && out.max_tokens > ceiling) out.max_tokens = ceiling;
   return out;
 }
 

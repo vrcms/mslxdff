@@ -48,6 +48,7 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider zcode quota [--json]          查看套餐/余量（未登录给重登指引）");
     console.error("            mslxdff -provider raccoon login                   Raccoon（商汤小浣熊）扫码登录（终端二维码，免验证码）");
     console.error("            mslxdff -provider raccoon quota|checkin [--json]   查积分余额 / 领每日登录积分");
+    console.error("            mslxdff -provider traework login|checkin|quota [--json]  SOLO 国内号：登录 / 每日签到领积分 / 查签到与积分额度（quota 只读，不烧配额）");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);
   }
@@ -76,9 +77,11 @@ export async function handleProvider(args) {
   if (await handleWorkbuddyLogin(id, sub, rest)) return true;
   const { handleCodeartsLogin } = await import("./codearts-login.js");
   if (await handleCodeartsLogin(id, sub, rest)) return true;
-  const { handleTraeworkLogin, handleTraeworkCheckin } = await import("./traework-login.js");
+  const { handleTraeworkLogin } = await import("./traework-login.js");
   if (await handleTraeworkLogin(id, sub, rest)) return true;
+  const { handleTraeworkCheckin, handleTraeworkQuota } = await import("./traework-checkin.js");
   if (await handleTraeworkCheckin(id, sub, rest)) return true;
+  if (await handleTraeworkQuota(id, sub, rest)) return true;
 const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleQoderLogin(id, sub, rest)) return true;
   const { handleQoderCheckin } = await import("./qoder-checkin.js");

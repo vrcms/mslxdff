@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { saveProviderConfig } from "../src/state.js";
 import { createServer } from "node:http";
 import { createCodeartsProvider } from "../src/providers/codearts.js";
+import { buildUpstreamBody } from "../src/providers/codearts/chat.js";
 import { newDpopPrivateJwk } from "../src/providers/codearts/dpop.js";
 
 function stub() {
@@ -37,9 +38,9 @@ function sse(frames, delayMs = 0) {
   return body;
 }
 
-function makeBlob({ expiringInMs = 3600_000, refreshToken = "rt-1" } = {}) {
+function makeBlob({ expiringInMs = 3600_000, refreshToken = "rt-1", userId = "u1" } = {}) {
   return JSON.stringify({
-    userId: "u1", userName: "tester", domainId: "d1",
+    userId, userName: "tester", domainId: "d1",
     refreshToken, clientId: "codearts-agent",
     codeVerifier: "verifier-1", dpopJwk: newDpopPrivateJwk(),
     accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST",
@@ -268,5 +269,70 @@ describe("codearts provider 端到端", () => {
     const body = await res.json();
     assert.match(body.error.message, /002002009/);
     await p.close();
+  });
+
+  test("冷目录（未预热）：福利种子 deepseek-v4.1-flash 也按福利路由（带 maas_type）", async () => {
+    const p = makeProvider(makeBlob());
+    srv.hits.length = 0;
+    const res = await p.chat({ model: "codearts/deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }], stream: true });
+    assert.equal(res.status, 200);
+    const hit = srv.hits.find((h) => h.url === "/api/v2/chat/completions");
+    assert.equal(hit.headers["maas_type"], "benefit"); // 目录还没发现 → 种子兜底（冷启动也要按福利路由）
+    assert.equal(JSON.parse(hit.body).model, "deepseek-v4.1-flash");
+    await p.close();
+  });
+
+  test("主 blob 终态失效 → 自动换下一个账号发现（死号不再清空整个目录）", async () => {
+    const dead = makeBlob({ expiringInMs: -1000, refreshToken: "rt-dead" });
+    const live = makeBlob({ expiringInMs: -1000, refreshToken: "rt-live", userId: "u2" });
+    saveProviderConfig("codearts", { baseUrl: srv.url, keys: [dead, live] }, { file: stateFile });
+    srv.set((req, res, hit) => {
+      if (req.method === "POST" && req.url === "/v1/oauth2/tokens") {
+        if (String(hit.body).includes("rt-dead")) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_grant", error_code: "STS5.1806", error_msg: "the refresh token has been used" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          user_id: "u2", user_name: "tester", domain_id: "d2", refresh_token: "rt-live-2",
+          credentials: { access_key_id: "AKL", secret_access_key: "SKL", security_token: "STL", expiration: new Date(Date.now() + 3600_000).toISOString() },
+        }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/v1/model/builtin") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ builtinModels: [{ model_id: "GLM-5.2", model_name: "GLM-5.2", context_window: 128000 }] }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/api/v1/gateway/config") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error_code: "0000", result: { models: [{ model_id: "deepseek-v4.1-flash", model_name: "deepseek-v4.1-flash", context_window: 1000000 }] } }));
+        return;
+      }
+      res.writeHead(404); res.end("{}");
+    });
+    const p = createCodeartsProvider({
+      baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url,
+      apiKeys: [dead, live], file: stateFile,
+    });
+    const list = await p.listModels();
+    assert.ok(list.some((m) => m.id === "codearts/deepseek-v4.1-flash"), "死号不阻断：应拿到下一个账号的目录");
+    assert.equal(srv.hits.filter((h) => h.url === "/v1/oauth2/tokens").length, 2, "先试死号（终态失效）再试活号");
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    assert.ok(state.providerConfigs.codearts.keys.some((k) => k.includes("rt-live-2")), "活号轮转后的新 refresh_token 原位写回");
+    await p.close();
+  });
+
+  test("buildUpstreamBody：max_completion_tokens 映射并夹到上游真实上限", () => {
+    const out = buildUpstreamBody(
+      { model: "deepseek-v4.1-flash", max_completion_tokens: 131072, reasoning_effort: "low", messages: [{ role: "user", content: "hi" }] },
+      { chatId: "0".repeat(32), upstreamModel: "deepseek-v4.1-flash" },
+    );
+    assert.equal(out.max_completion_tokens, undefined, "v2 端点不认这个参数名，透传就是 InferHub.001001005.400");
+    assert.equal(out.max_tokens, 65536, "映射后还要夹住：>65536 上游即 InferHub.001001005.400（现网实测 98304 挂）");
+    assert.equal(out.reasoning_effort, "low");
+    const both = buildUpstreamBody({ max_tokens: 64000, max_completion_tokens: 131072, messages: [] }, { chatId: "0".repeat(32), upstreamModel: "glm-5.3-flash" });
+    assert.equal(both.max_tokens, 64000, "显式 max_tokens 优先，不被映射覆盖");
   });
 });

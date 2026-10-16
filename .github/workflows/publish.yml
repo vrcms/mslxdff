@@ -18,7 +18,29 @@ jobs:
       # 唯一发布通道 = NPM_TOKEN（OIDC/Trusted Publishing 未在 npmjs.com 绑定本包，
       # 恒报 E404 "'mslxdff@x.y.z' is not in this registry"，实测 0.1.138/0.1.140 两版
       # 均由本步发出；若日后在 npm 包设置绑定 Trusted Publisher 可再切回 OIDC + --provenance）
+      #
+      # 幂等守卫（2026-10-14 加）：0.1.171~0.1.174 四版由本地 `npm publish` 直发（没走 tag 通道），
+      # registry 已有货且 npm 不允许重发同一版本号 ⇒ 补推 tag 时若无守卫必撞红叉。实测首推
+      # v0.1.174 即撞：`npm error 403 Forbidden - PUT /mslxdff - You cannot publish over the
+      # previously published versions: 0.1.174.`。现先查再发：已在→跳过并出 notice（绿），
+      # 不在→照常由 Actions 发布；GitHub 的 publish 记录此前停在 v0.1.170，从此可放心补 tag。
+      - name: Check registry for this version
+        id: gate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          got="$(npm view "mslxdff@${v}" version 2>/dev/null || true)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ "$got" = "$v" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::mslxdff@${v} 已在 registry（此前已发布），本次跳过 npm publish"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "mslxdff@${v} 未上架，继续由 Actions 发布"
+          fi
       - name: Publish (NPM_TOKEN)
+        if: steps.gate.outputs.published != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public

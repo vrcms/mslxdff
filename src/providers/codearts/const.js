@@ -44,7 +44,8 @@ export const MAAS_TYPE_HEADER = "maas_type";
 export const MAAS_BENEFIT = "benefit";
 
 // 冷启动种子：福利套餐轮换后新模型在首次发现前也按福利路由（宁多带不少带，少带即 404）。
-export const SEED_BENEFIT_MODELS = ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash"];
+// 现网取证 2026-10-16（福利网关 /api/v1/gateway/config，error_code=0000）共 4 位：下列 4 个 id 逐字对齐上游。
+export const SEED_BENEFIT_MODELS = ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "deepseek-v4.1-flash", "glm-5.3-flash"];
 // 内置模型种子（仅用于大小写归一，不标福利）。
 export const SEED_KNOWN_MODELS = [
   "GLM-5.2", "GLM-5.2-ArkTS-SPARK", "GLM-5.1", "GLM-4.7",
@@ -58,3 +59,7 @@ export const CATALOG_TTL_MS = 60 * 60 * 1000;
 export const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
 // STS 凭证提前刷新量（对齐 codearts2api RefreshSkew 30min）。
 export const REFRESH_SKEW_MS_DEFAULT = 30 * 60 * 1000;
+
+// 上游 max_tokens 真实上限：福利网关自报 131072~393216 是假的 —— 现网实测 65536 通、
+// 98304 即 InferHub.001001005.400（2026-10-16 定位）；此前成功请求均为 64000。
+export const MAX_TOKENS_CEILING = 65536;

@@ -20,6 +20,11 @@ token
 auths/
 **/auths/
 
+# warp-pool 节点凭据：node-<port>.conf 含 WireGuard 私钥、node-<port>.json 含设备 token，绝不入库
+# 只忽略凭据文件与下载的二进制，绝不忽略目录本身——src/warp-pool/ 是源码，被吞后发布包会 import 失败
+**/warp-pool/node-*
+**/warp-pool/bin/
+
 # 开发过程文件，不公开到 git
 AGENTS.md
 CLAUDE.md

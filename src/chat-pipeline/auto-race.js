@@ -3,6 +3,7 @@ import { injectReasoningContent } from "../reasoning.js";
 import { runHook } from "../plugins.js";
 import { errMsg } from "../routes/helpers.js";
 import { withOutputFloor } from "./empty-turn.js";
+import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
 import { handleLocalRelay } from "../routes/chat/local-handler.js";
 import { handleExhaustedAll } from "../routes/chat/exhausted-handler.js";
 
@@ -123,9 +124,33 @@ export async function runAutoRace(ctx, deps = {}) {
   const triedSet = new Set(raceModels);
   order = order.filter((m) => !triedSet.has(m));
   if (!order.length) {
+    // 并发竞速全挂时也要认终局判决（判据见 terminal-verdict.js）：否则「上游 6s 就把话说死」在这条出口
+    // 换成 502 "all concurrent candidates failed"，serial-trial 那条短路救不到它——同一失败模式的另一条命
+    // （`auto` 是 chat 门缺省路径，冷启动无 prior-success 且 >1 可用候选时必走竞速）。
+    // 走到这里 order 已空（没有下一候选可换）、组员也不在这条路上，所以本段只改「客户端看到什么」：
+    // 挑第一条能定终局的失败，把它的**原响应**交给 exhaustedAll 透传（原状态码 + 原字节 + 原头）。
+    let terminalLast = null;
+    if (!terminalShortcircuitOff()) {
+      for (const r of results) {
+        const v = r.status === "fulfilled" ? r.value : null;
+        if (!v || v.ok || v.allowlist || !v.res) continue;
+        const txt = await readVerdictText(v.res);
+        if (!txt.trim()) continue; // 读不到正文一律不判终局（保守回退「照跑收场」的旧行为）
+        const verdict = classifyTerminalUpstream(v.status, txt);
+        if (!verdict.terminal) continue;
+        evt("upstream-terminal", { reqId, model: v.model, status: v.status, kind: verdict.kind, marker: verdict.marker, peersSkipped: true, via: "auto-race" });
+        logError(v.model, v.status, `upstream ${v.status} body=${txt.replace(/\s+/g, " ").slice(0, 300)} · 终局判决 ${verdict.kind}（auto 竞速收场直发原文）`);
+        terminalLast = { model: v.model, upstream: v.res, status: v.status, message: txt.replace(/\s+/g, " ").slice(0, 400) || `upstream ${v.status}`, terminal: verdict.kind };
+        break;
+      }
+    }
     const failedStatuses = results.map((r) => (r.status === "fulfilled" ? r.value?.status : null)).filter((s) => Number.isInteger(s));
     const lastStatus = failedStatuses[failedStatuses.length - 1] || failedStatuses[0] || 502;
-    const last = { model: raceModels[0] || requested, status: lastStatus, message: "all concurrent candidates failed" };
+    // 竞速出口的取证与串行一致：状态码、原响应、同名回显头（客户端只看得到这一个面）
+    if (terminalLast && !res.headersSent && typeof res?.setHeader === "function") {
+      try { res.setHeader("x-mslxdff-terminal", terminalLast.terminal); } catch {}
+    }
+    const last = terminalLast || { model: raceModels[0] || requested, status: lastStatus, message: "all concurrent candidates failed" };
     await exhaustedAll({ res, body, lastErr: last, order: raceModels, requested, handlerCtx: { ...handlerCtx, reqId, startedAt }, evt, logCall, mark, perf0, stages });
     return { done: true };
   }

@@ -80,6 +80,8 @@ const DECISION_FIELDS = [
   "stallHits", "maxGapMs", "interrupted", "providers", "via",
   "retry", "step", "max", "delayMs", "upstream", "account", "pick", "cooled", "queued", "nudged", "retries", "waitedMs", "raiseFrom", "raiseTo",
   "heldOpen", "terminalForm", "requestWaitedMs", "budgetMs", "budgetOut",
+  // 终局判决（ADR-0058）：取证时第一眼要看的三件——判的哪种、命中哪条判据、是否因此没问组员
+  "kind", "marker", "peersSkipped",
 ];
 
 function decisionKv(data = {}) {

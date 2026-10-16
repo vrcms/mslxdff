@@ -13,6 +13,7 @@ import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from
 import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
+import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -141,18 +142,44 @@ export async function runSerialTrial(ctx, deps = {}) {
           return json(res, 403, errBody);
         }
         if (auto) await auto.recordError(model, { status: upRes.status });
-        // 读失败响应体（clone 不影响后续 relay 转发原响应；1s 上限防流式错误体拖慢）
+        // 读失败响应体（clone 不影响后续 relay 转发原响应；1s 上限防流式错误体拖慢）。
+        // 两份文本分工写死：`upRaw` 喂判据（≤4KB，反向护栏不能被 400 字摘要喂不到——多 provider 明细体
+        // 如 OpenRouter 的 `metadata.raw[]` 会把 rate limit 排在 model not found 之后），`upBody` 供日志摘要。
+        let upRaw = "";
         let upBody = "";
-        try {
-          upBody = String(await Promise.race([
-            upRes.clone().text(),
-            new Promise((r) => { const t = setTimeout(() => r(""), 1000); t.unref?.(); }),
-          ])).replace(/\s+/g, " ").slice(0, 400);
-        } catch {}
+        upRaw = await readVerdictText(upRes);
+        upBody = upRaw.replace(/\s+/g, " ").slice(0, 400);
         const upMsg = upBody || `upstream ${upRes.status}`;
         lastErr = { model, upstream: upRes, status: upRes.status, message: upMsg };
-        logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}`);
+        // 终局判决短路（判据与现网取证见 terminal-verdict.js）：上游把「这个模型你别想用」——免费层身份
+        // 闸门 / 模型 id 不存在——写死在错误里时，换组员撞的是同一堵墙（实测组员回同一条 FreeTierError），
+        // 接力只会把 6s 的真相拖成 70s 的 502 "peers failed"。逃生阀 MSLXDFF_TERMINAL_SHORTCIRCUIT=0。
+        const verdict = classifyTerminalUpstream(upRes.status, upRaw);
+        const terminalOn = verdict.terminal && !terminalShortcircuitOff();
+        // 一行话把「判决」与「原文」一起落 errors.log（不分两行：同一发失败在 errors.log 里只该有一条）
+        logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}${terminalOn ? ` · 终局判决 ${verdict.kind}（跳过组员接力）` : ""}`);
         evt("upstream-error", { reqId, model, status: upRes.status, message: upMsg.slice(0, 300), timing: upRes._t ?? null, ...upstreamEcho(upRes) });
+        if (terminalOn) {
+          evt("upstream-terminal", { reqId, model, status: upRes.status, kind: verdict.kind, marker: verdict.marker, peersSkipped: true });
+          // ASCII 具名头。**不**复用 x-mslxdff-notice：那头的既定语义是「已被别的模型代答」（与
+          // x-mslxdff-fallback 成组，src/routes/fallback.js:27-39），拿它报「没代答、直接拒」会把按头
+          // 判是否换模型的下游 UI 读反。头值只填 ASCII 枚举，中文留在 evt/logError/timeline（文件是 UTF-8）。
+          try { if (!res.headersSent && typeof res.setHeader === "function") res.setHeader("x-mslxdff-terminal", verdict.kind); } catch {}
+          if (canFallback && idx < order.length - 1) {
+            // 判决只对**这个模型**成立 → 换下一候选。这里刻意不挂 upstream：这条 Response 的 body 没被
+            // 消费，挂在 lastErr 上带到收场会白占连接（收场只 relay 最后一发），故直接 cancel 后只留文本。
+            lastErr = { model, upstream: null, status: upRes.status, message: upMsg, terminal: verdict.kind };
+            try { const cx = upRes.body?.cancel?.(); if (cx && typeof cx.catch === "function") cx.catch(() => {}); } catch {}
+            evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: `terminal ${verdict.kind}: ${upMsg.slice(0, 80)}` });
+            continue candidate;
+          }
+          // 收场交回既有出口：exhaustedLocal 见 lastErr.upstream 会 relay **原响应**（原状态码 + 原字节 +
+          // 原头），并自带 logCall / result / client-response / talk 语料落盘。自己 json() 反而劣化：
+          // 只能给被截到 400 字的二手摘要、JSON.parse 失败时退成字符串 error（SDK 读 err.error.message
+          // 拿到 undefined），且 SSE 已 flush 时 helpers 的 in-band 错误帧会把对象写成 [object Object]。
+          await exhaustedLocal({ res, body, lastErr, order, handlerCtx: { ...handlerCtx, model, reqId }, evt, logCall, mark, perf0, stages, done, requested, useAuto });
+          return { done: true };
+        }
         upRes = null;
         break;
       }
