@@ -13,7 +13,9 @@ const CHAR_CAP = 32_000_000;
 // （每条消息 content 整段一次 + 每个 tool_call 一次）。逐块各套会把「非空至少 1」下限乘上块数
 // —— 几十个 1 字符 text 块能被高报几十倍（评审 P3：方向虽偏高安全，但与生成侧口径分叉就是第二个真相源）。
 function add(acc, text) {
-  if (acc.chars > CHAR_CAP) return; // 超限后停止累计，只保留已计部分与图片面值
+  // 超限后停止累计（chars 与 tokens 一起停）：只护 chars 会让 tokens 无界增长，
+  // 客户端拿这个读数决定何时压实上下文 ⇒ 超长请求触发一次毫无必要的激进压缩。
+  if (acc.chars > CHAR_CAP) return;
   const s = text == null ? "" : String(text);
   const c = createTokenCounter();
   c.add(s);
@@ -36,8 +38,13 @@ function countMessage(m, acc) {
     else if (b.type === "thinking") put(String(b.thinking || ""));
     else if (b.type === "image") acc.images += 1;
   }
-  if (acc.chars <= CHAR_CAP) acc.chars += chars;
-  acc.tokens += c.tokens();
+  // tokens 与 chars 必须**同受 CHAR_CAP 约束**：只护 chars 不护 tokens 时，超长请求（readBody 无大小上限，
+  // 实测 10 条 4000 万字符消息 → 1.11 亿 tokens）会把读数推到天文数字，而客户端正是拿它决定何时压实上下文
+  // ⇒ 一次毫无必要的激进压缩。超限后不再累加，保留已计部分。
+  if (acc.chars <= CHAR_CAP) {
+    acc.chars += chars;
+    acc.tokens += c.tokens();
+  }
 }
 
 /** 字符估算版 token 计数（Anthropic 官方：端点缺失时客户端本来就退回字符估算，精度非目标）。 */

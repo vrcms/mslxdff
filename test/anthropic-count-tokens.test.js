@@ -157,3 +157,14 @@ test("count_tokens 多块消息聚成一段计（块数不再放大「非空至�
   const one = estimateTokens({ messages: [{ role: "user", content: "字".repeat(40) }] }).count_tokens;
   assert.ok(Math.abs(many - one) <= 1, `多块 ${many} vs 单段 ${one}：逐块套公式会把下限乘 40 倍`);
 });
+
+// BUG-35：CHAR_CAP 只护了 chars 没护 tokens。readBody 无大小上限，超长请求能把读数推到天文数字
+// （实测 10 条 4000 万字符消息 → 1.11 亿 tokens），而客户端正是拿这个读数决定何时压实上下文
+// ⇒ 一次毫无必要的激进压缩。tokens 必须与 chars 同受 CHAR_CAP 约束。
+test("count_tokens: 超长请求的 tokens 读数同样受 CHAR_CAP 约束（不得无界增长）", () => {
+  const huge = "a".repeat(40_000_000); // 4000 万字符 > CHAR_CAP(3200 万)
+  const one = estimateTokens({ messages: [{ role: "user", content: huge }] }).input_tokens;
+  const ten = estimateTokens({ messages: Array.from({ length: 10 }, () => ({ role: "user", content: huge })) }).input_tokens;
+  assert.ok(one > 0, "必须仍有读数");
+  assert.equal(ten, one, `10 条超大消息 ${ten} 应与单条 ${one} 同档（超限后停止累加）`);
+});
