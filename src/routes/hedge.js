@@ -49,12 +49,19 @@ function makeBufferedBody(chunk, handle, kind) {
   })();
 }
 
+// 逐个调用并各自吞异常：**不能**写成 `await x.cancel().catch(()=>{})` —— 自定义/AI SDK 流
+// 的 cancel() 可能返回 undefined（非 Promise），那种写法会抛 TypeError 并被外层 catch 吞掉，
+// 于是后面的 handle.cancel() 根本不会执行 ⇒ 上游流没被真正取消（实测：bodyCancelled=true、
+// handleCancelled=false）。与 stream-body.js 的 cancelBody 同口径，逐个 `Promise.resolve(...)`。
+// 逐个调用并各自吞异常：**不能**写成 `await x.cancel().catch(()=>{})` —— 自定义/AI SDK 流
+// 的 cancel() 可能返回 undefined（非 Promise），那种写法会抛 TypeError 并被外层 catch 吞掉，
+// 于是后面的 handle.cancel() 根本不会执行 ⇒ 上游流没被真正取消（实测：bodyCancelled=true、
+// handleCancelled=false）。与 stream-body.js 的 cancelBody 同口径，逐个 `Promise.resolve(...)`。
 async function cancelBody(body, handle, kind) {
-  try {
-    if (body && typeof body.cancel === "function") await body.cancel().catch(() => {});
-    if (kind === "web" && handle && typeof handle.cancel === "function") await handle.cancel().catch(() => {});
-    else if (handle && typeof handle.return === "function") await handle.return().catch(() => {});
-  } catch {}
+  const settle = async (fn) => { try { await Promise.resolve(fn()); } catch { /* ignore */ } };
+  if (body && typeof body.cancel === "function") await settle(() => body.cancel());
+  if (kind === "web" && handle && typeof handle.cancel === "function") await settle(() => handle.cancel());
+  else if (handle && typeof handle.return === "function") await settle(() => handle.return());
 }
 
 function getFirstChunkPromise(body) {
