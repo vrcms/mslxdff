@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { preflightMs, scanSseChunk, scanNonStreamBody, createTalkBucket, createTalkBucketIfEnabled, captureTalkSse, captureTalkFlush } from "../src/routes/stream-scan.js";
+import { preflightMs, scanSseChunk, flushScanRemainder, scanNonStreamBody, createTalkBucket, createTalkBucketIfEnabled, captureTalkSse, captureTalkFlush } from "../src/routes/stream-scan.js";
 
 // 量测锚点：上报用的首字必须补上「上游尝试开始 → 转发层入口」这段等待
 // （qoder 等 provider 会在这段里预读首帧，见 ADR-0036；不补就永远读成 0/1ms）
@@ -254,4 +254,62 @@ test("超限半行：拼接前丢弃、显式记 dropped，且不吞本轮正常
   assert.equal(t.dropped, 1, "超限丢弃必须记数");
   assert.equal(t.content.join(""), "回来了", "弃半行不许连累本轮正常数据");
   assert.equal(t.remain, "");
+});
+
+// —— 观测层的量必须扛住 TCP 任意切块（BUG-39）——
+// scanSseChunk 原按**单个 chunk** 跑正则：`"finish_reason"`/`"content"` 被切在中间就永不命中。
+// 后果一：正常结束的流 sawFinishReason=null ⇒ endTruncatedStream 把完整回答误报成 STREAM_TRUNCATED；
+// 后果二：chars 归零而 chatShaped=true ⇒ 正好命中空轮判据（正常回答被当空轮重拉甚至报 502）。
+// 与 BUG-24/25 同型（终止标记被切块），差别是那次在收场层、这次在观测层。
+const FINISH_LINE = dataLine({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+
+test("finish_reason 被 TCP 切在任意位置都必须读到（否则正常流被误判成截断）", () => {
+  const base = blankDetail();
+  scanSseChunk(base, FINISH_LINE + "data: [DONE]\n\n");
+  assert.equal(base.sawFinishReason, "stop", "基准：整块喂入必须读到");
+  const out = [];
+  for (let i = 1; i < FINISH_LINE.length; i++) {
+    const d = blankDetail();
+    scanSseChunk(d, FINISH_LINE.slice(0, i));
+    scanSseChunk(d, FINISH_LINE.slice(i));
+    if (d.sawFinishReason !== "stop") out.push(i);
+  }
+  assert.deepEqual(out, [], `切点 ${out.join(",")} 让 finish_reason 丢失`);
+});
+
+test("[DONE] 被切块同样不得漏判", () => {
+  const full = dataLine({ choices: [{ index: 0, delta: { content: "ok" } }] }) + "data: [DONE]\n\n";
+  const out = [];
+  for (let i = 1; i < full.length; i++) {
+    const d = blankDetail();
+    scanSseChunk(d, full.slice(0, i));
+    scanSseChunk(d, full.slice(i));
+    if (!d.sawDone) out.push(i);
+  }
+  assert.deepEqual(out, [], `切点 ${out.join(",")} 让 [DONE] 漏判`);
+});
+
+test("正文被切块不得丢字符（chars 归零会命中空轮判据）", () => {
+  const full = dataLine({ choices: [{ index: 0, delta: { content: "四十二" } }] });
+  const base = blankDetail();
+  scanSseChunk(base, full);
+  assert.equal(base.chars, 3, "基准：整块喂入 3 字");
+  const out = [];
+  for (let i = 1; i < full.length; i++) {
+    const d = blankDetail();
+    scanSseChunk(d, full.slice(0, i));
+    scanSseChunk(d, full.slice(i));
+    if (d.chars !== base.chars) out.push(`${i}:${d.chars}`);
+  }
+  assert.deepEqual(out, [], `切点让 chars 偏离整包口径（见 i:实际值）`);
+});
+
+test("末行缺换行：flushScanRemainder 回收，否则末帧的 finish_reason 永远读不到（幂等）", () => {
+  const d = blankDetail();
+  scanSseChunk(d, FINISH_LINE.replace(/\n\n$/, "")); // 模拟流在末帧后直接收场，无尾换行
+  assert.equal(d.sawFinishReason, null, "未 flush：残行先不入账（等下一块拼回）");
+  flushScanRemainder(d);
+  assert.equal(d.sawFinishReason, "stop", "flush 后末帧必须入账");
+  flushScanRemainder(d); // 幂等：重复调用不加戏
+  assert.equal(d.sawFinishReason, "stop");
 });

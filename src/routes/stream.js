@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders } from "./fallback.js";
 import { json } from "./helpers.js";
-import { scanSseChunk, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, isTrivialFrame } from "./stream-scan.js"; // 逐帧观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
+import { scanSseChunk, flushScanRemainder, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, isTrivialFrame } from "./stream-scan.js"; // 逐帧观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
 import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream, endTruncatedStream, flushPrefixTail } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
 import { chunkText, cancelBody, hasPayload, bodyChunks, enrichFirstReply, scanNonStreamReply } from "./stream-body.js"; // 读取层工具（字节→文本 / 取消上游 / 注释帧判定 / 自持 reader 迭代 / 首块富化 / 非流式先判后写），为让本文件退回 20KB 以内而拆出
 
@@ -260,6 +260,9 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
         if (maxTimer) clearTimeout(maxTimer);
         if (stallTimer) clearTimeout(stallTimer);
         if (pingTimer) clearInterval(pingTimer);
+        // 末帧常无收尾换行：不回收残行，切块/缺换行的 finish_reason 就永远读不到，
+        // 下面所有依赖它的判定（截断收场、空轮判据）全都会被带偏。
+        try { flushScanRemainder(detail); } catch { /* 观测旁路：绝不外溢成转发失败 */ }
       }
       // 任一闸门到点且未写出真实数据 → 可安全 failover（注释帧对客户端无意义，不算已响应）
       if ((timedOut || stalled || tooLong) && !wrotePayload) {

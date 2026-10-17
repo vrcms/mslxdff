@@ -80,10 +80,7 @@ function talkConsumeLine(talk, raw, glued = false) {
 // 多一个属性就是日志噪音），也不随 detail 的展开/复制丢失统计口径。
 const tcIndexes = new WeakMap();
 
-/**
- * 工具调用去重计数：同一 `index` 的多个分片只算一次。
- * 分片缺 `index` 字段时退回 0（OpenAI 规范不要求每个 arguments 分片都重复 index）。
- */
+/** 工具调用去重计数：同一 `index` 的多个分片只算一次；分片缺 `index` 时退回 0。 */
 function countToolCalls(detail, txt) {
   if (!detail || typeof detail !== "object") return;
   let seen = tcIndexes.get(detail);
@@ -136,9 +133,32 @@ export function captureTalkFallback(talk, text) {
   talkPush(talk, "content", String(text));
 }
 
+// 判据必须跑在**完整行**上：TCP 会把一帧切两块，`"finish_reason"`/`"content"` 被切在中间时正则永不命中
+// ⇒ sawFinishReason 恒 null（正常结束的流被 endTruncatedStream 误判成截断，向客户端写假 STREAM_TRUNCATED）、
+// chars 归零（chatShaped 为真时正好命中空轮判据）。与 BUG-24/25 同型：那次是终止标记被切块，这次是观测层缺行缓冲。
+const scanRemain = new WeakMap();
+const SCAN_REMAIN_MAX = 1_000_000; // 半行上限：超限按完整行处理，宁可错判也不无界吃内存
+
+/** 流收场回收：末尾无换行的残行按同一口径扫一次，否则末帧的 finish_reason 永远读不到。幂等。 */
+export function flushScanRemainder(detail) {
+  if (!detail || typeof detail !== "object") return;
+  const rest = scanRemain.get(detail);
+  if (!rest) return;
+  scanRemain.delete(detail);
+  scanCompleteText(detail, rest);
+}
+
 // 逐 SSE chunk 扫描：done/finish_reason/chat 形状/工具调用/usage/正文字符
 export function scanSseChunk(detail, txt) {
   if (detail.talk) { try { captureTalkSse(detail.talk, txt); } catch {} } // 纯旁路红线：捕获异常绝不外溢成转发失败（review P2-7：旧调用点裸奔在 try 外只是口头契约）
+  let buf = (scanRemain.get(detail) || "") + String(txt ?? "");
+  const rest = buf.slice(buf.lastIndexOf("\n") + 1);
+  if (rest.length > SCAN_REMAIN_MAX) { scanRemain.set(detail, ""); }
+  else { buf = buf.slice(0, buf.length - rest.length); scanRemain.set(detail, rest); }
+  if (buf) scanCompleteText(detail, buf);
+}
+
+function scanCompleteText(detail, txt) {
   try {
     if (txt.includes("[DONE]")) detail.sawDone = true;
     const m = txt.match(/"finish_reason"\s*:\s*"([^"]+)"/);

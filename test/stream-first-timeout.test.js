@@ -250,6 +250,45 @@ test("tool_calls 计数：非空数组计入 toolCalls，空数组不算（空�
   assert.equal(r.detail.chatShaped, true, "含 choices/delta 即 chat 形状");
 });
 
+// —— BUG-39 端到端：末帧被 TCP 切块不得被误判成截断 ——
+// 观测层原按单 chunk 跑正则，`"finish_reason"` 被切在中间则 sawFinishReason=null，
+// endTruncatedStream 会把一个**正常结束**的回答判成 STREAM_TRUNCATED 并写错误帧给客户端。
+test("末帧被切成两块：正常结束的流不得判截断、不得写 STREAM_TRUNCATED", async () => {
+  const res = fakeRes();
+  const finishLine = `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+  const cut = finishLine.indexOf("finish_reason") + 6; // 切在键名中间
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield sseChunk({ choices: [{ delta: { content: "完整回答" } }] });
+      yield Buffer.from(finishLine.slice(0, cut), "utf8");
+      yield Buffer.from(finishLine.slice(cut) + "data: [DONE]\n\n", "utf8");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 0 });
+  const joined = res.wrote.join("");
+  assert.equal(r.detail.sawFinishReason, "stop", "切块后仍须读到 finish_reason");
+  assert.equal(r.detail.truncated, undefined, "绝不得标记为截断");
+  assert.equal(r.truncated, undefined);
+  assert.ok(!joined.includes("STREAM_TRUNCATED"), "正常结束的流不得写截断错误帧");
+  assert.ok(joined.includes("完整回答"), "正文照常转发");
+});
+
+// 反面对照：真的没给 finish_reason 就断了（上游异常），截断收场必须照常触发
+test("上游真未发 finish_reason 就断：截断收场仍须触发（防修复过度）", async () => {
+  const res = fakeRes();
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield sseChunk({ choices: [{ delta: { content: "半截回答" } }] });
+      throw new Error("upstream connection reset");
+    },
+    cancel() {},
+  };
+  const r = await relay(res, upResWith(body), { stream: true }, { streamTimeoutMs: 0, keepaliveMs: 0 });
+  assert.equal(r.truncated, true, "真截断必须照旧识别");
+  assert.ok(res.wrote.join("").includes("STREAM_TRUNCATED"), "真截断必须让客户端看得出来");
+});
+
 test("chatShaped：data 无 chat 字段但有 [DONE] → 仍计 chat 流式约定", async () => {
   const res = fakeRes();
   const body = {
