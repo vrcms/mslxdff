@@ -12,6 +12,7 @@ import { loadNode, loadNodes, nodePaths, renderWireproxyConf, saveNode } from ".
 import { backoffMs, buildRegisterBody, parseRegisterResponse, registerWarpDevice } from "../src/warp-pool/register.js";
 import { createSelector } from "../src/warp-pool/strategy.js";
 import { createRotatingDispatcher, headerValue, tapHandler } from "../src/warp-pool/rotate.js";
+import { classifyWarpSignal } from "../src/warp-pool/verdict.js";
 import { createHealthMonitor } from "../src/warp-pool/health.js";
 import { parseExitIp, createReviver, labelExits, tailReason } from "../src/warp-pool/revive.js";
 import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-pool/index.js";
@@ -639,25 +640,38 @@ test("identity：noteExits 批量记账；wireRotation 轮换期间先冷却、�
   assert.equal(tunnels.has(10803), false, "旧隧道已从表里摘掉");
 });
 
-test("rotate：tapHandler 截上游状态码 + 其余方法原样转发；dispatcher 把 429 连同端口号上报", () => {
+test("rotate：tapHandler 把 403/429 连正文一起交出去（判决要看具名判决），其余方法原样转发", () => {
   const seen = [];
   const orig = { onHeaders: (s) => s, onData: () => "d", onComplete: () => "c" };
   const h = tapHandler(orig, (s) => seen.push(s));
   assert.equal(h.onHeaders(429, [], () => {}, "Too Many Requests"), 429, "返回值必须透传");
-  assert.equal(h.onData("x"), "d");
+  assert.equal(h.onData("x"), "d", "onData 返回值必须透传（正文只旁听不消费）");
   assert.equal(h.onComplete(), "c");
-  assert.deepEqual(seen, [429]);
+  assert.deepEqual(seen, [{ status: 429, text: "x" }], "429 必须等正文到手：BlackUsageLimitError 与 FreeUsageLimitError 同是 429，只能靠正文区分");
   assert.equal(tapHandler(orig, null), orig, "没有 tap 必须原样返回");
+
+  const early = [];
+  const h2 = tapHandler({ onHeaders: () => {}, onData: () => {}, onComplete: () => {} }, (s) => early.push(s));
+  h2.onHeaders(403, [], () => {});
+  assert.deepEqual(early, [], "正文还没到不许提前判");
+  h2.onData(Buffer.from('{"error":{"type":"FreeTierError"}}'));
+  assert.equal(early.length, 1, "具名判决一到手就判，不必等 onComplete");
+  assert.match(early[0].text, /FreeTierError/);
+
+  const other = [];
+  const h3 = tapHandler({ onHeaders: () => {}, onData: () => {}, onComplete: () => {} }, (s) => other.push(s));
+  h3.onHeaders(200, [], () => {});
+  assert.deepEqual(other, [{ status: 200, text: "" }], "非 403/429 照旧在 onHeaders 回调，不占正文缓冲");
 
   const events = [];
   const d = createRotatingDispatcher({
     nodes: [{ port: 10800, uri: "http://127.0.0.1:10800" }],
     agentFactory: (uri) => ({ uri, dispatch: (o, handler) => { handler.onHeaders(429); return true; }, close: async () => {} }),
     fallbackAgent: { dispatch: () => true, close: async () => {} },
-    onStatus: (status, port) => events.push([status, port]),
+    onStatus: (signal, port) => events.push([signal.status, port]),
   });
   d.dispatch({ headers: [] }, { onHeaders: () => "ok" });
-  assert.deepEqual(events, [[429, 10800]], "429 必须连同端口号报给轮换器（否则不知道该换哪台设备）");
+  assert.deepEqual(events, [[429, 10800]], "429 必须连同端口号报给轮换器（否则不知道该换哪台设备）；该 handler 没有 onData ⇒ 退回只按状态码判决");
 });
 
 // ---------- ports（端口占用 / 上一代残留进程） ----------
@@ -983,4 +997,22 @@ test("report：出口分散结论必须自洽（隧道数 ≠ 名额数）并给
   assert.match(two, /撞车：104\.28\.243\.105 ← :10800,:10802,:10803/);
   assert.match(two, /rm -f \/root\/\.config\/mslxdff\/warp-pool\/node-10802\.json \/root\/\.config\/mslxdff\/warp-pool\/node-10803\.json && mslxdff -restart/);
   assert.equal(fmtExits({ groups: [] }), "", "没有取证结果就别刷一行");
+});
+
+test("verdict：判决表逐字对齐 zen-router（403 FreeTierError 与 429 FreeUsage 同判、Black 绝不换、裸 429 换、其他 403 不换）", () => {
+  const ft = classifyWarpSignal({ status: 403, text: '{"error":{"type":"FreeTierError","message":"free tier can only be used from within OpenCode"}}' });
+  assert.equal(ft.kind, "free-tier");
+  assert.equal(ft.rotate, true);
+  assert.equal(ft.forced, true, "必须强制：参照实现记录过「冷却把第一次真实反应吞掉」的 bug");
+  assert.equal(classifyWarpSignal({ status: 429, text: '{"error":{"type":"FreeUsageLimitError"}}' }).kind, "free-quota");
+  assert.equal(classifyWarpSignal({ status: 429, text: '{"error":{"type":"GoUsageLimitError"}}' }).forced, true);
+  const black = classifyWarpSignal({ status: 429, text: '{"error":{"type":"BlackUsageLimitError"}}' });
+  assert.equal(black.kind, "black-quota");
+  assert.equal(black.rotate, false, "账号日配额：换出口抬不动，参照实现绝不旋转");
+  const bare = classifyWarpSignal({ status: 429, text: "" });
+  assert.equal(bare.kind, "ip-limit", "读不到正文的裸 429 按 IP 限流处理（kindByStatus）");
+  assert.equal(bare.forced, false, "裸 429 保留冷却，防 429 风暴把 CF 注册刷爆");
+  assert.equal(classifyWarpSignal({ status: 403, text: "forbidden by region" }).rotate, false, "没有 FreeTier 判决的 403 不是配额信号");
+  assert.equal(classifyWarpSignal({ status: 200, text: "FreeTierError" }).rotate, false, "非 403/429 一律不参与判决");
+  assert.match(classifyWarpSignal({ status: 403, text: "" }).why, /换出口无用/);
 });

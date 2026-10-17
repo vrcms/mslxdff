@@ -7,6 +7,7 @@
 // bootstrap 完成后 setNodes() 换上真实出口。这样 daemon 启动不会因注册/下载而被阻塞。
 import { getUndici } from "../compat.js";
 import { createSelector } from "./strategy.js";
+import { looksLikeQuotaSignal, SIGNAL_MAX_BYTES, SIGNAL_STATUSES } from "./verdict.js";
 
 const SESSION_HEADER = "x-opencode-session";
 
@@ -20,14 +21,64 @@ export function headerValue(headers, name) {
   return "";
 }
 
-/** 让 dispatcher 看见上游状态码：复制一层 handler，只截 onHeaders，其余方法原样转发（全部调用都落在副本上，this 一致）。 */
+/**
+ * 让 dispatcher 看见上游的失败信号：复制一层 handler，其余方法原样转发（全部调用都落在副本上，this 一致）。
+ *
+ * 403/429 要**连正文一起**交出去才能判决（`403 FreeTierError` 与 `429 FreeUsageLimitError` 是同一条件，
+ * 而 `429 BlackUsageLimitError` 是账号配额、绝不能换出口）——参照实现 zen-router 就是按正文里的具名判决
+ * 分类的（internal/zen/errors.go）。故这两类状态码延迟到「正文到手」再回调：凑够具名判决即提前回调，
+ * 否则等 onComplete/onError/触顶。其余状态码照旧在 onHeaders 立即回调（正文为空）。
+ * 正文只**旁听**不消费：onData 原样转发给下游 handler，捕获 ≤ SIGNAL_MAX_BYTES 字节。
+ */
 export function tapHandler(handler, tap) {
   if (!tap || !handler || typeof handler !== "object") return handler;
   const out = Object.assign(Object.create(Object.getPrototypeOf(handler)), handler);
-  const orig = handler.onHeaders;
+  const origHeaders = handler.onHeaders;
+  const origData = handler.onData;
+  const origComplete = handler.onComplete;
+  const origError = handler.onError;
+  /** @type {null | { status: number, buf: Buffer[], size: number, done: boolean }} */
+  let capture = null;
+  const fire = () => {
+    if (!capture || capture.done) return;
+    capture.done = true;
+    try { tap({ status: capture.status, text: Buffer.concat(capture.buf).toString("utf8") }); } catch {}
+  };
+
   out.onHeaders = function (statusCode, headers, resume, statusText) {
-    try { tap(statusCode); } catch {}
-    return typeof orig === "function" ? orig.call(this, statusCode, headers, resume, statusText) : undefined;
+    const code = Number(statusCode);
+    // 只有 403/429 值得等正文；且必须下游真能收数据，否则退回「只按状态码判决」。
+    if (SIGNAL_STATUSES.includes(code) && typeof origData === "function") {
+      capture = { status: code, buf: [], size: 0, done: false };
+    } else {
+      try { tap({ status: code, text: "" }); } catch {}
+    }
+    return typeof origHeaders === "function" ? origHeaders.call(this, statusCode, headers, resume, statusText) : undefined;
+  };
+  out.onData = function (chunk) {
+    if (capture && !capture.done) {
+      try {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        const room = SIGNAL_MAX_BYTES - capture.size;
+        if (room > 0) {
+          const slice = b.length > room ? b.subarray(0, room) : b;
+          capture.buf.push(slice);
+          capture.size += slice.length;
+        }
+      } catch {}
+      // 具名判决一到手就判决，不必等整条 body；触顶也判（大 body 不许把判决拖成慢扫描）
+      const text = capture.buf.length ? Buffer.concat(capture.buf).toString("utf8") : "";
+      if (capture.size >= SIGNAL_MAX_BYTES || looksLikeQuotaSignal(text)) fire();
+    }
+    return typeof origData === "function" ? origData.call(this, chunk) : undefined;
+  };
+  out.onComplete = function (trailers) {
+    fire();
+    return typeof origComplete === "function" ? origComplete.call(this, trailers) : undefined;
+  };
+  out.onError = function (err) {
+    fire();
+    return typeof origError === "function" ? origError.call(this, err) : undefined;
   };
   return out;
 }

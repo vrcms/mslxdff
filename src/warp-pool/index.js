@@ -4,6 +4,7 @@
 import { statSync } from "node:fs";
 import { resolveWarpConfig } from "./config.js";
 import { createRotatingDispatcher } from "./rotate.js";
+import { classifyWarpSignal, SIGNAL_STATUSES } from "./verdict.js";
 import { createHealthMonitor } from "./health.js";
 import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
@@ -51,10 +52,35 @@ export function createWarpPool({
   const cfg = resolveWarpConfig(env);
   if (!cfg.active) return null;
 
-  /** 身份轮换器：429 时换一台 WARP 设备换出口 IP（串行换身份，见 identity.js 头注）。 */
+  /** 身份轮换器：上游按出口 IP 计的限额（403 FreeTierError / 429 FreeUsage·GoUsage / 裸 429）时换一台 WARP 设备换出口。 */
   let rotator = null;
 
-  const dispatcher = createRotatingDispatcher({ nodes: [], strategy: cfg.strategy, cooldownMs: cfg.cooldownMs, log, onStatus: (status, port) => { if (status === 429 && cfg.rotate && rotator) void rotator.rotate(port); } });
+  const dispatcher = createRotatingDispatcher({
+    nodes: [],
+    strategy: cfg.strategy,
+    cooldownMs: cfg.cooldownMs,
+    log,
+    // 判决照抄参照实现 zen-router 的决策表（见 verdict.js 头注）：403 FreeTierError 与
+    // 429 FreeUsage/GoUsage 是同一条件、必须**强制**换出口（跳过冷却）；BlackUsageLimitError
+    // 是账号日配额、绝不换；其余状态码不参与判决、也不许刷日志。
+    onStatus: (signal, port) => {
+      const status = Number(signal?.status);
+      if (!SIGNAL_STATUSES.includes(status)) return;
+      const v = classifyWarpSignal(signal);
+      if (!cfg.rotate) {
+        log(`[warp-pool] :${port} 上游 ${status}（${v.kind}）—— 轮换开关关着（MSLXDFF_WARP_ROTATE=0），不换出口`);
+        return;
+      }
+      if (!v.rotate || !rotator) {
+        log(`[warp-pool] :${port} 上游 ${status} 判为「${v.kind}」⇒ 不换出口：${v.why}`);
+        return;
+      }
+      log(`[warp-pool] :${port} 上游 ${status} 判为「${v.kind}」⇒ 换身份换出口${v.forced ? "（强制，跳过冷却）" : ""}：${v.why}`);
+      void rotator.rotate(port, { force: v.forced })
+        .then((r) => { if (r && r.skipped) log(`[warp-pool] :${port} 换出口被冷却掐掉（距上次不足最小间隔）—— 这一发仍走原出口`); })
+        .catch(() => {});
+    },
+  });
   /** @type {Map<number, {stop: () => void}>} */
   const tunnels = new Map();
 
