@@ -18,7 +18,7 @@ import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-po
 import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
 import { isOurWireproxy, parseCmdline, portInUse, reclaimPort, waitPortFree } from "../src/warp-pool/ports.js";
-import { fmtExit, fmtHealth, fmtHeartbeat, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtReclaim, fmtSiblings, startupReport } from "../src/warp-pool/report.js";
+import { fmtExit, fmtExits, fmtHealth, fmtHeartbeat, fmtIdentityDetail, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtReclaim, fmtSiblings, startupReport } from "../src/warp-pool/report.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -956,4 +956,31 @@ test("report：启动自检发现端口被另一个 daemon 占着 ⇒ 必须单�
   assert.match(all, /另一个 daemon\(pid 1558055，已运行 6h12m\) 的活隧道 pid 22 占着/);
   assert.match(all, /那不是残留，本进程不碰它（清了就是互杀）/);
   assert.match(all, /kill 1558055/);
+});
+
+test("report：身份指纹必须能判「设备写重复」还是「CF 共享 NAT 折叠」——真机 4 条隧道只拿到 2 个出口", () => {
+  const same = fmtIdentityDetail([
+    { port: 10800, id: "aaaa1111bbbb", v4: "172.16.0.2", endpoint: "162.159.192.1:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
+    { port: 10801, id: "aaaa1111bbbb", v4: "172.16.0.2", endpoint: "162.159.192.1:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
+  ]).join("\n");
+  assert.match(same, /:10800 设备=aaaa1111 内网=172\.16\.0\.2 端点=162\.159\.192\.1:2408 注册=2026-10-16T10:00:00/);
+  assert.match(same, /设备 id 重复：aaaa1111 ← :10800,:10801/);
+  assert.match(same, /WARP 内网地址重复：172\.16\.0\.2 ← :10800,:10801/);
+  const distinct = fmtIdentityDetail([
+    { port: 10800, id: "aaaa1111", v4: "172.16.0.2", endpoint: "e", registeredAt: "t" },
+    { port: 10801, id: "bbbb2222", v4: "172.16.0.3", endpoint: "e", registeredAt: "t" },
+  ]).join("\n");
+  assert.doesNotMatch(distinct, /重复/, "设备各不相同就不许报重复（此时出口相同只能是 CF 的 NAT 折叠）");
+});
+
+test("report：出口分散结论必须自洽（隧道数 ≠ 名额数）并给出下一步命令——旧措辞「同时在线就有 N 份名额」与共享 NAT 自相矛盾", () => {
+  const two = fmtExits({
+    groups: [{ ip: "104.28.243.105", nodes: [10800, 10802, 10803] }, { ip: "104.28.211.105", nodes: [10801] }],
+    dir: "/root/.config/mslxdff/warp-pool",
+  });
+  assert.match(two, /出口分散：2 个出口地址 \/ 4 条隧道在线/);
+  assert.match(two, /隧道数 ≠ 名额数：免费版 WARP 的 IPv4 是共享 NAT/);
+  assert.match(two, /撞车：104\.28\.243\.105 ← :10800,:10802,:10803/);
+  assert.match(two, /rm -f \/root\/\.config\/mslxdff\/warp-pool\/node-10802\.json \/root\/\.config\/mslxdff\/warp-pool\/node-10803\.json && mslxdff -restart/);
+  assert.equal(fmtExits({ groups: [] }), "", "没有取证结果就别刷一行");
 });

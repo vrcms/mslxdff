@@ -4,6 +4,7 @@ import { startServerLifecycle } from "./server-lifecycle.js";
 import { appendModelTrace } from "../model-trace.js";
 import { startGroupSync } from "./group-sync.js";
 import { startBroadband } from "./broadband.js";
+import { installLogStamp } from "./log-stamp.js";
 
 const logs = { appendCall, appendError, appendEvent, appendTimeline, appendModelTrace };
 
@@ -12,6 +13,8 @@ const logs = { appendCall, appendError, appendEvent, appendTimeline, appendModel
  * 重活下沉 providers-setup / server-lifecycle / group-sync / broadband(-stream)。
  */
 export async function startDaemonMain(VERSION) {
+  // 每行带 [时间 pid]：一份 daemon.log 被多进程/多版本写过时，这是唯一能回答「谁写的、哪一轮」的东西
+  if (process.env.MSLXDFF_DAEMON === "1") installLogStamp();
   const { installLifecycleLog } = await import("./lifecycle-log.js");
   installLifecycleLog({ version: VERSION, logs });
   // 接管：内存里若还有旧的 mslxdff daemon，先请它退出。它不在 daemon.pid 里（-restart 结构性碰不到它），
@@ -20,7 +23,10 @@ export async function startDaemonMain(VERSION) {
   if (process.env.MSLXDFF_DAEMON === "1" && process.env.MSLXDFF_DEBUG !== "1") {
     try {
       const { takeoverOlderDaemons } = await import("../daemon.js");
-      await takeoverOlderDaemons({ log: (m) => console.log(m) });
+      const r = await takeoverOlderDaemons({ log: (m) => console.log(m) });
+      if (!r.killed.length && !r.skipped.length && !r.remaining.length) {
+        console.log("[daemon] 内存里没有别的 mslxdff daemon（扫过一遍 /proc）—— 本进程独占出口池端口");
+      }
     } catch (e) {
       console.log(`[daemon] 接管旧 daemon 失败（不阻断启动）：${String(e?.message || e)}`);
     }

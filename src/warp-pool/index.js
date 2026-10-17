@@ -1,6 +1,7 @@
 // warp-pool · 装配入口。
 //
 // 定位（MODULES.md §0/§10）：WARP 池是**增量**出口，不是替代成员自身出口；缺省**开**，MSLXDFF_WARP_POOL=0 关。
+import { statSync } from "node:fs";
 import { resolveWarpConfig } from "./config.js";
 import { createRotatingDispatcher } from "./rotate.js";
 import { createHealthMonitor } from "./health.js";
@@ -9,7 +10,7 @@ import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 import { createReviver, labelExits, tailReason } from "./revive.js";
 import { portInUse, portOwner, reclaimPort, waitPortFree } from "./ports.js";
-import { fmtConf, fmtExit, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtSiblings, fmtSpawn, startupReport } from "./report.js";
+import { fmtConf, fmtExit, fmtIdentityDetail, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtSiblings, fmtSpawn, startupReport } from "./report.js";
 import { wireRotation } from "./identity.js";
 import { findDaemons } from "../runtime/proc-info.js";
 
@@ -177,7 +178,11 @@ export function createWarpPool({
 
     // 1. 复用磁盘上已注册的节点
     let nodes = loadNodes(cfg.dir, cfg.ports);
-    await startupReport({ cfg, nodes, binPath, ownerOf: (port) => portOwner({ dir: cfg.dir, port }), log });
+    let binSize = 0;
+    try { binSize = statSync(binPath).size; } catch {}
+    await startupReport({ cfg, nodes, binPath, binSize, ownerOf: (port) => portOwner({ dir: cfg.dir, port }), log });
+    // 身份指纹：4 条隧道只拿到 2 个出口时，只有这组读数能区分「设备写重复」与「CF 共享 NAT 折叠」
+    for (const line of fmtIdentityDetail(nodes)) log(line);
     // 同机其它 daemon：两个 daemon 会互相把对方的活隧道当「残留」杀掉（真机事故根因），必须一开池就报出来
     const siblings = findDaemons({ self: process.pid });
     if (siblings.length) log(fmtSiblings({ list: siblings }));
@@ -214,7 +219,7 @@ export function createWarpPool({
     if (live.length) {
       await dispatcher.setNodes(live.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
       // 出口取证：一次拿到每个端口的真实出口，既喂给轮换器做「换没换动」的比对，也直接写进池结论那一行
-      const exits = await labelExits({ ports: live.map((n) => n.port), log });
+      const exits = await labelExits({ ports: live.map((n) => n.port), dir: cfg.dir, log });
       rotator.noteExits(exits);
       log(fmtPool({ pooled: live.length, total: nodes.length, exits }));
     } else {

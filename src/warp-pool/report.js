@@ -114,6 +114,49 @@ export function fmtPool({ pooled, total, exits }) {
   return `${head}｜出口：${table}｜不同地址 ${new Set(ipOf.values()).size} 个`;
 }
 
+/**
+ * 身份指纹：每个端口的短设备 id / WARP 内网地址 / 对端端点 / 注册时间。
+ * 为什么必须有：4 条隧道只拿到 2 个出口地址时（真机 2026-10-17），只有这组读数能区分
+ * 「设备本身被写重复了」和「CF 的共享 NAT 把不同设备折叠成一个出口」——没有它就只能猜。
+ */
+export function fmtIdentityDetail(nodes = []) {
+  const out = [];
+  const byId = new Map();
+  const byV4 = new Map();
+  for (const n of nodes || []) {
+    if (n?.id) byId.set(n.id, [...(byId.get(n.id) || []), n.port]);
+    if (n?.v4) byV4.set(n.v4, [...(byV4.get(n.v4) || []), n.port]);
+    out.push(`[warp-pool]     :${n?.port} 设备=${n?.id ? String(n.id).slice(0, 8) : "无id"} 内网=${n?.v4 || "无"} 端点=${n?.endpoint || "?"} 注册=${String(n?.registeredAt || "?").slice(0, 19)}`);
+  }
+  // cut 只给设备 id 用（UUID 太长）：内网地址必须原样打，截短了就成了「172.16.0」
+  const dups = (m, cut = 0) => [...m.entries()].filter(([, p]) => p.length > 1).map(([k, p]) => `${cut ? String(k).slice(0, cut) : String(k)} ← :${p.join(",:")}`).join("；");
+  const dupId = dups(byId, 8);
+  const dupV4 = dups(byV4);
+  if (dupId) out.push(`[warp-pool] ${MARK.warn} 设备 id 重复：${dupId} —— 同一个 WARP 设备被写到多个端口，出口必然相同；删掉重复端口的 node-<port>.json 再重启，它会重新注册`);
+  if (dupV4) out.push(`[warp-pool] ${MARK.warn} WARP 内网地址重复：${dupV4} —— 同一内网地址必是同一出口`);
+  return out;
+}
+
+/**
+ * 出口分散结论：几个出口地址 / 几条隧道在线、撞车的是谁、以及「想多要一份该怎么办」。
+ * 措辞必须自洽：免费 WARP 的 IPv4 是共享 NAT，**隧道数 ≠ 上游名额数**——旧措辞
+ * 「同时在线就有 N 份名额」与紧邻的「出口不分散」分支自相矛盾（真机 4 条隧道只拿到 2 个出口）。
+ */
+export function fmtExits({ groups = [], dir = "" } = {}) {
+  if (!groups.length) return "";
+  const online = groups.reduce((a, g) => a + g.nodes.length, 0);
+  if (groups.length === 1) {
+    return `[warp-pool] ${MARK.warn} 出口不分散：${online} 条隧道同时在线只有 1 个出口地址（${groups[0].ip}）：免费版 WARP 的 IPv4 是共享 NAT，多开隧道换不到多份名额；多份名额靠撞 429 时的身份轮换`;
+  }
+  const collide = groups.filter((g) => g.nodes.length > 1);
+  const drop = collide.flatMap((g) => g.nodes.slice(1));
+  const base = dir || "$HOME/.config/mslxdff/warp-pool";
+  const next = drop.length
+    ? `｜${MARK.warn} 撞车：${collide.map((g) => `${g.ip} ← :${g.nodes.join(",:")}`).join("；")}（它们共用同一份上游名额）⇒ 想多要一份：rm -f ${drop.map((p) => `${base}/node-${p}.json`).join(" ")} && mslxdff -restart（重新注册换出口；共享 NAT 下常换不动，要试几次）`
+    : "";
+  return `[warp-pool] ${MARK.step} 出口分散：${groups.length} 个出口地址 / ${online} 条隧道在线（上游按出口 IP 计名额 ⇒ 最多 ${groups.length} 份；隧道数 ≠ 名额数：免费版 WARP 的 IPv4 是共享 NAT）${next}`;
+}
+
 /** 池空告警：最容易被误读成「功能在跑」，必须把结论与逐条自检命令一起说。 */
 export function fmtPoolEmpty({ total, ports }) {
   return `[warp-pool] ${MARK.warn} 没有一条隧道探通 ⇒ 池为空，全部请求照旧直连（不影响可用性，但 WARP 出口等于没启用）。逐条自检：for p in ${ports.join(" ")}; do echo -n ":$p "; curl -s --max-time 8 --proxy http://127.0.0.1:$p https://cloudflare.com/cdn-cgi/trace | grep '^ip='; done`;

@@ -3,13 +3,15 @@
 // 三件事，都来自组长 VPS 上暴露的缺陷：
 //
 // 1. 隧道退出后必须自愈：原先只有「全池不通」才补拉，一条死隧道会让池静默从 4 降到 3，直到 daemon 重启。
-// 2. 入池后必须实测各节点真实出口：WARP 的 IPv4 出口是共享 NAT，「N 设备」很可能折叠成一个出口。
+// 2. 入池后必须实测各节点真实出口：WARP 的 IPv4 出口是共享 NAT，「N 设备」很可能折叠成一个出口
+//    （2026-10-17 组长 VPS 实测：4 条隧道只拿到 2 个出口地址 ⇒ 隧道数 ≠ 上游名额数）。
 // 3. 复活必须**真的活下来**（2026-10-16 组长 VPS 事故）：`tunnels.has(port)` 只证明「spawn 被调用了」，
 //    wireproxy 起一条死一条（端口被上一代孤儿进程占着 ⇒ bind 失败 ⇒ 退出码 1），旧逻辑次次判「已复活」
 //    ⇒ 下一次退出立刻再复活 ⇒ 无限重启刷屏，该端口永远起不来。
 //
 // 复活只走**磁盘上已有的 conf**：进程挂了 ≠ 设备失效，重注册只会白烧 CF 配额。
 import { probeTunnel } from "./wireproxy.js";
+import { fmtExits } from "./report.js";
 
 /** 出口取证目标：Cloudflare 自己的 trace 端点，回 `ip=` 一行（不烧上游 token）。 */
 export const EXIT_PROBE_URL = "https://cloudflare.com/cdn-cgi/trace";
@@ -136,9 +138,10 @@ export function createReviver({ revive, isAlive, minGapMs = 30_000, maxGapMs = 1
 /**
  * 入池后实测各节点真实出口地址并打日志（含撞车警告）。
  * 只读探测：打 Cloudflare 的 trace 端点，不碰上游配额。
+ * @param {{ ports?: number[], dir?: string, fetchImpl?: Function, timeoutMs?: number, log?: Function }} [opts]
  * @returns {Promise<{ ip: string, nodes: number[] }[]>} 按出口地址分组的节点清单
  */
-export async function labelExits({ ports = [], fetchImpl, timeoutMs = 12_000, log = () => {} } = {}) {
+export async function labelExits({ ports = [], dir = "", fetchImpl, timeoutMs = 12_000, log = () => {} } = {}) {
   const byIp = new Map();
   let failed = 0;
   for (const port of ports) {
@@ -158,11 +161,8 @@ export async function labelExits({ ports = [], fetchImpl, timeoutMs = 12_000, lo
   }
 
   const groups = [...byIp.entries()].map(([ip, nodes]) => ({ ip, nodes }));
-  if (groups.length === 1) {
-    log(`[warp-pool] ⚠ 出口不分散：${groups[0].nodes.length} 条隧道同时在线只有 1 个出口地址（${groups[0].ip}）：免费版 WARP 的 IPv4 是共享 NAT，多开隧道换不到多份名额；多份名额靠撞 429 时的身份轮换`);
-  } else if (groups.length > 1) {
-    log(`[warp-pool] 出口分散：${groups.length} 个出口地址 / ${groups.reduce((a, g) => a + g.nodes.length, 0)} 条隧道同时在线（同时在线就有 ${groups.length} 份上游名额）`);
-  }
+  const line = fmtExits({ groups, dir });
+  if (line) log(line);
   if (failed) log(`[warp-pool] ${failed} 个节点出口取证失败（不影响进池，只影响轮换时「出口到底变没变」的比对）`);
   return groups;
 }
