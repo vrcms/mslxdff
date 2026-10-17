@@ -89,7 +89,11 @@ export function responsesToChatBody(req = {}) {
       messages.push({ role: "tool", tool_call_id: it.call_id || "", content: typeof it.output === "string" ? it.output : JSON.stringify(it.output ?? "") });
     }
   }
-  if (!messages.length) messages.push({ role: "user", content: "hi" });
+  // 空会话直接抛错，**绝不伪造一句 "hi" 打上游**：那会把假提问写进用户上下文并白烧一发额度。
+  // 口径与 anthropic/request-body.js:83-84 一致（同一仓库同一类场景不该有两套策略）。
+  // 触发面比"空 input"更广：input 里全是未知 item 类型（如 `{type:"unknown_item"}`）时也走这里
+  // —— 静默发一句 hi 会让客户端拿到一个与它请求毫无关系的回答。
+  if (!messages.length) throw new Error("responses: 缺少用户消息");
   const body = { model, messages, stream: Boolean(req.stream) };
   if (Array.isArray(req.tools) && req.tools.length) {
     body.tools = req.tools.map((t) => (t?.type === "function"

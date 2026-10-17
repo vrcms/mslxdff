@@ -144,3 +144,20 @@ describe("createChunkTranslator", () => {
     assert.equal(fn.item.arguments, '{"a":1}');
   });
 });
+
+// BUG-36：空会话原先伪造 `{role:"user",content:"hi"}` 打上游 ——
+// 而 anthropic/request-body.js:83-84 对同类场景明写「绝不伪造一句 hi（会把假提问写进
+// 用户上下文并白烧一发额度）」并抛错。同一仓库同一类场景不该有两套相反策略。
+// 触发面比"空 input"更广：input 里全是未知 item 类型时也会走进这条兜底。
+test("responses: 空会话必须抛错，不得伪造 hi 打上游", () => {
+  assert.throws(() => responsesToChatBody({ model: "m", input: [] }), /缺少用户消息/,
+    "空 input 不得伪造 hi");
+  assert.throws(() => responsesToChatBody({ model: "m", input: [{ type: "unknown_item", foo: 1 }] }), /缺少用户消息/,
+    "全是未知 item 类型时同样不得伪造 hi");
+});
+
+test("responses: 有内容时不得误伤（仍正常翻译）", () => {
+  const r = responsesToChatBody({ model: "m", input: [{ type: "message", role: "user", content: "你好" }] });
+  assert.equal(r.messages[0].role, "user");
+  assert.equal(r.messages[0].content, "你好");
+});
