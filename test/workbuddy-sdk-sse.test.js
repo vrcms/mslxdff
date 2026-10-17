@@ -134,3 +134,37 @@ describe("usageToOpenAI", () => {
     );
   });
 });
+
+// BUG-37：tool-input-delta 遇到未知 id 时回退到 index 0，会把这段参数写进**另一个工具**。
+// 实测：callA 占 index 0 后，一个 id 丢失的 delta 让 funcA 的参数变成 {"hijack":true}
+// —— 客户端会拿着被污染的参数去调用错误的函数。改为分配新 index（同 tool-call 分支口径）。
+describe("tool-input-delta 的未知 id", () => {
+  it("不得回退到 index 0 污染已有工具", () => {
+    const s = createSseSerializer(null);
+    const out = [];
+    out.push(s.push({ type: "tool-input-start", id: "callA", toolName: "funcA" }));
+    out.push(s.push({ type: "tool-input-delta", id: "callA", delta: '{"a":1}' }));
+    out.push(s.push({ type: "tool-input-delta", id: "callUNKNOWN", delta: '{"hijack":true}' }));
+
+    const frames = [];
+    for (const o of out) {
+      if (!o) continue;
+      for (const line of String(o).split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const p = line.slice(5).trim();
+        if (!p || p === "[DONE]") continue;
+        let j;
+        try { j = JSON.parse(p); } catch { continue; }
+        const tc = j.choices?.[0]?.delta?.tool_calls;
+        if (tc) frames.push(tc[0]);
+      }
+    }
+    // callA 的参数帧必须是 index 0 且内容不被污染
+    const aArgs = frames.filter((f) => f.index === 0 && f.function?.arguments);
+    assert.deepEqual(aArgs.map((f) => f.function.arguments), ['{"a":1}'],
+      "index 0 只应收到 callA 自己的参数，不得混入未知 id 的片段");
+    // 未知 id 必须落到新 index
+    const orphan = frames.find((f) => f.function?.arguments === '{"hijack":true}');
+    assert.ok(orphan && orphan.index !== 0, `未知 id 的片段必须用新 index，实际 ${JSON.stringify(orphan)}`);
+  });
+});

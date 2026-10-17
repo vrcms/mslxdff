@@ -109,7 +109,14 @@ export function createSseSerializer(captured = null) {
         });
       }
       case "tool-input-delta": {
-        const idx = toolIndex.has(part.id) ? toolIndex.get(part.id) : 0;
+        // 未知 id **绝不能回退到 index 0**：那会把这段参数写进另一个工具（实测：callA 占 index 0 时，
+        // 一个 id 丢失的 delta 让 funcA 的参数变成 `{"hijack":true}`），客户端会拿着被污染的参数去调用
+        // 错误的函数。改为按 `tool-call` 分支的口径分配新 index —— 宁可多一个空工具槽，也不污染已有工具。
+        // 未知 id **绝不能回退到 index 0**：那会把这段参数写进另一个工具（实测：callA 占 index 0 时，
+        // 一个 id 丢失的 delta 让 funcA 的参数变成 `{"hijack":true}`），客户端会拿着被污染的参数去调用
+        // 错误的函数。改为按 `tool-call` 分支的口径分配新 index —— 宁可多一个空工具槽，也不污染已有工具。
+        let idx = toolIndex.get(part.id);
+        if (idx == null) { idx = nextIndex++; if (part.id) toolIndex.set(part.id, idx); }
         return frame({ tool_calls: [{ index: idx, function: { arguments: String(part.delta ?? "") } }] });
       }
       case "tool-call": {
