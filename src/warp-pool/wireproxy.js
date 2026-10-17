@@ -93,16 +93,19 @@ function runCommand(cmd, args, { log = () => {} } = {}) {
 export function writeTunnelConf(dir, node) {
   if (!node?.privateKey) throw new Error(`节点 :${node?.port} 缺 WireGuard 私钥，拒绝写出一份跑不起来的配置`);
   const { conf } = nodePaths(dir, node.port);
-  return writeSecret(conf, renderWireproxyConf({ ...node, port: node.port }));
+  const text = renderWireproxyConf({ ...node, port: node.port });
+  writeSecret(conf, text);
+  return { conf, bytes: Buffer.byteLength(text) };
 }
 
 /**
  * 启动一条隧道。返回 { port, conf, stop() }。
  * 进程退出即视为隧道失效（不自动重启：由 health 层决策重拨换 IP）。
  */
-export function startTunnel({ binPath: exe, dir, port, log = () => {}, onExit = () => {} } = {}) {
+export function startTunnel({ binPath: exe, dir, port, log = () => {}, onExit = () => {}, now = Date.now } = {}) {
   const { conf } = nodePaths(dir, port);
   const child = spawn(exe, ["-c", conf], { stdio: ["ignore", "pipe", "pipe"] });
+  const startedAt = now();
   let tail = "";
   const keepTail = (d) => {
     tail = (tail + String(d)).slice(-800);
@@ -112,7 +115,7 @@ export function startTunnel({ binPath: exe, dir, port, log = () => {}, onExit = 
 
   let stopped = false;
   child.on("exit", (code, signal) => {
-    if (!stopped) onExit({ port, code, signal, tail });
+    if (!stopped) onExit({ port, code, signal, tail, pid: child.pid, aliveMs: now() - startedAt });
   });
 
   return {
@@ -139,18 +142,20 @@ export function startTunnel({ binPath: exe, dir, port, log = () => {}, onExit = 
 export async function probeTunnel({ port, baseUrl = "https://opencode.ai", path = "/zen/v1/models", fetchImpl = compatFetch, timeoutMs = 8000, headers = {}, wantText = false } = {}) {
   const { ProxyAgent } = getUndici();
   const agent = new ProxyAgent({ uri: `http://127.0.0.1:${port}`, connections: 2, keepAliveTimeout: 10_000 });
+  const url = `${String(baseUrl).replace(/\/+$/, "")}${path}`;
+  const t0 = Date.now();
   try {
-    const res = await fetchImpl(`${String(baseUrl).replace(/\/+$/, "")}${path}`, {
+    const res = await fetchImpl(url, {
       headers,
       signal: AbortSignal.timeout(timeoutMs),
       dispatcher: agent,
     });
-    const base = { ok: res.ok, status: res.status };
+    const base = { ok: res.ok, status: res.status, ms: Date.now() - t0, url };
     if (!wantText) return base;
     const text = await res.text().catch(() => "");
     return { ...base, text: String(text).slice(0, 2000) };
   } catch (e) {
-    return { ok: false, status: 0, error: String(e?.message || e) };
+    return { ok: false, status: 0, error: String(e?.message || e), ms: Date.now() - t0, url };
   } finally {
     try { await agent.close(); } catch {}
   }

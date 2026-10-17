@@ -18,6 +18,7 @@ import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-po
 import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
 import { isOurWireproxy, parseCmdline, portInUse, reclaimPort, waitPortFree } from "../src/warp-pool/ports.js";
+import { fmtExit, fmtHealth, fmtHeartbeat, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtReclaim, startupReport } from "../src/warp-pool/report.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -751,7 +752,7 @@ test("index：端口被别的进程占着 ⇒ 拒绝起隧道（硬起只会 bin
     });
     await pool.ready;
     assert.deepEqual(started, [], "端口被占 ⇒ 一条隧道都不许起");
-    assert.ok(logs.some((l) => l.includes("被非本池进程占着")), "必须说清为什么不硬起");
+    assert.ok(logs.some((l) => l.includes("拒绝再起") && l.includes("占着")), "必须说清是谁占着、为什么不硬起");
     assert.equal(pool.stats().tunnels, 0);
     await pool.close();
   } finally {
@@ -832,4 +833,67 @@ test("rotate：markFailure 只在第 1 次与整十次报（健康探活每分�
   for (let i = 0; i < 12; i++) d.markFailure(0);
   assert.equal(logs.length, 2, "12 次失败只报 2 行（第 1 次 + 第 10 次）");
   assert.equal(d.stats()[0].fails, 12, "计数照旧累计");
+});
+
+// ---------- report（日志契约：能定位问题才算合格——这是四轮返工换来的教训） ----------
+
+test("report：启动自检块一次说清配置/目录/身份/端口占用者（第 1 轮返工就是缺这块）", async () => {
+  const logs = [];
+  const cfg = { enabled: true, mode: "leader", ports: [10800, 10801], strategy: "session", rotate: true, cooldownMs: 600_000, dir: "/w" };
+  const nodes = [{ port: 10800, id: "a", token: "b", privateKey: "c" }];
+  const owners = {
+    10800: { busy: true, ours: [1555182], others: [] },
+    10801: { busy: true, ours: [], others: [{ pid: 988, name: "sshd" }] },
+  };
+  await startupReport({ cfg, nodes, binPath: "/w/bin/wireproxy", binSize: 3_400_000, ownerOf: async (p) => owners[p], log: (m) => logs.push(m) });
+  const all = logs.join("\n");
+  assert.match(all, /启动自检：开关=开 模式=leader 端口=10800,10801/);
+  assert.match(all, /身份文件 1\/2：:10800 ✓ :10801 ✗缺/);
+  assert.match(all, /:10800 被 pid 1555182 占：本池 wireproxy 残留/);
+  assert.match(all, /:10801 被 pid 988 sshd 占：非本池进程/);
+  assert.match(all, /有 1 个端口被本池残留占着/);
+});
+
+test("report：隧道退出行必须能判出「谁杀的」（信号=外部终止 vs 自行退出）与 stderr 末行", () => {
+  const ext = fmtExit({ port: 10803, code: null, signal: "SIGTERM", pid: 2528532, aliveMs: 400, tail: "bind: address already in use" });
+  assert.match(ext, /信号 SIGTERM/);
+  assert.match(ext, /存活 400ms/);
+  assert.match(ext, /外部终止/);
+  assert.match(ext, /末行="bind: address already in use"/);
+  const self = fmtExit({ port: 10800, code: 1, signal: null, pid: 1, aliveMs: 2000, tail: "" });
+  assert.match(self, /退出码 1/);
+  assert.match(self, /进程自行退出/);
+  assert.match(self, /末行="没有输出"/);
+});
+
+test("report：探活行带 URL/耗时/错误原文；放弃行给自检命令", () => {
+  const ok = fmtProbe({ port: 10801, attempt: 2, attempts: 2, url: "https://opencode.ai/zen/v1/models", ok: true, status: 200, ms: 1800 });
+  assert.match(ok, /探活 2\/2/);
+  assert.match(ok, /HTTP 200（1\.8s）→ 进池/);
+  const bad = fmtProbe({ port: 10801, attempt: 1, attempts: 2, url: "u", ok: false, status: 0, error: "connect ECONNREFUSED", ms: 12 });
+  assert.match(bad, /错误=connect ECONNREFUSED/);
+  assert.match(fmtProbeGiveUp({ port: 10801, attempts: 2, url: "u" }), /自检：curl --proxy http:\/\/127\.0\.0\.1:10801 u/);
+});
+
+test("report：池结论一行给全（入池数 + 每端口出口 + 不同地址数）；池空给逐条自检", () => {
+  const pool = fmtPool({ pooled: 2, total: 4, exits: [{ ip: "104.28.1.1", nodes: [10800, 10801] }] });
+  assert.match(pool, /出口池就绪：2\/4 条入池/);
+  assert.match(pool, /:10800=104\.28\.1\.1 :10801=104\.28\.1\.1/);
+  assert.match(pool, /不同地址 1 个/);
+  assert.match(fmtPoolEmpty({ total: 4, ports: [10800, 10801] }), /池为空/);
+  assert.match(fmtPoolEmpty({ total: 4, ports: [10800, 10801] }), /逐条自检/);
+});
+
+test("report：健康行把每个不通节点的状态/错误/耗时/第几次/冷却都报全；心跳一行给状态", () => {
+  assert.match(fmtHealth({ healthy: 4, total: 4, slowestMs: 1900 }), /健康检查：4\/4 通（最慢 1\.9s）/);
+  const bad = fmtHealth({ healthy: 3, total: 4, slowestMs: 900, problems: [{ port: 10802, status: 0, error: "ETIMEDOUT", ms: 800, fails: 4, cooldownMs: 600_000 }] });
+  assert.match(bad, /:10802 第 4 次不通（HTTP 0 ETIMEDOUT，800ms）冷却 600s/);
+  const hb = fmtHeartbeat({ alive: 4, total: 4, pooled: 4, exits: [{ port: 10800, ip: "104.28.1.1" }], cooling: 0, lastAllDown: "08:20:11" });
+  assert.match(hb, /隧道 4\/4 活｜入池 4｜出口 1 种（104\.28\.1\.1）｜冷却中 0｜全池不通 08:20:11/);
+});
+
+test("report：清理行报扫了多少进程/命中谁/等了多久；端口被占行报出是谁", () => {
+  assert.match(fmtReclaim({ port: 10801, scanned: 132, ours: [], others: [], waitedMs: 0, killed: false }), /扫 132 个进程，无本池残留/);
+  assert.match(fmtReclaim({ port: 10801, scanned: 132, ours: [1555182, 2528532], waitedMs: 320, killed: true }), /命中本池残留 pid 1555182,2528532 → 已清掉（等了 320ms）/);
+  assert.match(fmtPortBlocked({ port: 10802, ours: [], others: [{ pid: 988, name: "sshd" }] }), /端口被 pid 988 sshd 占着，拒绝再起/);
 });

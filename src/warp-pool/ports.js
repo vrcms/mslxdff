@@ -7,6 +7,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { connect } from "node:net";
 import { nodePaths } from "./nodes.js";
+import { fmtReclaim } from "./report.js";
 
 /** /proc/<pid>/cmdline 是 NUL 分隔的字节串；切成参数数组（丢掉结尾空串）。 */
 export function parseCmdline(buf) {
@@ -69,13 +70,13 @@ export async function reclaimPort({
 } = {}) {
   if (platform !== "linux") return [];
   const conf = nodePaths(dir, port).conf;
-  const targets = pids().filter((pid) => isOurWireproxy(cmdline(pid), conf));
-  if (!targets.length) return [];
-
-  log(
-    `[warp-pool] 端口 :${port} 发现上一代 wireproxy 残留（pid ${targets.join(", ")}）：` +
-      `daemon 被强杀时子进程不会自己退出，它会一直占着端口让新隧道 bind 失败。先清掉再起。`,
-  );
+  const all = pids();
+  const targets = all.filter((pid) => isOurWireproxy(cmdline(pid), conf));
+  const startedAt = Date.now();
+  if (!targets.length) {
+    log(fmtReclaim({ port, scanned: all.length, ours: [], others: [], waitedMs: 0, killed: false }));
+    return [];
+  }
   for (const pid of targets) {
     try {
       kill(pid, "SIGTERM");
@@ -87,6 +88,8 @@ export async function reclaimPort({
       kill(pid, "SIGKILL");
     } catch {}
   }
+  const gone = !targets.some((p) => pidAlive(p, kill));
+  log(fmtReclaim({ port, scanned: all.length, ours: targets, waitedMs: Date.now() - startedAt, killed: gone }));
   return targets;
 }
 
@@ -119,4 +122,27 @@ export async function waitPortFree(port, { inUse = portInUse, sleep = (ms) => ne
     await sleep(stepMs);
   }
   return !(await inUse(port));
+}
+
+/**
+ * 端口占用者取证：谁在监听——本池 wireproxy 残留？别人的进程？还是空闲。
+ * 「孤儿占端口」这类事故唯一能一眼看出结论的读数：只报「占用 / 拒绝再起」是查不出问题的（第 2 轮返工的教训）。
+ * @returns {Promise<{busy:boolean, ours:number[], others:Array<{pid:number,name:string}>}>}
+ */
+export async function portOwner({ dir, port, platform = process.platform, pids = defaultPids, cmdline = defaultCmdline, inUse = portInUse } = {}) {
+  const busy = await inUse(port);
+  const out = { busy, ours: [], others: [] };
+  if (!busy || platform !== "linux") return out;
+  const conf = nodePaths(dir, port).conf;
+  for (const pid of pids()) {
+    const argv = cmdline(pid);
+    if (!argv.length) continue;
+    if (isOurWireproxy(argv, conf)) {
+      out.ours.push(pid);
+      continue;
+    }
+    // 非 root 看不到别人的 listen 表，退一步：命令行里带着这个端口号的进程也值得报出来
+    if (argv.some((a) => String(a).includes(`:${port}`))) out.others.push({ pid, name: String(argv[0]).split("/").pop() });
+  }
+  return out;
 }

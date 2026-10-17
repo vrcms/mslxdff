@@ -8,7 +8,8 @@ import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 import { createReviver, labelExits, tailReason } from "./revive.js";
-import { portInUse, reclaimPort, waitPortFree } from "./ports.js";
+import { portInUse, portOwner, reclaimPort, waitPortFree } from "./ports.js";
+import { fmtConf, fmtExit, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtSpawn, startupReport } from "./report.js";
 import { wireRotation } from "./identity.js";
 
 /** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
@@ -95,25 +96,26 @@ export function createWarpPool({
   async function bringUp(node) {
     if (tunnels.has(node.port)) return; // 已归我们管：绝不再清残留（reclaim 会把自己这条隧道当残留杀掉）
     await reclaim({ dir: cfg.dir, port: node.port, log }); // 清上一代孤儿（daemon 被强杀时子进程不会自己退）
-    writeTunnelConf(cfg.dir, node);
+    const { conf, bytes } = writeTunnelConf(cfg.dir, node);
+    log(fmtConf({ port: node.port, conf, bytes }));
     // SIGTERM 之后套接字要几百毫秒才释放，这期间连得上 ≠ 别人的进程占着——先等它真空出来再判
     if (!(await waitFree(node.port, { inUse }))) {
-      throw new Error(`端口 :${node.port} 被非本池进程占着，拒绝再起（硬起只会 bind 失败、无限重启刷屏）；查明：ss -ltnp | grep :${node.port}`);
+      const owner = await portOwner({ dir: cfg.dir, port: node.port }).catch(() => ({ ours: [], others: [] }));
+      throw new Error(fmtPortBlocked({ port: node.port, ...owner }));
     }
     const t = start({
       binPath,
       dir: cfg.dir,
       port: node.port,
       log,
-      onExit: ({ port, code, signal, tail }) => {
+      onExit: ({ port, code, signal, tail, pid, aliveMs }) => {
         tunnels.delete(port);
-        const why = tailReason(tail) || "进程没留下任何输出";
-        log(`[warp-pool] :${port} 隧道意外退出（退出码 ${code}${signal ? `，信号 ${signal}` : ""}）：${why}`);
+        log(fmtExit({ port, code, signal, pid, aliveMs, tail: tailReason(tail) }));
         if (!closed) void reviver.onExit(port); // 收摊中就别复活了，否则退出过程里又 spawn 出一批孤儿
       },
     });
     tunnels.set(node.port, t);
-    log(`[warp-pool] :${node.port} 隧道已起：HTTP 代理 http://127.0.0.1:${node.port} → 经 WARP 出网（pid ${t.pid ?? "?"}）`);
+    log(fmtSpawn({ port: node.port, pid: t.pid, binPath, conf }));
   }
 
   // 429 ＝ 上游按出口 IP 计的名额耗尽 ⇒ 换一台设备的身份换出口（换身份＝换桶）。
@@ -140,17 +142,20 @@ export function createWarpPool({
     await wait(PROBE_SETTLE_MS);
     for (const n of list) {
       if (!tunnels.has(n.port)) continue;
+      const url = `${String(baseUrl).replace(/\/+$/, "")}${cfg.probePath}`;
       let r = { ok: false };
       for (let i = 1; i <= PROBE_ATTEMPTS; i++) {
+        const t0 = now();
         r = await probe({ port: n.port, baseUrl, path: cfg.probePath });
+        const ms = Number.isFinite(r.ms) ? r.ms : now() - t0;
+        log(fmtProbe({ port: n.port, attempt: i, attempts: PROBE_ATTEMPTS, url, ok: r.ok, status: r.status, error: r.error, ms }));
         if (r.ok) break;
         if (i < PROBE_ATTEMPTS) await wait(PROBE_SETTLE_MS);
       }
       if (r.ok) {
         live.push(n);
-        log(`[warp-pool] :${n.port} 探通（HTTP ${r.status}），进池`);
       } else {
-        log(`[warp-pool] :${n.port} 探了 ${PROBE_ATTEMPTS} 次都不通（${r.status || r.error || "?"}），不进池：进池会把请求挂到超时，比直连更糟`);
+        log(fmtProbeGiveUp({ port: n.port, attempts: PROBE_ATTEMPTS, url }));
       }
     }
     return live;
@@ -171,7 +176,7 @@ export function createWarpPool({
 
     // 1. 复用磁盘上已注册的节点
     let nodes = loadNodes(cfg.dir, cfg.ports);
-    log(`[warp-pool] 复用磁盘上已注册的身份 ${nodes.length}/${cfg.count} 个（端口 ${cfg.ports.join(", ")}；缺的现场注册）`);
+    await startupReport({ cfg, nodes, binPath, ownerOf: (port) => portOwner({ dir: cfg.dir, port }), log });
 
     // 2. 补足：逐个注册（拉长间隔，避免 CF 注册限流与同网段撞车）
     const used = new Set(nodes.map((n) => n.port));
@@ -204,13 +209,13 @@ export function createWarpPool({
     const live = await probeGate(nodes);
     if (live.length) {
       await dispatcher.setNodes(live.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
-      log(`[warp-pool] 出口池就绪：${live.length} 条隧道可用（选路策略 ${cfg.strategy}${cfg.rotate ? "，撞 429 会自动换身份换出口" : ""}）`);
+      // 出口取证：一次拿到每个端口的真实出口，既喂给轮换器做「换没换动」的比对，也直接写进池结论那一行
+      const exits = await labelExits({ ports: live.map((n) => n.port), log });
+      rotator.noteExits(exits);
+      log(fmtPool({ pooled: live.length, total: nodes.length, exits }));
     } else {
-      log("[warp-pool] 没有一条隧道探通 ⇒ 池为空，全部请求照旧直连（不影响可用性，只是没多出口）");
+      log(fmtPoolEmpty({ total: nodes.length, ports: cfg.ports }));
     }
-
-    // 5. 出口取证：把每台设备的真实出口地址打进日志（免费版 WARP 的 IPv4 是共享 NAT，N 台设备很可能折叠成同一个出口）
-    if (live.length) rotator.noteExits(await labelExits({ ports: live.map((n) => n.port), log }));
   }
 
   const monitor = createHealthMonitor({
@@ -218,6 +223,8 @@ export function createWarpPool({
     baseUrl,
     probePath: cfg.probePath,
     log,
+    infoOf: () => ({ alive: tunnels.size, pooled: dispatcher.size, exits: rotator ? rotator.stats() : [] }),
+    cooldownMs: cfg.cooldownMs,
     onExhausted: async () => {
       // 重拨 = 重新注册换出口。只重拨「进程已死」的隧道：全活却全挂 = 网络路径问题，重注册只会把 CF 刷到 429
       const plan = redialPlan({ ports: cfg.ports, alivePorts: [...tunnels.keys()], lastRedialAt, redialGapMs, now });
