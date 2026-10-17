@@ -1,18 +1,18 @@
-// warp-pool · 端口占用与「上一代进程残留」清理（2026-10-16 组长 VPS 真机事故后新增）。
+// warp-pool · 端口占用与「上一代进程残留」清理（2026-10-16 真机事故后新增；2026-10-17 七次修订）。
 //
-// 事故：daemon 被强杀（WMI TerminateProcess / taskkill /F）时 `process.once("exit")` 钩子不执行，
-// wireproxy 子进程变成孤儿，继续占着 127.0.0.1:10800+ 这些端口。新 daemon 再起隧道就 bind 失败
-// （wireproxy 立刻退出 code=1），而旧代码把「spawn 成功」当成「复活成功」⇒ 无限重启、日志刷屏、
-// 且该端口的隧道永远起不来。治本是「起隧道前先把自家残留清掉」，并「端口被别人占着就别硬起」。
-import { readFileSync, readdirSync } from "node:fs";
+// 事故一（0.1.179）：daemon 被强杀时 `process.once("exit")` 钩子不执行，wireproxy 子进程变孤儿继续占着端口。
+// 事故二（七次修订，真机铁证）：**两个 daemon 同时活着**（一个从昨天起活了一整天），两者都用同一份
+//   `node-<port>.conf` 判「本池残留」⇒ 互相把对方的**活隧道**当残留杀掉 ⇒ 无限互杀、池永远不稳。
+// 两条教训写进判据：
+//   ① 父进程是**另一个活着的 daemon** ⇒ 那不是残留，是「别人的活隧道」，清了就是互杀 ⇒ 不许清，只报出来；
+//   ② 「SIGKILL 都清不掉」多半是**僵尸**（state=Z：kill 无效，但 kill(pid,0) 仍返回成功）⇒ 僵尸算已死。
 import { connect } from "node:net";
+import { defaultCmdline, defaultPids, defaultStat, isZombie, otherDaemonParent, parseCmdline, pidAlive } from "../runtime/proc-info.js";
 import { nodePaths } from "./nodes.js";
 import { fmtReclaim } from "./report.js";
 
-/** /proc/<pid>/cmdline 是 NUL 分隔的字节串；切成参数数组（丢掉结尾空串）。 */
-export function parseCmdline(buf) {
-  return String(buf == null ? "" : buf).split("\0").filter((s) => s !== "");
-}
+// /proc 读取层已上移到 runtime/proc-info.js（daemon 侧也要用同一套判据）；这里原样再导出，既有调用方路径不变。
+export { parseCmdline, pidAlive };
 
 /**
  * 该进程是不是「正在跑我们这条 conf」的 wireproxy。
@@ -25,37 +25,13 @@ export function isOurWireproxy(argv, conf) {
   return isBin && list.includes(conf);
 }
 
-function defaultPids() {
-  try {
-    return readdirSync("/proc").filter((f) => /^\d+$/.test(f)).map(Number);
-  } catch {
-    return [];
-  }
-}
-
-function defaultCmdline(pid) {
-  try {
-    return parseCmdline(readFileSync(`/proc/${pid}/cmdline`));
-  } catch {
-    return [];
-  }
-}
-
-/** 进程是否还在（信号 0 = 只做存在性检查，不真发信号）。 */
-export function pidAlive(pid, kill = process.kill) {
-  try {
-    kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * 清掉「占着该端口那条 conf」的上一代 wireproxy。返回被清理的 pid 列表。
- * 非 Linux 直接返回 []（读不到 /proc，别拿别的平台做危险猜测）。
- * @param {{ dir: string, port: number, log?: Function, platform?: string,
- *           pids?: Function, cmdline?: Function, kill?: Function, sleep?: Function, waitRounds?: number }} opts
+ * 清掉占着该端口那条 conf 的**真残留**：自家丢引用的子进程、父进程已死的孤儿。
+ * 不动的三类：僵尸（kill 无效，也不是真占用者）、**父进程是另一个活 daemon 的活隧道**（清了就是互杀）、
+ * argv 不匹配的别人的进程。
+ * 非 Linux 直接返回空（读不到 /proc，别拿别的平台做危险猜测）。
+ * @returns {Promise<{scanned:number, killed:number[], zombies:number[],
+ *           foreign:Array<{pid:number,ppid:number,aliveSec:number|null}>, waitedMs:number, gone:boolean}>}
  */
 export async function reclaimPort({
   dir,
@@ -64,33 +40,58 @@ export async function reclaimPort({
   platform = process.platform,
   pids = defaultPids,
   cmdline = defaultCmdline,
+  stat = defaultStat,
   kill = process.kill,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   waitRounds = 15,
 } = {}) {
-  if (platform !== "linux") return [];
+  const startedAt = Date.now();
+  const shape = (scanned, killed, zombies, foreign) => ({
+    scanned,
+    killed,
+    zombies,
+    foreign,
+    waitedMs: Date.now() - startedAt,
+    gone: !killed.some((p) => pidAlive(p, kill)),
+  });
+  if (platform !== "linux") return shape(0, [], [], []);
+
   const conf = nodePaths(dir, port).conf;
   const all = pids();
-  const targets = all.filter((pid) => isOurWireproxy(cmdline(pid), conf));
-  const startedAt = Date.now();
-  if (!targets.length) {
-    log(fmtReclaim({ port, scanned: all.length, ours: [], others: [], waitedMs: 0, killed: false }));
-    return [];
+  const zombies = [];
+  const foreign = [];
+  const targets = [];
+  for (const pid of all) {
+    if (!isOurWireproxy(cmdline(pid), conf)) continue;
+    const st = stat(pid);
+    if (st && isZombie(st.state)) {
+      zombies.push(pid);
+      continue;
+    }
+    const other = otherDaemonParent(pid, { stat, cmdline, kill });
+    if (other) {
+      foreign.push({ pid, ppid: other.pid, aliveSec: other.aliveSec });
+      continue;
+    }
+    targets.push(pid);
   }
-  for (const pid of targets) {
-    try {
-      kill(pid, "SIGTERM");
-    } catch {}
+
+  if (targets.length) {
+    for (const pid of targets) {
+      try {
+        kill(pid, "SIGTERM");
+      } catch {}
+    }
+    for (let i = 0; i < waitRounds && targets.some((p) => pidAlive(p, kill)); i++) await sleep(100);
+    for (const pid of targets.filter((p) => pidAlive(p, kill))) {
+      try {
+        kill(pid, "SIGKILL");
+      } catch {}
+    }
   }
-  for (let i = 0; i < waitRounds && targets.some((p) => pidAlive(p, kill)); i++) await sleep(100);
-  for (const pid of targets.filter((p) => pidAlive(p, kill))) {
-    try {
-      kill(pid, "SIGKILL");
-    } catch {}
-  }
-  const gone = !targets.some((p) => pidAlive(p, kill));
-  log(fmtReclaim({ port, scanned: all.length, ours: targets, waitedMs: Date.now() - startedAt, killed: gone }));
-  return targets;
+  const r = shape(all.length, targets, zombies, foreign);
+  log(fmtReclaim({ port, ...r }));
+  return r;
 }
 
 /** 该端口是否已有人在监听（TCP 连得上 = 占用；连不上/被拒 = 空闲）。 */
@@ -125,19 +126,30 @@ export async function waitPortFree(port, { inUse = portInUse, sleep = (ms) => ne
 }
 
 /**
- * 端口占用者取证：谁在监听——本池 wireproxy 残留？别人的进程？还是空闲。
- * 「孤儿占端口」这类事故唯一能一眼看出结论的读数：只报「占用 / 拒绝再起」是查不出问题的（第 2 轮返工的教训）。
- * @returns {Promise<{busy:boolean, ours:number[], others:Array<{pid:number,name:string}>}>}
+ * 端口占用者取证：谁在监听——本池残留？另一个 daemon 的活隧道？僵尸？别人的进程？还是空闲。
+ * 「孤儿占端口」「两个 daemon 互杀」这两类事故唯一能一眼看出结论的读数：只报「占用 / 拒绝再起」是查不出问题的。
+ * @returns {Promise<{busy:boolean, ours:number[], zombies:number[],
+ *           foreign:Array<{pid:number,ppid:number,aliveSec:number|null}>, others:Array<{pid:number,name:string}>}>}
  */
-export async function portOwner({ dir, port, platform = process.platform, pids = defaultPids, cmdline = defaultCmdline, inUse = portInUse } = {}) {
+export async function portOwner({ dir, port, platform = process.platform, pids = defaultPids, cmdline = defaultCmdline, stat = defaultStat, kill = process.kill, inUse = portInUse } = {}) {
   const busy = await inUse(port);
-  const out = { busy, ours: [], others: [] };
+  const out = { busy, ours: [], zombies: [], foreign: [], others: [] };
   if (!busy || platform !== "linux") return out;
   const conf = nodePaths(dir, port).conf;
   for (const pid of pids()) {
     const argv = cmdline(pid);
     if (!argv.length) continue;
     if (isOurWireproxy(argv, conf)) {
+      const st = stat(pid);
+      if (st && isZombie(st.state)) {
+        out.zombies.push(pid);
+        continue;
+      }
+      const other = otherDaemonParent(pid, { stat, cmdline, kill });
+      if (other) {
+        out.foreign.push({ pid, ppid: other.pid, aliveSec: other.aliveSec });
+        continue;
+      }
       out.ours.push(pid);
       continue;
     }

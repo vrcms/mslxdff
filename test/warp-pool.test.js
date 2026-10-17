@@ -18,7 +18,7 @@ import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-po
 import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
 import { isOurWireproxy, parseCmdline, portInUse, reclaimPort, waitPortFree } from "../src/warp-pool/ports.js";
-import { fmtExit, fmtHealth, fmtHeartbeat, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtReclaim, startupReport } from "../src/warp-pool/report.js";
+import { fmtExit, fmtHealth, fmtHeartbeat, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtReclaim, fmtSiblings, startupReport } from "../src/warp-pool/report.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -704,9 +704,48 @@ test("ports：reclaimPort 只清自家残留、先礼后兵（SIGTERM 足够就�
     sleep: async () => {},
     log: () => {},
   };
-  assert.deepEqual(await reclaimPort(common), [11], "只挑出跑本池 conf 的那条残留");
+  const r1 = await reclaimPort(common);
+  assert.deepEqual(r1.killed, [11], "只挑出跑本池 conf 的那条残留");
   assert.deepEqual(killed, [[11, "SIGTERM"]], "SIGTERM 就死了就不必 SIGKILL");
-  assert.deepEqual(await reclaimPort({ ...common, platform: "win32" }), [], "非 linux 直接放弃（不猜别人的端口）");
+  assert.deepEqual((await reclaimPort({ ...common, platform: "win32" })).killed, [], "非 linux 直接放弃（不猜别人的端口）");
+});
+
+test("ports：僵尸算已死、另一个 daemon 的活隧道不许清（七次修订：两个 daemon 互杀的根因）", async () => {
+  const conf = nodePaths("/w", 10803).conf;
+  const argv = {
+    21: ["wireproxy", "-c", conf],
+    22: ["wireproxy", "-c", conf],
+    23: ["wireproxy", "-c", conf],
+    999: ["/usr/bin/node", "/g/mslxdff/bin/mslxdff.js", "--daemon"],
+  };
+  const st = { 21: { state: "Z", ppid: 1, startTicks: 0 }, 22: { state: "S", ppid: 999, startTicks: 0 }, 23: { state: "S", ppid: 1, startTicks: 0 } };
+  const killed = [];
+  const dead = new Set();
+  const logs = [];
+  const r = await reclaimPort({
+    dir: "/w",
+    port: 10803,
+    platform: "linux",
+    pids: () => [21, 22, 23],
+    cmdline: (p) => argv[p],
+    stat: (p) => st[p],
+    kill: (pid, sig) => {
+      if (sig === 0) {
+        if (dead.has(pid)) throw new Error("gone");
+        return;
+      }
+      killed.push([pid, sig]);
+      dead.add(pid);
+    },
+    sleep: async () => {},
+    log: (m) => logs.push(m),
+  });
+  assert.deepEqual(r.zombies, [21], "僵尸（state=Z）算已死：kill 对它无效，也不是真占用者");
+  assert.deepEqual(r.foreign.map((f) => [f.pid, f.ppid]), [[22, 999]], "父进程是另一个活 daemon ⇒ 别人的活隧道，不许清");
+  assert.deepEqual(r.killed, [23], "只剩真孤儿被清");
+  assert.deepEqual(killed, [[23, "SIGTERM"]], "绝不对僵尸和别人的活隧道发信号");
+  assert.equal(r.gone, true);
+  assert.ok(logs.some((l) => l.includes("另一个 daemon(pid 999")), "日志必须点名是哪个 daemon 占着（否则又只能猜）");
 });
 
 function fakeSocket(mode) {
@@ -893,7 +932,28 @@ test("report：健康行把每个不通节点的状态/错误/耗时/第几次/�
 });
 
 test("report：清理行报扫了多少进程/命中谁/等了多久；端口被占行报出是谁", () => {
-  assert.match(fmtReclaim({ port: 10801, scanned: 132, ours: [], others: [], waitedMs: 0, killed: false }), /扫 132 个进程，无本池残留/);
-  assert.match(fmtReclaim({ port: 10801, scanned: 132, ours: [1555182, 2528532], waitedMs: 320, killed: true }), /命中本池残留 pid 1555182,2528532 → 已清掉（等了 320ms）/);
+  assert.match(fmtReclaim({ port: 10801, scanned: 132, killed: [], waitedMs: 0 }), /扫 132 个进程；无本池残留/);
+  assert.match(fmtReclaim({ port: 10801, scanned: 132, killed: [1555182, 2528532], waitedMs: 320, gone: true }), /命中本池残留 pid 1555182,2528532 → 已清掉（等了 320ms）/);
   assert.match(fmtPortBlocked({ port: 10802, ours: [], others: [{ pid: 988, name: "sshd" }] }), /端口被 pid 988 sshd 占着，拒绝再起/);
+});
+
+test("report：同机另一个 daemon 必须一次说清（pid/父进程/已运行多久 + 精确 kill 命令）——七次修订的核心补课", () => {
+  const sib = fmtSiblings({ list: [{ pid: 1558055, ppid: 1, state: "S", aliveSec: 22320 }] });
+  assert.match(sib, /同机还有 1 个别的 mslxdff daemon 在跑/);
+  assert.match(sib, /pid 1558055（父 1，已运行 6h12m）/);
+  assert.match(sib, /先停掉它：kill 1558055/);
+  assert.equal(fmtSiblings({ list: [] }), "", "没有别的 daemon 就别刷一行");
+  const blocked = fmtPortBlocked({ port: 10803, foreign: [{ pid: 22, ppid: 1558055, aliveSec: 60 }] });
+  assert.match(blocked, /另一个 daemon\(pid 1558055，已运行 1m\) 的活隧道 pid 22/);
+  assert.match(blocked, /先停掉那个 daemon：kill 1558055/);
+});
+
+test("report：启动自检发现端口被另一个 daemon 占着 ⇒ 必须单独大声报（两个 daemon 互杀的根因读数）", async () => {
+  const logs = [];
+  const cfg = { enabled: true, mode: "leader", ports: [10800], strategy: "session", rotate: true, cooldownMs: 600_000, dir: "/w" };
+  await startupReport({ cfg, nodes: [], binPath: "/w/bin/wireproxy", binSize: 0, ownerOf: async () => ({ busy: true, ours: [], zombies: [], foreign: [{ pid: 22, ppid: 1558055, aliveSec: 22320 }], others: [] }), log: (m) => logs.push(m) });
+  const all = logs.join("\n");
+  assert.match(all, /另一个 daemon\(pid 1558055，已运行 6h12m\) 的活隧道 pid 22 占着/);
+  assert.match(all, /那不是残留，本进程不碰它（清了就是互杀）/);
+  assert.match(all, /kill 1558055/);
 });

@@ -1,14 +1,27 @@
 import { existsSync, writeFileSync } from "node:fs";
-import { startDaemon, stopDaemon, readPid, readPidVersion, isPidAlive, pidFile, logFile } from "../../daemon.js";
+import { startDaemon, stopDaemon, readPid, readPidVersion, isPidAlive, pidFile, logFile, waitPidGone, reapGhostDaemons } from "../../daemon.js";
 import { setPort } from "../../state.js";
 import { logDir, eventsFile, callsFile, errorsFile } from "../../logs.js";
 import { effectivePort, waitForHealth, stopDaemonIfOutdated, compareSemver, argValue } from "../policy.js";
 import { printStatus } from "../status.js";
 import { compatFetch, timeoutSignal } from "../../compat.js";
+import { findDaemons, fmtAlive } from "../../runtime/proc-info.js";
+
+/** 停 daemon 并**等它真死**：只发 SIGTERM 就起新的会留下幽灵（隧道子进程把事件循环钉住，见 daemon.js waitPidGone）。 */
+async function stopDaemonHard(reason) {
+  const pid = readPid();
+  const r = stopDaemon({ reason });
+  if (pid && r.stopped) {
+    const g = await waitPidGone(pid);
+    if (!g.died) console.log(`⚠ 旧 daemon (pid ${pid}) 等了 ${Math.round(g.waitedMs / 1000)}s 仍没退（已补 SIGKILL）—— 若仍在世，它会和新的抢端口`);
+    else if (g.forced) console.log(`旧 daemon (pid ${pid}) 未响应 SIGTERM，已 SIGKILL（等了 ${Math.round(g.waitedMs / 1000)}s）`);
+  }
+  return r;
+}
 
 export async function handleStop(args) {
   if (!(args.includes("-stop") || args.includes("--stop"))) return false;
-  const { stopped, pid, reason } = stopDaemon();
+  const { stopped, pid, reason } = await stopDaemonHard("stop");
   if (stopped) {
     console.log(`mslxdff daemon stopped (pid ${pid})`);
   } else {
@@ -23,14 +36,17 @@ export async function handleRestart(args, VERSION) {
   const alive = pid ? isPidAlive(pid) : false;
   if (alive) {
     console.log(`restarting daemon (pid ${pid})...`);
-    stopDaemon({ reason: "restart" });
-    await new Promise((r) => setTimeout(r, 300));
+    await stopDaemonHard("restart");
   } else if (pid) {
     console.log(`daemon pid ${pid} is stale (not running) — starting fresh...`);
     try { stopDaemon({ reason: "restart" }); } catch {}
   } else {
-    console.log(`daemon not running — starting...`);
+    console.log("daemon not running — starting...");
   }
+  // 结构性盲区收口：不在 daemon.pid 里的 daemon 永远杀不到（真机：Oct16 起的旧 daemon 活了一整天，
+  // 与新版互杀 warp-pool 端口；两边日志格式交错才暴露）。起新的之前先清干净。
+  const ghosts = await reapGhostDaemons({ log: (m) => console.log(m) });
+  if (ghosts.length) console.log(`已清掉 ${ghosts.length} 个不在册的 daemon（pid ${ghosts.map((g) => g.pid).join(", ")}）`);
   const port = effectivePort(args);
   const spawnedPid = startDaemon([]);
   await waitForHealth(port, 4000);
@@ -39,7 +55,12 @@ export async function handleRestart(args, VERSION) {
     const r = await compatFetch(`http://127.0.0.1:${port}/health`, { signal: timeoutSignal(1200) });
     ok = r.ok;
   } catch {}
-  if (ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);
+  // 诚实报错：/health 可能由**残留的旧 daemon** 应答（它也在监听同一个端口），所以不能只看 health
+  const leftover = findDaemons({ self: spawnedPid });
+  const leftTxt = leftover.map((g) => `pid ${g.pid}（已运行 ${fmtAlive(g.aliveSec)}）`).join("；");
+  if (leftover.length) {
+    console.log(`⚠ 仍有 ${leftover.length} 个旧 daemon 在跑：${leftTxt} —— 它们会和新的抢出口池端口，请 kill 掉`);
+  } else if (ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);
   else console.log(`mslxdff v${VERSION} restarted (pid ${spawnedPid}) — health check pending (http://127.0.0.1:${port}/health)`);
   console.log(`endpoint:   http://localhost:${port}/v1`);
   console.log(`log:        ${logFile()}`);

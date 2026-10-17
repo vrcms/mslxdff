@@ -9,8 +9,9 @@ import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 import { createReviver, labelExits, tailReason } from "./revive.js";
 import { portInUse, portOwner, reclaimPort, waitPortFree } from "./ports.js";
-import { fmtConf, fmtExit, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtSpawn, startupReport } from "./report.js";
+import { fmtConf, fmtExit, fmtPool, fmtPoolEmpty, fmtProbe, fmtProbeGiveUp, fmtPortBlocked, fmtSiblings, fmtSpawn, startupReport } from "./report.js";
 import { wireRotation } from "./identity.js";
+import { findDaemons } from "../runtime/proc-info.js";
 
 /** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
 const REDIAL_MIN_GAP_MS = 5 * 60_000;
@@ -177,6 +178,9 @@ export function createWarpPool({
     // 1. 复用磁盘上已注册的节点
     let nodes = loadNodes(cfg.dir, cfg.ports);
     await startupReport({ cfg, nodes, binPath, ownerOf: (port) => portOwner({ dir: cfg.dir, port }), log });
+    // 同机其它 daemon：两个 daemon 会互相把对方的活隧道当「残留」杀掉（真机事故根因），必须一开池就报出来
+    const siblings = findDaemons({ self: process.pid });
+    if (siblings.length) log(fmtSiblings({ list: siblings }));
 
     // 2. 补足：逐个注册（拉长间隔，避免 CF 注册限流与同网段撞车）
     const used = new Set(nodes.map((n) => n.port));

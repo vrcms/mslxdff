@@ -167,7 +167,7 @@
 ### `-stop` / `--stop`
 
 - **语法**：`mslxdff -stop`
-- **作用**：停止后台 daemon（`stopDaemon()` 读 `daemon.pid` 并 `kill`）。
+- **作用**：停止后台 daemon（`stopDaemon()` 读 `daemon.pid` 并 `kill`，随后**等它真死**——超时补 SIGKILL，2026-10-17 起；只发信号就起新的会留下「幽灵 daemon」）。
 - **输出**：
   - 成功：`mslxdff daemon stopped (pid XXX)`
   - 未运行：`mslxdff daemon not running`（若有原因则带 `reason`）。
@@ -176,7 +176,7 @@
 ### `-restart` / `--restart`
 
 - **语法**：`mslxdff -restart`
-- **作用**：重启 daemon（`stopDaemon()` → `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`。
+- **作用**：重启 daemon（`stopDaemon()` + **等旧进程真死**（`waitPidGone`，超时补 SIGKILL）→ **清掉不在 `daemon.pid` 里的 daemon**（`reapGhostDaemons`：`-restart` 的结构性盲区，真机曾因此与新 daemon 互抢 warp-pool 端口一整天）→ `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`；**若仍有旧 daemon 在世**（`/health` 可能由它应答）改打 `⚠ 仍有 N 个旧 daemon 在跑…请 kill 掉`，不再谎报 restarted。
 - **示例**：`mslxdff -restart`
 
 ### `-uninstall` / `--uninstall`

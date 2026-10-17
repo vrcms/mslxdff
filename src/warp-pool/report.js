@@ -1,9 +1,11 @@
-// warp-pool · 日志与自检报告（2026-10-16 四轮返工后新增）。
+// warp-pool · 日志与自检报告（2026-10-16 四轮返工后新增；2026-10-17 七次修订补「同机其它 daemon」）。
 //
-// 为什么单独一个模块（四轮返工的教训）：日志若只说「失败了」、不说「谁干的、为什么」，就只能靠猜——
-// 第 1 轮猜孤儿占端口、第 2 轮分不清旧 daemon 子进程与刚被杀还没释放的套接字、第 3 轮分不清握手未完成与上游拒绝。
-// 故把可判定信息一次摆全：配置快照、端口占用者（pid+命令行+是否本池残留）、身份文件、每条隧道完整生命周期
-// （清理→写配置→spawn pid→探活耗时/状态/错误→退出码/信号/存活时长/末行）、池子结论与「下一步敲什么命令」。
+// 为什么单独一个模块（五轮返工的教训）：日志若只说「失败了」、不说「谁干的、为什么」，就只能靠猜——
+// 第 1 轮猜孤儿占端口、第 2 轮分不清旧 daemon 子进程与刚被杀还没释放的套接字、第 3 轮分不清握手未完成与上游拒绝、
+// 第 4~5 轮对着「退出 / 已复活」循环完全看不出真凶是**同机另一个 daemon**（两边都把对方的活隧道当残留杀）。
+// 故把可判定信息一次摆全：配置快照、**同机其它 daemon**、端口占用者（pid+ppid+命令行+本池残留/别人的活隧道/僵尸）、
+// 身份文件、每条隧道完整生命周期（清理→写配置→spawn pid→探活耗时/状态/错误→退出码/信号/存活时长/末行）、池子结论与「下一步敲什么命令」。
+import { fmtAlive } from "../runtime/proc-info.js";
 export const MARK = { step: "▸", ok: "✓", fail: "✗", warn: "⚠" };
 
 const KB = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : `${Math.round(n / 1024)}KB`);
@@ -35,21 +37,30 @@ export function fmtIdentities(nodes, ports) {
   return `[warp-pool] ${MARK.step} 身份文件 ${nodes.length}/${ports.length}：${parts.join(" ")}（✓=有 id+token+私钥，✗缺=现场注册）`;
 }
 
-/** 单端口占用者：区分「本池残留」「别人的进程」「空闲」——第 1 轮返工缺的就是这一行。 */
-export function fmtPortState({ port, busy, ours = [], others = [] }) {
+/** 「另一个 daemon(pid 1558055，已运行 6h12m) 的活隧道 pid 33」——两个 daemon 互杀这类事故唯一能一眼看出结论的读数。 */
+export function fmtForeign(foreign = []) {
+  return (foreign || []).map((f) => `另一个 daemon(pid ${f.ppid}${f.aliveSec != null ? `，已运行 ${fmtAlive(f.aliveSec)}` : ""}) 的活隧道 pid ${f.pid}`).join("；");
+}
+
+/** 单端口占用者：区分「本池残留」「另一个 daemon 的活隧道」「僵尸」「别人的进程」「空闲」——两轮返工缺的就是这一行。 */
+export function fmtPortState({ port, busy, ours = [], zombies = [], foreign = [], others = [] }) {
   if (!busy) return `[warp-pool]     :${port} 空闲`;
-  if (ours.length) return `[warp-pool]     :${port} 被 pid ${ours.join(",")} 占：本池 wireproxy 残留（上一代 daemon 被强杀留下的孤儿）→ 起隧道前清理`;
+  if (foreign.length) return `[warp-pool]     :${port} 被 ${fmtForeign(foreign)} 占着：那是**别人的活隧道**，本进程不碰它（清了就是和另一个 daemon 互杀）`;
+  if (ours.length) return `[warp-pool]     :${port} 被 pid ${ours.join(",")} 占：本池 wireproxy 残留（上一代 daemon 留下的孤儿）→ 起隧道前清理`;
+  if (zombies.length) return `[warp-pool]     :${port} 有本池僵尸 pid ${zombies.join(",")}（已死等收尸：kill 无效，也不再占端口）`;
   const who = others.length ? others.map((o) => `pid ${o.pid} ${o.name}`).join("、") : "未知进程";
   return `[warp-pool]     :${port} 被 ${who} 占：非本池进程 → 不碰它，这个端口本轮跳过（查明：ss -ltnp | grep :${port}）`;
 }
 
-/** 清理残留的结果：扫了多少进程、命中谁、等了多久、清掉没——第 2 轮返工缺的就是「谁在占」。 */
-export function fmtReclaim({ port, scanned, ours = [], others = [], waitedMs, killed }) {
-  if (!ours.length) {
-    const extra = others.length ? "（端口另有别的进程占着，不是本池的，不动它）" : "";
-    return `[warp-pool] :${port} ${MARK.step} 清理残留：扫 ${scanned} 个进程，无本池残留${extra}`;
-  }
-  return `[warp-pool] :${port} ${MARK.step} 清理残留：扫 ${scanned} 个进程，命中本池残留 pid ${ours.join(",")} → ${killed ? "已清掉" : "清不掉"}（等了 ${dur(waitedMs)}）`;
+/** 清理残留的结果：扫了多少进程、命中谁、等了多久、清掉没、以及「另一个 daemon 占着」这种不该动的情形。 */
+export function fmtReclaim({ port, scanned, killed = [], zombies = [], foreign = [], waitedMs = 0, gone = true }) {
+  const parts = [`扫 ${scanned} 个进程`];
+  if (killed.length) parts.push(`命中本池残留 pid ${killed.join(",")} → ${gone ? "已清掉" : "清不掉（SIGTERM/SIGKILL 都试过）"}`);
+  else parts.push("无本池残留");
+  if (zombies.length) parts.push(`僵尸 pid ${zombies.join(",")}（已死等收尸，kill 无效）`);
+  if (foreign.length) parts.push(`${MARK.warn} ${fmtForeign(foreign)}——不碰它（清了就是和另一个 daemon 互杀）`);
+  const wait = killed.length ? `（等了 ${dur(waitedMs)}）` : "";
+  return `[warp-pool] :${port} ${MARK.step} 清理残留：${parts.join("；")}${wait}`;
 }
 
 /** 写出的 WireGuard 配置（体积能看出是不是缺字段：缺私钥那次就是 338B vs 373B）。 */
@@ -83,11 +94,13 @@ export function fmtExit({ port, code, signal, pid, aliveMs, tail }) {
   return `[warp-pool] :${port} ${MARK.fail} 隧道退出：${how}｜存活 ${aliveMs == null ? "?" : dur(aliveMs)}｜pid ${pid ?? "?"}｜${killed}｜末行="${tail || "没有输出"}"`;
 }
 
-/** 端口最终被非本池进程占着、拒绝硬起时，把占用者与「套接字还没释放」两种情形分开说。 */
-export function fmtPortBlocked({ port, ours = [], others = [] }) {
-  const oursTxt = ours.length ? `本池残留 pid ${ours.join(",")}（SIGTERM/SIGKILL 都没清掉：可能僵尸或权限不足）` : "";
+/** 端口最终被占着、拒绝硬起时，把「另一个 daemon 的活隧道 / 本池残留 / 僵尸 / 别人的进程 / 套接字还没释放」分开说。 */
+export function fmtPortBlocked({ port, ours = [], zombies = [], foreign = [], others = [] }) {
+  const foreignTxt = foreign.length ? `${fmtForeign(foreign)}（清了就是互杀，故本进程不碰）——先停掉那个 daemon：kill ${[...new Set(foreign.map((f) => f.ppid))].join(" ")}` : "";
+  const oursTxt = ours.length ? `本池残留 pid ${ours.join(",")}（SIGTERM/SIGKILL 都没清掉）` : "";
+  const zombieTxt = zombies.length ? `本池僵尸 pid ${zombies.join(",")}（已死等收尸，不占端口）` : "";
   const othTxt = others.length ? others.map((o) => `pid ${o.pid} ${o.name}`).join("、") : "";
-  const who = [oursTxt, othTxt].filter(Boolean).join("；") || "未知进程（已等套接字释放仍连得上）";
+  const who = [foreignTxt, oursTxt, zombieTxt, othTxt].filter(Boolean).join("；") || "未知进程（已等套接字释放仍连得上）";
   return `[warp-pool] :${port} ${MARK.fail} 端口被 ${who} 占着，拒绝再起（硬起只会 bind 失败、无限重启刷屏）。查明：ss -ltnp | grep :${port}`;
 }
 
@@ -121,11 +134,18 @@ export function fmtHeartbeat({ alive, total, pooled, exits, cooling, lastAllDown
   return `[warp-pool] ${MARK.step} 心跳：隧道 ${alive}/${total} 活｜入池 ${pooled}｜出口 ${ips.length ? `${ips.length} 种（${ips.join(",")}）` : "未知"}｜冷却中 ${cooling}｜全池不通 ${lastAllDown || "未发生"}`;
 }
 
+/** 同机其它 daemon：两个 daemon 抢同一批端口会互杀（真机事故根因），必须一次说清并给出精确 kill 命令。 */
+export function fmtSiblings({ list = [] } = {}) {
+  if (!list.length) return "";
+  const who = list.map((d) => `pid ${d.pid}（父 ${d.ppid}${d.aliveSec != null ? `，已运行 ${fmtAlive(d.aliveSec)}` : ""}）`).join("；");
+  return `[warp-pool] ${MARK.warn} 同机还有 ${list.length} 个别的 mslxdff daemon 在跑：${who} —— 它也在管同一个出口池目录，两边会把对方的隧道当「残留」杀掉（本池每个 conf 只允许一个拥有者）。先停掉它：kill ${list.map((d) => d.pid).join(" ")}`;
+}
+
 /**
  * 启动自检块：一次性把「这次按什么参数跑、二进制在哪多大、磁盘上有几个身份、端口分别被谁占着」打全。
  * 第 1 轮返工只看到「退出 code=1 / 已复活」循环，就是缺这一块——真因（孤儿占端口）当时只能靠猜。
  * @param {{ cfg: object, nodes: Array<object>, binPath?: string, binSize?: number,
- *           ownerOf: (port:number)=>Promise<{busy:boolean, ours:number[], others:Array<{pid:number,name:string}>}>,
+ *           ownerOf: (port:number)=>Promise<{busy:boolean, ours:number[], zombies:number[], foreign:Array<object>, others:Array<{pid:number,name:string}>}>,
  *           log?: Function }} opts
  */
 export async function startupReport({ cfg, nodes, binPath = "", binSize = 0, ownerOf, log = () => {} }) {
@@ -137,13 +157,21 @@ export async function startupReport({ cfg, nodes, binPath = "", binSize = 0, own
     try {
       states.push({ port, ...(await ownerOf(port)) });
     } catch (e) {
-      states.push({ port, busy: false, ours: [], others: [], error: String(e?.message || e) });
+      states.push({ port, busy: false, ours: [], zombies: [], foreign: [], others: [], error: String(e?.message || e) });
     }
   }
   const busy = states.filter((s) => s.busy);
   log(`[warp-pool] ${MARK.step} 端口体检：${busy.length} 个被占 / ${states.length} 个端口`);
   for (const s of states) log(fmtPortState(s));
+  // 另一个 daemon 占着端口 = 两个 daemon 互杀（真机事故根因）：必须单独大声报，并给出精确 kill 命令
+  const foreign = busy.flatMap((s) => s.foreign || []);
+  if (foreign.length) {
+    const pids = [...new Set(foreign.map((f) => f.ppid))];
+    log(`[warp-pool] ${MARK.warn} ${foreign.length} 个端口被 ${fmtForeign(foreign)} 占着 —— 那不是残留，本进程不碰它（清了就是互杀）。若那是上一代的 daemon：kill ${pids.join(" ")}`);
+  }
   const orphans = busy.filter((s) => (s.ours || []).length).length;
   if (orphans) log(`[warp-pool] ${MARK.warn} 有 ${orphans} 个端口被本池残留占着（上一代 daemon 被强杀留下的孤儿）——起隧道前逐个清理，日志会写清 pid`);
+  const zombies = busy.filter((s) => (s.zombies || []).length).length;
+  if (zombies) log(`[warp-pool] ${MARK.step} 有 ${zombies} 个端口上还有本池僵尸进程（已死等收尸：kill 无效，也不再占端口，无需处理）`);
   return states;
 }

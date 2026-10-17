@@ -38,9 +38,18 @@ export function startServer({ router, signals = true, host, onBeforeClose }, por
     // 关停留痕（Linux 有效：可捕获 SIGTERM/SIGINT 并记录）。Windows 注意：process.kill 的
     // SIGTERM 实为 TerminateProcess 强杀，被杀的 JS 进程收不到该事件，此处不会触发——
     // Windows 的"谁杀了我"靠 src/daemon.js stopDaemon() 的杀者留痕 + 最后一条 heartbeat。
+    let stopping = false;
     const onSignal = (sig) => {
+      if (stopping) return;
+      stopping = true;
       try { console.log(`[lifecycle] ${sig} received — shutting down (pid ${process.pid}, uptime ${Math.round(process.uptime())}s)`); } catch {}
-      close();
+      // 关停必须**真的退出**：warp-pool 的 wireproxy 子进程 stdio 是 pipe，活着的子进程会把事件循环钉住；
+      // 只 close() server（放开 8989）会留下「不监听端口却还活着」的幽灵 daemon
+      //（真机 2026-10-17：Oct16 起的幽灵与新版互杀 warp-pool 端口一整天，且它不在 daemon.pid 里，-restart 永远碰不到）。
+      // process.exit 会跑 exit 钩子（warp-pool 杀隧道、lifecycle 写遗书），故清理不会被跳过。
+      const hard = setTimeout(() => { try { console.log(`[lifecycle] ${sig} 优雅关停 8s 未完成 — 强制退出`); } catch {} process.exit(0); }, 8000);
+      hard.unref?.();
+      close().then(() => process.exit(0), (e) => { try { console.log(`[lifecycle] 关停抛错：${String(e?.message || e)}`); } catch {} process.exit(1); });
     };
     process.on("SIGINT", () => onSignal("SIGINT"));
     process.on("SIGTERM", () => onSignal("SIGTERM"));

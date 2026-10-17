@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
+import { findDaemons, fmtAlive } from "./runtime/proc-info.js";
 
 export function daemonDir() {
   return process.env.MSLXDFF_DAEMON_DIR || join(os.homedir(), ".config", "mslxdff");
@@ -109,4 +110,38 @@ export function stopDaemon({ reason = "stop" } = {}) {
   }
   if (killFailed) return { stopped: false, pid, reason: "EPERM — process kill denied (try running terminal as Administrator, or use restart-daemon.bat)" };
   return { stopped: true, pid, stale: !victimAlive };
+}
+
+/**
+ * 等目标进程真的死掉，超时补 SIGKILL。返回 { died, forced, waitedMs }。
+ * 为什么必须有：只发 SIGTERM 就 spawn 新 daemon，会留下「收到信号但退不出去」的幽灵
+ * （隧道子进程把事件循环钉住）——它不在 daemon.pid 里，从此 `-restart` 结构性碰不到它。
+ */
+export async function waitPidGone(pid, { timeoutMs = 5000, killWaitMs = 2000, stepMs = 100, kill = process.kill, isAlive = isPidAlive, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const t0 = Date.now();
+  while (isAlive(pid) && Date.now() - t0 < timeoutMs) await sleep(stepMs);
+  if (!isAlive(pid)) return { died: true, forced: false, waitedMs: Date.now() - t0 };
+  try { kill(pid, "SIGKILL"); } catch {}
+  const t1 = Date.now();
+  while (isAlive(pid) && Date.now() - t1 < killWaitMs) await sleep(stepMs);
+  return { died: !isAlive(pid), forced: true, waitedMs: Date.now() - t0 };
+}
+
+/**
+ * 清「不在 daemon.pid 里的」幽灵 daemon —— `-restart` 的结构性盲区
+ *（真机事故：旧 daemon 活了一整天，与新版互杀 warp-pool 端口，两边日志格式交错才暴露）。
+ * 先 SIGTERM 全清 → 等 5s → 仍活着的 SIGKILL。返回**确实清掉**的清单（供调用方诚实汇报）。
+ */
+export async function reapGhostDaemons({ self = process.pid, list = () => findDaemons({ self }), kill = process.kill, log = () => {}, isAlive = isPidAlive, settleMs = 5000, killWaitMs = 2000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const ghosts = list();
+  if (!ghosts.length) return [];
+  for (const g of ghosts) log(`[daemon] 发现不在册的 daemon pid=${g.pid}（父 ${g.ppid}，已运行 ${fmtAlive(g.aliveSec)}）—— -restart 杀不到它，清掉`);
+  for (const g of ghosts) { try { kill(g.pid, "SIGTERM"); } catch {} }
+  const t0 = Date.now();
+  while (Date.now() - t0 < settleMs && ghosts.some((g) => isAlive(g.pid))) await sleep(100);
+  const stuck = ghosts.filter((g) => isAlive(g.pid));
+  for (const g of stuck) { try { kill(g.pid, "SIGKILL"); } catch {} }
+  const t1 = Date.now();
+  while (Date.now() - t1 < killWaitMs && stuck.some((g) => isAlive(g.pid))) await sleep(100);
+  return ghosts.filter((g) => !isAlive(g.pid));
 }
