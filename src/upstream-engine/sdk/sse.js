@@ -38,6 +38,8 @@ export function createSseSerializer(captured = null) {
   let nextIndex = 0;
   const toolIndex = new Map();
   const toolDeltaIds = new Set();
+  // 「当前正在流式输入的工具」的 index：无 id 的 tool-input-delta 靠它归位（见该 case 的注释）
+  let lastToolIdx = null;
   // 加密思考往返：reasoning-start 的 providerMetadata 带 itemId + 加密态，随首帧透出
   let reasoningMeta = null;
   let reasoningFrameSent = false;
@@ -104,6 +106,7 @@ export function createSseSerializer(captured = null) {
         const idx = nextIndex++;
         toolIndex.set(part.id, idx);
         toolDeltaIds.add(part.id);
+        lastToolIdx = idx;   // 后续无 id 的 delta 归到这个工具
         return ensureRole() + frame({
           tool_calls: [{ index: idx, id: part.id, type: "function", function: { name: part.toolName || "", arguments: "" } }],
         });
@@ -112,17 +115,21 @@ export function createSseSerializer(captured = null) {
         // 未知 id **绝不能回退到 index 0**：那会把这段参数写进另一个工具（实测：callA 占 index 0 时，
         // 一个 id 丢失的 delta 让 funcA 的参数变成 `{"hijack":true}`），客户端会拿着被污染的参数去调用
         // 错误的函数。改为按 `tool-call` 分支的口径分配新 index —— 宁可多一个空工具槽，也不污染已有工具。
-        // 未知 id **绝不能回退到 index 0**：那会把这段参数写进另一个工具（实测：callA 占 index 0 时，
-        // 一个 id 丢失的 delta 让 funcA 的参数变成 `{"hijack":true}`），客户端会拿着被污染的参数去调用
-        // 错误的函数。改为按 `tool-call` 分支的口径分配新 index —— 宁可多一个空工具槽，也不污染已有工具。
-        let idx = toolIndex.get(part.id);
-        if (idx == null) { idx = nextIndex++; if (part.id) toolIndex.set(part.id, idx); }
+        // 无 id 的 delta 属于「当前正在流式输入的那个工具」：复用上一次用过的 index。
+        // 每个都分配新 index 会把一段参数拆成多个工具（实测：无 id 的 `{"a":` 与 `1}` 分别落到
+        // index 1 和 2，两个都是非法 JSON）—— 比旧代码的「都落 index 0」更糟。
+        let idx;
+        if (part.id && toolIndex.has(part.id)) idx = toolIndex.get(part.id);
+        else if (!part.id && lastToolIdx != null) idx = lastToolIdx;   // 无 id：沿用当前工具
+        else { idx = nextIndex++; if (part.id) toolIndex.set(part.id, idx); }
+        lastToolIdx = idx;
         return frame({ tool_calls: [{ index: idx, function: { arguments: String(part.delta ?? "") } }] });
       }
       case "tool-call": {
         const id = part.toolCallId;
         const idx = toolIndex.has(id) ? toolIndex.get(id) : nextIndex++;
         toolIndex.set(id, idx);
+        lastToolIdx = idx;   // 同 tool-input-start：后续无 id 的 delta 归到这个工具
         if (toolDeltaIds.has(id)) return null;
         const args = typeof part.input === "string" ? part.input : JSON.stringify(part.input ?? {});
         return ensureRole() + frame({ tool_calls: [{ index: idx, id, type: "function", function: { name: part.toolName || "", arguments: args } }] });

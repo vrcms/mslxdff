@@ -168,3 +168,35 @@ describe("tool-input-delta 的未知 id", () => {
     assert.ok(orphan && orphan.index !== 0, `未知 id 的片段必须用新 index，实际 ${JSON.stringify(orphan)}`);
   });
 });
+
+// BUG-38：BUG-37 的修复引入的回归 —— 无 id 的 tool-input-delta 每次分配新 index，
+// 把一段参数拆成多个工具（实测：`{"a":` 与 `1}` 分别落到 index 1 和 2，两个都是非法 JSON），
+// 比旧代码的「都落 index 0」更糟。无 id 的 delta 必须沿用「当前正在输入的那个工具」。
+describe("无 id 的 tool-input-delta", () => {
+  it("连续片段必须落到同一个 index，拼成完整参数", () => {
+    const s = createSseSerializer(null);
+    const frames = [];
+    for (const p of [
+      { type: "tool-input-start", id: "callA", toolName: "funcA" },
+      { type: "tool-input-delta", id: undefined, delta: '{"a":' },
+      { type: "tool-input-delta", id: undefined, delta: "1}" },
+    ]) {
+      const o = s.push(p);
+      if (!o) continue;
+      for (const line of String(o).split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const t = line.slice(5).trim();
+        if (!t || t === "[DONE]") continue;
+        let j;
+        try { j = JSON.parse(t); } catch { continue; }
+        const tc = j.choices?.[0]?.delta?.tool_calls;
+        if (tc) frames.push(tc[0]);
+      }
+    }
+    const argFrames = frames.filter((f) => f.function?.arguments);
+    assert.equal(argFrames.length, 2, "两段参数各一帧");
+    assert.equal(new Set(argFrames.map((f) => f.index)).size, 1, `两段必须同 index，实际 ${JSON.stringify(argFrames)}`);
+    const joined = argFrames.map((f) => f.function.arguments).join("");
+    assert.equal(joined, '{"a":1}', `拼起来必须是完整参数，实际 ${joined}`);
+  });
+});
