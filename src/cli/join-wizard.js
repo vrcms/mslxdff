@@ -52,8 +52,11 @@ export async function ensureServiceRunning() {
   const pid = readPid();
   if (pid && isPidAlive(pid)) return { pid, started: false };
   const newPid = startDaemon([]);
-  await waitForHealth(effectivePort([]), SERVICE_HEALTH_TIMEOUT_MS);
-  return { pid: newPid, started: true };
+  // 只认刚起的 pid：旧 daemon 若仍占端口，它的 /health 照样 200（同 BUG-29/30）。
+  const health = await waitForHealth(effectivePort([]), SERVICE_HEALTH_TIMEOUT_MS, { expectPid: newPid });
+  // 起完立即退出 = 端口被占（EADDRINUSE）。向导不能报「服务已启动」，那会把后续入组失败归错因。
+  if (!isPidAlive(newPid)) return { pid: null, started: false, failed: true, reason: "daemon exited right after start (port in use?)" };
+  return { pid: newPid, started: true, healthy: health.ok };
 }
 
 /**
@@ -148,8 +151,9 @@ export async function runJoinWizard(opts = {}) {
 
   out("→ 正在启动后台服务 ...");
   const service = await ensureService().catch((err) => ({ error: errMsg(err) }));
-  if (service?.error) {
-    out(`✗ 后台服务启动失败：${service.error}`);
+  if (service?.error || service?.failed) {
+    // failed 是「进程起来又立刻死了」（端口被占用）：不能落到下面「已在运行（pid null）」分支谎报成功。
+    out(`✗ 后台服务启动失败：${service.error || service.reason}`);
     out("  手动启动：mslxdff -d      查看日志：mslxdff -log 50");
   } else if (service?.started) {
     out(`✓ 后台服务已启动（pid ${service.pid}）`);

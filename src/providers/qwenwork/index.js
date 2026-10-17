@@ -101,17 +101,27 @@ export function createQwenworkProvider({
       const access = data.token || data.device_token;
       const refresh = data.refresh_token || account.refreshToken;
       const expiresAt = expiryUnix(data);
+      // 留底旧值：下面两行会就地覆盖 account 的 token，而同步 ring blob 必须按**旧**值去环里找。
+      const prevAccess = account.accessToken || "";
+      const prevRefresh = account.refreshToken || "";
       account.accessToken = access;
       account.refreshToken = refresh;
       try { await updateQwenworkTokens({ uid: account.uid, accessToken: access, refreshToken: refresh, expiresAt, file }); }
       catch { invalidateSession(account); }
-      // 同步 ring 里的 blob（token 轮换后旧 blob 即失效）
+      // 同步 ring 里的 blob（token 轮换后旧 blob 即失效）。
+      // ⚠ 必须拿**刷新前**的值去找旧 blob：旧写法拿的是 `data.refresh_token`（刷新后的新值）与
+      // `account.accessToken`（已在上面被赋成新值），与环里的旧 blob 结构性永不相等
+      // ⇒ 两个 find 恒返回 undefined ⇒ `if (cur) … else if (oldKey) …` 恒落空
+      // ⇒ 环里永远留旧 blob，下次 next() 取出的还是过期 token。
       try {
-        const oldKey = ring.keys.find((k) => { const b = accountFromBlob(k); return b && b.refreshToken === data.refresh_token; }) || null;
         const newBlob = JSON.stringify({ device_token: access, refresh_token: refresh });
-        const cur = ring.keys.find((k) => accountFromBlob(k)?.accessToken === account.accessToken);
+        const cur = prevAccess ? ring.keys.find((k) => accountFromBlob(k)?.accessToken === prevAccess) : null;
+        const oldKey = prevRefresh
+          ? ring.keys.find((k) => { const b = accountFromBlob(k); return b && b.refreshToken === prevRefresh; })
+          : null;
         if (cur) ring.replace(cur, newBlob);
         else if (oldKey) ring.replace(oldKey, newBlob);
+        else if (ring.keys.length === 1) ring.replace(ring.keys[0], newBlob); // 单号：无从比对也要换，否则旧 blob 永久留环
       } catch {}
       return true;
     } catch (e) {

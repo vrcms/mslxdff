@@ -7,6 +7,11 @@ import { logDir } from "./logs.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 
 const MAX_TRACE_BYTES = 1024 * 1024;
+// 裁剪后保留的比例（按**字节**回退）。与 logs.js 的 KEEP_RATIO 同口径：
+// 旧的 `slice(-100)` 是按**行数**回退，与按字节的阈值严重不匹配 —— 实测
+// cline-cline-pass-deepseek-v4.1-flash.log 到 1,006,482 字节 / 5346 行时，
+// 一次裁剪丢 5246 行（98.1% 历史），事后回溯基本不可用。按字节留 3/4 则每次只丢 ~1/4。
+const TRACE_KEEP_RATIO = 3 / 4;
 
 export function modelLogName(model) {
   const s = String(model || "unknown").trim().toLowerCase();
@@ -123,15 +128,39 @@ export function formatModelTrace({ type, reqId, model, data = {}, request = null
   else if (type === "empty-turn-retry") detail = `空转重试：retry ${data.retry ?? "-"}/${data.max ?? "-"}${data.step != null ? ` step=${data.step}` : ""} delay=${data.delayMs ?? "-"}ms${data.waitedMs ? ` waited=${data.waitedMs}ms` : ""}${data.requestWaitedMs != null ? ` 请求级累计=${data.requestWaitedMs}ms/预算${data.budgetMs ?? "-"}ms` : ""}${data.raiseTo ? ` max_tokens ${data.raiseFrom}→${data.raiseTo}` : ""}${data.upstream ? ` after=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.nudged ? ` nudged=1` : ""} reason=empty turn${data.reason ? ` :: ${safeText(data.reason, 120)}` : ""}`;
   else if (type === "empty-turn-recovered") detail = `空转重试成功：第 ${data.retries ?? "-"}/${data.max ?? "-"} 次重拉拿到真实输出，本轮共白等 ${data.waitedMs ?? "-"}ms${data.upstream ? ` via=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
   else if (type === "empty-turn-exhausted") detail = `空转重试已用尽：重试 ${data.retries ?? 0}/${data.max ?? "-"} 次仍零输出（累计等待 ${data.waitedMs ?? 0}ms${data.budgetOut ? `，请求级等待预算 ${data.budgetMs ?? "-"}ms 用尽` : ""}），交回换候选${data.heldOpen ? "（响应仍开着，换过去的正文还能送达）" : "（响应已封口，重拉只为省额度）"}${data.upstream ? ` after=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}${data.reason ? ` :: ${safeText(data.reason, 120)}` : ""}`;
-  else if (type === "peer-request" || type === "peer-forward" || type === "peer-error") detail = `peer=${hostPort(data.peer)} status=${data.status ?? "-"} latency=${data.latencyMs ?? "-"}ms payload=${kv(data.payload || {})} ${safeText(data.message || data.error || "")}`;
+  else if (type === "peer-request" || type === "peer-forward" || type === "peer-attempt" || type === "peer-error") detail = `peer=${hostPort(data.peer)}${data.name ? ` name=${data.name}` : ""} status=${data.status ?? "-"} latency=${data.latencyMs ?? "-"}ms payload=${kv(data.payload || {})} ${safeText(data.message || data.error || "")}`;
   else if (type === "relay-done") {
     const d = data.detail || {};
     const u = d.usage || {};
-    detail = `upstream_response status=${data.status ?? "-"} finish=${d.sawFinishReason || "-"} chunks=${d.receivedChunks ?? "-"} bytes=${d.receivedBytes ?? "-"} tools=${d.toolCalls ?? 0} chars=${d.chars ?? 0} usage(prompt=${u.prompt_tokens ?? "-"}/completion=${u.completion_tokens ?? "-"}) elapsed=${data.totalMs ?? "-"}ms${data.upstream ? ` upstream=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
+    // 缺 usage 时显式标注来源，别与「真的用了 0 token」混成同一个 `-`（BUG-13：经组员中继的响应
+    // 少数轮次拿不到 usage，成本报表会静默偏低，读日志的人也会误判成"这轮没消耗"）。
+    const noUsage = u.prompt_tokens == null && u.completion_tokens == null;
+    const usageTxt = noUsage
+      ? `usage(none${data.via === "peer" ? ":peer 未回" : ""})`
+      : `usage(prompt=${u.prompt_tokens ?? "-"}/completion=${u.completion_tokens ?? "-"})`;
+    detail = `upstream_response status=${data.status ?? "-"} finish=${d.sawFinishReason || "-"} chunks=${d.receivedChunks ?? "-"} bytes=${d.receivedBytes ?? "-"} tools=${d.toolCalls ?? 0} chars=${d.chars ?? 0} ${usageTxt} elapsed=${data.totalMs ?? "-"}ms${data.upstream ? ` upstream=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
   } else if (type === "result" || type === "client-response") {
     detail = `client status=${data.status ?? "-"} via=${data.via || "-"} actual=${data.actual || model || "-"} fallback=${data.fallback?.fallback ? 1 : 0} total=${totalMs ?? data.durationMs ?? "-"}ms${data.upstream ? ` upstream=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
   } else detail = safeText(`${decisionKv(data)} ${data.message || data.error || ""}`, 200);
   return `[${base.time}] [req=${base.req}] [model=${base.model}] [stage=${base.stage}] ${detail}`;
+}
+
+/**
+ * 按字节从尾部回退（不截半行）。行有长有短，固定行数 = 固定容量 ⇒ 一次裁剪就是断崖。
+ * 与 logs.js 的 keepTailByBytes 同口径（那边不导出，这里留一份最小实现，避免为一行日志反向依赖）。
+ */
+function keepTailByBytes(text, maxBytes) {
+  const limit = Math.max(1, Math.floor(maxBytes * TRACE_KEEP_RATIO));
+  if (Buffer.byteLength(text) <= limit) return text;
+  const lines = text.split("\n");
+  let bytes = 0;
+  let i = lines.length - 1;
+  for (; i >= 0; i--) {
+    const b = Buffer.byteLength(lines[i]) + 1;
+    if (bytes + b > limit) break;
+    bytes += b;
+  }
+  return lines.slice(i + 1).join("\n");
 }
 
 export function appendModelTrace(model, entry, { file = modelLogFile(model) } = {}) {
@@ -139,8 +168,10 @@ export function appendModelTrace(model, entry, { file = modelLogFile(model) } = 
   try {
     mkdirSync(logDir(), { recursive: true });
     if (existsSync(file) && statSync(file).size > MAX_TRACE_BYTES) {
-      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
-      writeFileSync(file, lines.slice(-100).join("\n") + "\n");
+      // 按字节留 3/4，不再固定砍到 100 行（那一次就丢 98% 历史，见 TRACE_KEEP_RATIO 注释）。
+      const kept = keepTailByBytes(readFileSync(file, "utf8"), MAX_TRACE_BYTES);
+      // 末尾补换行：下一次 appendFileSync 才不会把新行接到半截行尾巴上
+      writeFileSync(file, kept.endsWith("\n") ? kept : `${kept}\n`);
     }
     appendFileSync(file, line);
   } catch {

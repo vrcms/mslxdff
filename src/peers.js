@@ -5,6 +5,8 @@ export const DEFAULT_PEER_LIMIT_COOLDOWN_MS = 5 * 60_000;
 export const DEFAULT_PEER_HEAT_MS = 5 * 60_000;
 export const DEFAULT_MAX_HOPS = 3;
 export const DEFAULT_BROADBAND_STALE_MS = 90_000;
+// 连续几次连接级失败即视为"这个地址没服务"，进长冷却（不再靠 30s 短冷却反复捞回）。
+export const DEAD_FAIL_THRESHOLD = 2;
 
 const EMA_ALPHA = 0.3;
 
@@ -78,10 +80,19 @@ export function createPeersService({
   }
 
   // 分级冷却：连续 429（streak >= 2）→ limitCooldownMs（限流恢复慢，5min 内不再考虑）；
+  // 连接级永久失败（ECONNREFUSED/ENOTFOUND，deadFails >= 2）同样进长冷却；
   // 其他失败（网络抖动、5xx）→ cooldownMs（可能几秒恢复，给快速重试机会）。
   function coolingWindowMs(url) {
+    if ((stats[url]?.deadFails ?? 0) >= DEAD_FAIL_THRESHOLD) return limitCooldownMs;
     const streak = stats[url]?.streak429 ?? 0;
     return streak >= 2 ? limitCooldownMs : cooldownMs;
+  }
+
+  // 连接级失败（端口没服务/DNS 解析不了）与"这一发不顺"是两回事：前者换多少次都一样，
+  // 现网 node-b（127.0.0.1:3500，本机根本没服务）靠 30s 短冷却 + 兜底，被反复竞速 1569 次。
+  function isConnLevelFailure(message) {
+    const s = String(message || "");
+    return /ECONNREFUSED|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|ECONNRESET|fetch failed|connect (?:timeout|ETIMEDOUT)|socket hang up/i.test(s);
   }
 
   function isCooling(url) {
@@ -168,6 +179,7 @@ export function createPeersService({
         const err = lastErrorAt[p.url];
         if (typeof err !== "number") return false;
         if ((stats[p.url]?.streak429 ?? 0) >= 2) return false; // 429 长冷却：兜底也不考虑
+        if ((stats[p.url]?.deadFails ?? 0) >= DEAD_FAIL_THRESHOLD) return false; // 连接级永久失败：兜底也不考虑（否则每次白等一次拒连）
         return t - err < cooldownMs;
       })
       .sort((a, b) => (lastErrorAt[a.url] ?? 0) - (lastErrorAt[b.url] ?? 0));
@@ -183,7 +195,7 @@ export function createPeersService({
   // Long-lived error memory: a peer keeps its last-error timestamp until a
   // subsequent success resets it (success clears the failure record) or the
   // error is no longer in the persist store on next load.
-  async function recordError(url, { status } = {}) {
+  async function recordError(url, { status, message } = {}) {
     if (!url) return;
     lastErrorAt[url] = now();
     await persistErrors({ ...lastErrorAt });
@@ -191,6 +203,12 @@ export function createPeersService({
     if (Number(status) === 429) {
       const prev = stats[url] || {};
       stats[url] = { ...prev, streak429: (prev.streak429 || 0) + 1 };
+      await persistStats({ ...stats });
+    }
+    // 连接级失败计数（仅成功清零）：第 2 次起进长冷却，且不再被 coolingByLastError 兜底捞回
+    if (isConnLevelFailure(message)) {
+      const prev = stats[url] || {};
+      stats[url] = { ...prev, deadFails: (prev.deadFails || 0) + 1 };
       await persistStats({ ...stats });
     }
   }
@@ -214,6 +232,7 @@ export function createPeersService({
         fails: 0,
         model: model || prev.model || "",
         streak429: 0,
+        deadFails: 0,
       };
     } else {
       const prev = stats[url] || {};

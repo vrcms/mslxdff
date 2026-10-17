@@ -1,48 +1,9 @@
 import { performance } from "node:perf_hooks";
-import { applyFallbackHeaders, enrichNonStreamJson, enrichSseChunkText } from "./fallback.js";
+import { applyFallbackHeaders } from "./fallback.js";
 import { json } from "./helpers.js";
-import { extractUsageFromSseText } from "../metrics.js";
-import { scanSseChunk, scanNonStreamBody, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, extractRetryAfterSec, isTrivialFrame } from "./stream-scan.js"; // 逐帧/逐体观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
-import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
-// SDK 通道（TextEncoder）产出 Uint8Array，legacy 通道为 Buffer；
-// 统一转文本，避免 [DONE]/finish_reason/usage/chars 统计在 SDK 路径下静默失效。
-function chunkText(chunk) {
-  if (typeof chunk === "string") return chunk;
-  if (Buffer.isBuffer(chunk)) return chunk.toString("utf8");
-  if (chunk instanceof Uint8Array) return Buffer.from(chunk).toString("utf8");
-  return "";
-}
-
-// body.cancel() 可能返回非 Promise（自定义/AI SDK 流）——同步异常与 rejection 双路径都要吞掉
-function cancelBody(body) {
-  try {
-    const p = typeof body?.cancel === "function" ? body.cancel() : null;
-    if (p && typeof p.catch === "function") p.catch(() => {});
-  } catch { /* ignore */ }
-}
-
-// 注释帧（": keepalive" 等）不是模型输出：不算首块、不解除闸门、不触发超时救回，但照常透传
-function hasPayload(text) {
-  for (const line of String(text).split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith(":")) continue;
-    return true;
-  }
-  return false;
-}
-
-// 自持 reader 优先：for-await 会锁定 ReadableStream，使 body.cancel() 必 reject（真流上等于空操作），
-// 超时/断下游要真能掐上游必须走 reader.cancel()
-async function* bodyChunks(body, reader) {
-  if (reader) {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      yield value;
-    }
-  }
-  for await (const c of body) yield c;
-}
+import { scanSseChunk, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, isTrivialFrame } from "./stream-scan.js"; // 逐帧观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
+import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream, endTruncatedStream, flushPrefixTail } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
+import { chunkText, cancelBody, hasPayload, bodyChunks, enrichFirstReply, scanNonStreamReply } from "./stream-body.js"; // 读取层工具（字节→文本 / 取消上游 / 注释帧判定 / 自持 reader 迭代 / 首块富化 / 非流式先判后写），为让本文件退回 20KB 以内而拆出
 
 export const SLOW_TOTAL_MS = (() => {
   const n = Number(process.env.MSLXDFF_SLOW_TOTAL_MS);
@@ -72,6 +33,13 @@ export const SCORE_STALL_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 15_000;
 })();
 
+// 流式总时长上限。**默认关闭（0）是刻意且有实测依据的**：agent 长任务单次 relay 合法地远超 120s
+// ——扫全量模型日志 6157 条 relay-done，**103 条（1.67%）单次 >120s**，且主体是 `finish=tool_calls`
+// 的完整成功流（实测 144s/207s/228s/249s/308s/326s/343s/449s；其中 326s 那条正文 6933 字、客户端 200）。
+// 若默认设 120s，这些请求会被腰斩成截断——代价远大于「防挂死」的收益。
+// 真正的挂死已有三道约束：首块闸门 STREAM_TIMEOUT_MS（25s）、provider 自身请求级超时（raccoon 300s）、
+// 以及被腰斩时的 STREAM_TRUNCATED 错误帧（见 stream-hold.js，客户端至少能识别截断而不会误当完整结果）。
+// 需要硬上限时显式设 MSLXDFF_MAX_STREAM_MS=<ms>；`0`=显式关闭。
 export const MAX_STREAM_MS = (() => {
   const n = Number(process.env.MSLXDFF_MAX_STREAM_MS);
   return Number.isInteger(n) && n > 0 ? n : 0;
@@ -170,7 +138,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
       // 这样同模型重拉 / 换候选的正文还能顺着同一条连接送出去；上限兜底防异常形状囤内存。
       const prefix = createRevocablePrefix(res, detail);
       commitPendingPrefix = () => prefix.commit();
-      flushHeldTail = () => prefix.flushTail();
+      flushHeldTail = () => flushPrefixTail(prefix);
       let timedOut = false;
       let stalled = false;
       let tooLong = false;
@@ -258,19 +226,7 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
             onFirstChunk?.(ttf);
             if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
           }
-          let outChunk = chunk;
-          if (first === false && fallback?.fallback && wrotePayload === false) {
-            try {
-              let txt = "";
-              if (Buffer.isBuffer(chunk)) txt = chunk.toString("utf8");
-              else if (chunk instanceof Uint8Array) txt = Buffer.from(chunk).toString("utf8");
-              else if (typeof chunk === "string") txt = chunk;
-              if (txt.includes("data:")) {
-                const enriched = enrichSseChunkText(txt, fallback);
-                if (enriched !== txt) outChunk = Buffer.from(enriched, "utf8");
-              }
-            } catch {}
-          }
+          const outChunk = first === false && wrotePayload === false ? enrichFirstReply(chunk, fallback) : chunk;
           if (!holdErr) {
             const size = Buffer.isBuffer(outChunk) ? outChunk.length : (outChunk?.length ?? len);
             if (!isPayload) {
@@ -311,9 +267,20 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
         // Note: 超时是显式字段（timedOut），别再用 status 数值当信号 — 见 .agents/notes/implemented/architecture/2026-09-17-relay-timedout-explicit-and-metrics-seam.md
         return { status: 504, timedOut: true, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: true, interrupted: false, preflightMs: preflight, detail };
       }
-      if ((stalled || tooLong) && wrotePayload) {
+      if ((stalled || tooLong || detail.exitReason === "upstream-error") && wrotePayload) {
         interrupted = true;
         detail.exitReason = detail.exitReason || (stalled ? "stall" : "max");
+        // 这一段是**服务端主动掐的**，不是客户端跑的：收场后必须与正常收场同样摘掉 close 监听并置
+        // finishedNormally，否则 res.end() 触发的那次 close 会把 onClose 当「下游断开」执行，
+        // 让上层把这次截断记成一条 client-abort（`format.js` 渲染成「client abort」）——
+        // 服务端自己砍的流，错误归因到客户端身上。实测三形态对照：正常收场监听=0、截断收场监听=1。
+        finishedNormally = true;
+        res.removeListener("close", onClose);
+        // 上游从未给过终止标记就断了 ⇒ 客户端手里的是一份**被腰斩**的回答，必须补错误帧让它可识别
+        //（BUG-17：300s 腰斩 416KB 输出，旧行为只补 [DONE] 并按 200 返回，errors.log 零记录）。
+        if (endTruncatedStream(res, detail, flushHeldTail)) {
+          return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, truncated: true, preflightMs: preflight, detail };
+        }
         flushHeldTail(); // 断流收场也要把 [DONE] 按序补上，别让客户端等一个不存在的终止符
         try { res.end(); } catch { /* ignore */ }
         return { status: 200, timedOut: false, ttfMs: ttf, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted, preflightMs: preflight, detail };
@@ -355,19 +322,10 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   const text = await upRes.text();
   detail.receivedBytes = Buffer.byteLength(text);
   detail.exitReason = "normal-non-stream";
-  // 非流式同样「先判后写」：此刻 headers 还没 flush，body 一写下去就再无退路。
-  let enriched = null;
-  try {
-    const parsed = JSON.parse(text);
-    scanNonStreamBody(detail, parsed);
-    enriched = enrichNonStreamJson(parsed, fallback);
-  } catch { /* 上游给的不是可解析 JSON：走下面的原文透传 */ }
-  if (enriched === null) {
-    // 纯文本时按长度估 chars；若文本其实是 SSE（client 未要流但上游给流）仍尝试提 usage
-    try { detail.chars = text.length; } catch {}
-    try { const u = extractUsageFromSseText(text); if (u) detail.usage = u; } catch {}
-    try { if (detail.talk) captureTalkFallback(detail.talk, text); } catch {}
-  } else if (holdEndEnabled() && !detail.downstreamClosed && isEmptyTurnDetail(detail)) {
+  // 非流式同样「先判后写」：此刻 headers 还没 flush，body 一写下去就再无退路（判据实现见 stream-body.js）。
+  const ns = scanNonStreamReply(detail, text, { fallback, holdEnd: holdEndEnabled, isEmptyTurn: isEmptyTurnDetail, captureFallback: captureTalkFallback });
+  const enriched = ns.enriched;
+  if (ns.emptyTurn) {
     detail.exitReason = "empty-turn-hold";
     return { status: upRes.status, timedOut: false, ttfMs: null, totalMs: Math.round(performance.now() - t0), aborted: false, interrupted: false, heldOpen: true, preflightMs: preflight, detail };
   }

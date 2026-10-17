@@ -76,6 +76,29 @@ function talkConsumeLine(talk, raw, glued = false) {
   }
 }
 
+// 已见工具调用 index：按 detail 对象存进 WeakMap，既不污染 detail（它会被序列化进 events/模型日志，
+// 多一个属性就是日志噪音），也不随 detail 的展开/复制丢失统计口径。
+const tcIndexes = new WeakMap();
+
+/**
+ * 工具调用去重计数：同一 `index` 的多个分片只算一次。
+ * 分片缺 `index` 字段时退回 0（OpenAI 规范不要求每个 arguments 分片都重复 index）。
+ */
+function countToolCalls(detail, txt) {
+  if (!detail || typeof detail !== "object") return;
+  let seen = tcIndexes.get(detail);
+  if (!seen) { seen = new Set(); tcIndexes.set(detail, seen); }
+  const re = /"tool_calls"\s*:\s*\[\s*\{/g;
+  let m;
+  while ((m = re.exec(txt))) {
+    // 从 tool_calls 数组起点往后取第一个 index（choices[].index 在此位置之前，不会误取）
+    const after = txt.slice(m.index + m[0].length - 1);
+    const im = after.match(/"index"\s*:\s*(\d+)/);
+    seen.add(im ? Number(im[1]) : 0);
+  }
+  if (seen.size) detail.toolCalls = seen.size;
+}
+
 /** 逐 chunk 累积一轮对话的思考/正文/工具调用。talk 为空 = 未开启，直接返回。跨 chunk 行缓冲见文件头。 */
 export function captureTalkSse(talk, txt) {
   if (!talk) return;
@@ -124,8 +147,10 @@ export function scanSseChunk(detail, txt) {
     if (!detail.chatShaped && (txt.includes('"choices"') || txt.includes('"delta"') || txt.includes('"finish_reason"') || txt.includes('"usage"') || txt.includes('"prompt_tokens"') || txt.includes("[DONE]"))) detail.chatShaped = true;
     // 工具调用计数（空数组不算）：tool_calls 无正文是合法 agent 轮，
     // 空转闸门必须豁免它，否则所有工具轮都会被误判为空轮——见 relay-pipeline 4b。
-    const tc = txt.match(/"tool_calls"\s*:\s*\[\s*\{/g);
-    if (tc) detail.toolCalls = (detail.toolCalls || 0) + tc.length;
+    // 口径按 `index` 去重：流式 tool_calls 的 arguments 是**分片**到达的，每个分片都含
+    // `"tool_calls":[{"index":N,...` ⇒ 按命中次数累加会把一次调用计成 N 次（实测 4894/5999 帧命中，
+    // 虚高数千倍，且与 scanNonStreamBody 的 `.length` 口径不一致）。去重后与非流式同义。
+    countToolCalls(detail, txt);
     // 尝试提取 usage（流式末帧）：口径收口到 metrics.js，与未流式分支共用
     if (txt.includes("\"usage\"") || txt.includes("\"prompt_tokens\"")) {
       try {

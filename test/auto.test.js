@@ -236,9 +236,12 @@ test("http 429 records limit status, later success resets to normal", async () =
     },
   });
   try {
-    // 显式指定 = 死锁单模型：429 直接透传给客户端（不 fallback 到 mimo）
+    // 指定 free 模型 + 额度类 429：横向切同池兄弟（BUG-7，用户点名诉求）——
+    // 单个 free 模型额度耗尽不该让整条链路失败，客户端拿到兄弟模型的 200。
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
-    assert.equal(res.status, 429);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).model, "mimo-v2.5-free", "额度类失败切同池兄弟");
+    // 失败的那一发照常记账（限流状态不清零，供冷却/择优使用）
     const st = auto.errors()["deepseek-v4-flash-free"];
     assert.equal(st.status, "limit");
     assert.equal(st.code, 429);
@@ -252,6 +255,36 @@ test("http 429 records limit status, later success resets to normal", async () =
     assert.equal(st2.code, 200);
     assert.ok(st2.at >= st.at, "success timestamp must be newer or equal");
   } finally {
+    await app.close();
+  }
+});
+
+test("MSLXDFF_FREE_POOL_FALLBACK=0：回到「显式指定即锁死」，429 原样透传", async () => {
+  const auto = createAutoSelector({
+    loadCandidates: async () => ["deepseek-v4-flash-free", "mimo-v2.5-free"],
+    errors: {},
+    cooldownMs: 0,
+  });
+  const app = await boot({
+    auto,
+    upstreamHandler: (req, res, body) => {
+      if (JSON.parse(body).model === "deepseek-v4-flash-free") {
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Rate limit exceeded" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    },
+  });
+  const prev = process.env.MSLXDFF_FREE_POOL_FALLBACK;
+  process.env.MSLXDFF_FREE_POOL_FALLBACK = "0";
+  try {
+    const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
+    assert.equal(res.status, 429, "逃生阀关掉后必须回到旧口径（不测同池兄弟）");
+  } finally {
+    if (prev === undefined) delete process.env.MSLXDFF_FREE_POOL_FALLBACK;
+    else process.env.MSLXDFF_FREE_POOL_FALLBACK = prev;
     await app.close();
   }
 });

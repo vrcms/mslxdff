@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runSerialTrial } from "../src/chat-pipeline/serial-trial.js";
 import { runAutoRace } from "../src/chat-pipeline/auto-race.js";
-import { classifyTerminalUpstream, terminalShortcircuitOff } from "../src/chat-pipeline/terminal-verdict.js";
+import { classifyTerminalUpstream, terminalShortcircuitOff, isPoolSwitchWorthy } from "../src/chat-pipeline/terminal-verdict.js";
 
 // 现网原文（2026-10-15，~/.config/mslxdff/deepseek-v4.1-flash-free.log req=mv9m1d2v-n2y5）
 const FREE_TIER_BODY = `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}`;
@@ -32,6 +32,21 @@ test("classifyTerminalUpstream: 免费层身份判决判终局，4xx 任意码�
   assert.equal(classifyTerminalUpstream(404, FREE_TIER_BODY).kind, "free-tier-blocked", "同一具名判决不该被状态码卡掉");
   assert.equal(classifyTerminalUpstream(400, `{"error":{"type":"FreeTierError","message":"quota exceeded"}}`).kind, "free-tier-blocked");
   assert.equal(classifyTerminalUpstream(500, FREE_TIER_BODY).terminal, false, "5xx 永远可恢复，不许终局");
+});
+
+// BUG-19：具名资格判决 ENTITLEMENT_ERROR 曾漏判 —— 既不判终局（照跑组员接力），
+// 又让 isPoolSwitchWorthy 返回 false（指定 free 模型的同池互备路径一并关闭）。
+// 现网原文（errors.log，2026-10-17 两次逐字相同，cline/cline-pass/deepseek-v4.1-flash）
+const ENTITLEMENT_BODY = `{"error":{"code":"ENTITLEMENT_ERROR","message":"Error 403: the user is not subscribed to required model plan"}}`;
+
+test("classifyTerminalUpstream: 具名资格判决 ENTITLEMENT_ERROR 判终局（换号换节点都不会变）", () => {
+  const r = classifyTerminalUpstream(403, ENTITLEMENT_BODY);
+  assert.equal(r.terminal, true, "套餐缺失是终局判决");
+  assert.equal(r.kind, "free-tier-blocked");
+  // 文案兜底：上游改 code 名但保留人类可读 message 时仍要命中
+  assert.equal(classifyTerminalUpstream(403, `{"error":{"message":"the user is not subscribed to required model plan"}}`).terminal, true);
+  // 终局 ⇒ 必须同时放开「换同池兄弟」，否则出现「判了终局却仍不换模型」的半截行为
+  assert.equal(isPoolSwitchWorthy({ status: 403, terminal: r.terminal }), true, "终局必须让同池互备也放行");
 });
 
 test("classifyTerminalUpstream: 模型 id 不存在（400/403/404/422）判终局，中英文都收", () => {

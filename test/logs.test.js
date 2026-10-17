@@ -87,6 +87,23 @@ test("appendEvent writes JSON lines and recentEvents reads them back", () => {
   assert.ok(!Number.isNaN(Date.parse(events[0].ts)), "ts must be parseable");
 });
 
+// BUG-10：溢出回退必须按**字节**保留，不得断崖到固定行数（旧 slice(-100) 一次丢 90% 容量）
+test("events 溢出后按字节保留末尾大部分，而非断崖到 100 行", () => {
+  const dir = tmpDir();
+  const file = join(dir, "events.log");
+  // 每行 ~1KB（贴近现网均值），写 2000 行 ≈ 2MB，超过 1MB 阈值必触发裁剪
+  const pad = "x".repeat(900);
+  for (let i = 0; i < 2000; i++) appendEvent({ type: "request", seq: i, detail: { talkChars: 0, pad } }, { file });
+  const raw = readFileSync(file, "utf8");
+  const lines = raw.split("\n").filter(Boolean);
+  // 旧行为：恰好 99~100 行；新行为：按预算保留，行数远超 100
+  assert.ok(lines.length > 500, `裁剪后应保留远超 100 行，实际 ${lines.length}`);
+  // 且保留的是**末尾**：最后一行必须是最后写入的那条
+  assert.equal(JSON.parse(lines[lines.length - 1]).seq, 1999);
+  // 不得截半行：每一行都还得是合法 JSON
+  for (const l of lines.slice(-5)) JSON.parse(l);
+});
+
 test("module-level default helpers use the same state dir", async () => {
   // sanity: importing the default file helpers works and persists to disk
   const dir = tmpDir();

@@ -36,17 +36,29 @@ export function effectiveHost() {
   return "0.0.0.0";
 }
 
-export async function waitForHealth(port, timeoutMs) {
+/**
+ * 等 /health 可用。给了 expectPid 就**只认那个 pid**：旧 daemon 仍占着端口时它也会回 200，
+ * 不校验身份的话「新进程 EADDRINUSE 秒退、旧版还在服务」会被当成启动成功（BUG-29）。
+ * 返回 { ok, pid, version }：ok=true 表示确认到位（无 expectPid 时即 res.ok）。
+ */
+export async function waitForHealth(port, timeoutMs, { expectPid = null } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await compatFetch(`http://127.0.0.1:${port}/health`);
-      if (res.ok) return;
+      if (res.ok) {
+        if (expectPid == null) return { ok: true, pid: null, version: null };
+        let body = null;
+        try { body = await res.json(); } catch { /* 老版本 daemon 不认 JSON 之外的东西 */ }
+        // 老版本 /health 只回 {status:"ok"}，没有 pid ⇒ 无法证明是新进程，继续等（旧版本来就该被换掉）
+        if (body && Number(body.pid) === Number(expectPid)) return { ok: true, pid: body.pid, version: body.version ?? null };
+      }
     } catch {
       // not up yet
     }
     await new Promise((r) => setTimeout(r, 100));
   }
+  return { ok: false, pid: null, version: null };
 }
 
 // Only upgrade, never downgrade. Keeps a newer daemon running.

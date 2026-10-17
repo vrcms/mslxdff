@@ -1,9 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
+import { markerFile, writeExitMarker } from "./runtime/lifecycle-forensics.js";
 import { aliveSec, findDaemons, fmtAlive } from "./runtime/proc-info.js";
 
 export function daemonDir() {
@@ -27,11 +27,38 @@ export function daemonEntry() {
     : join(dirname(here), "..", "bin", "mslxdff.js");
 }
 
+// daemon.log 是唯一能事后回溯崩溃的载体（uncaughtException 堆栈、[sdk-upstream] 诊断），
+// 却是全仓唯一**没有**任何大小上限的日志（实测 7MB / 60,321 行且持续增长）——与 events/calls/errors
+// 的桶管理完全不对称。子进程以追加 fd 持着它，运行中改名会让 fd 跟着旧 inode（写进 .1），故轮转
+// 放在**父进程启动时**：每次起 daemon 先轮转，再开新 fd，子进程永远写新文件。
+const DAEMON_LOG_MAX_BYTES = (() => {
+  const n = Number(process.env.MSLXDFF_DAEMON_LOG_MAX_BYTES);
+  return Number.isInteger(n) && n > 0 ? n : 8 * 1024 * 1024;
+})();
+
+/** 超过阈值就把 daemon.log 改名成 .1（原 .1 → .2），只留两代。返回是否发生了轮转。 */
+export function rotateDaemonLog(maxBytes = DAEMON_LOG_MAX_BYTES) {
+  const file = logFile();
+  try {
+    if (!existsSync(file)) return false;
+    if (statSync(file).size <= maxBytes) return false;
+    const one = `${file}.1`;
+    const two = `${file}.2`;
+    try { if (existsSync(one)) renameSync(one, two); } catch {}
+    renameSync(file, one);
+    return true;
+  } catch {
+    return false; // 轮转失败绝不阻断启动：日志写不进去是遗憾，daemon 起不来是事故
+  }
+}
+
 export function startDaemon(args = []) {
   const entry = daemonEntry();
   const dir = daemonDir();
   mkdirSync(dir, { recursive: true });
+  const rotated = rotateDaemonLog();
   const logFd = openSync(logFile(), "a", 0o600);
+  if (rotated) { try { appendFileSync(logFd, `[daemon] 上一份日志超过 ${DAEMON_LOG_MAX_BYTES} 字节，已轮转为 daemon.log.1\n`); } catch {} }
   const env = { ...process.env, MSLXDFF_DAEMON: "1" };
   // a -debug foreground session wouldn't pass MSLXDFF_DEBUG to the
   // background daemon it restores (that flag means "print events to stdout")
@@ -75,7 +102,7 @@ export function isPidAlive(pid) {
   }
 }
 
-export function stopDaemon({ reason = "stop" } = {}) {
+export function stopDaemon({ reason = "stop", kill = process.kill, taskkill = spawnSync } = {}) {
   const pid = readPid();
   if (!pid) return { stopped: false, reason: "no pid file" };
   // 杀者牌（验尸官的另一半证据）：动手前写、自带死者身份。只给在世者留牌——给尸体留牌
@@ -89,26 +116,36 @@ export function stopDaemon({ reason = "stop" } = {}) {
   } catch {}
   if (victimAlive) { try { writeExitMarker(daemonDir(), { reason, prevPid: pid, prevVersion: readPidVersion(), byPid: process.pid }); } catch {} }
   let killFailed = false;
+  // 杀失败必须撤销杀者牌：牌是「我杀成了」的声明，collectAutopsy 见新鲜牌即判 killed-by-cli；
+  // 留在盘上等于给**仍在世的** daemon 提前开出一份假死亡证明（下次启动把它记成"已被杀死"）。
+  const dropMarker = () => { try { unlinkSync(markerFile(daemonDir())); } catch {} };
   try {
-    process.kill(pid, "SIGTERM");
+    kill(pid, "SIGTERM");
   } catch (err) {
     if (err.code === "ESRCH") {
       // process already gone — nothing to do
     } else if (err.code === "EPERM" && process.platform === "win32") {
       // Windows: process.kill uses TerminateProcess which requires matching elevation.
       // Fall back to taskkill /F which can terminate processes we don't own a handle to.
-      const r = spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true });
-      if (r.error || r.status !== 0) killFailed = true;
+      const r = taskkill("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true });
+      if (r?.error || r?.status !== 0) killFailed = true;
     } else {
+      dropMarker(); // 同一笔账：没杀成就不许留牌
       throw err;
     }
+  }
+  // 杀失败 = 进程还活着 ⇒ **pid 文件必须留着**。删了它，这个仍在监听端口的 daemon 就从 pid 台账里
+  // 消失，变成 `-restart` 结构性碰不到的幽灵（daemon.js:158 记录的真机事故类型）：下一轮 readPid()
+  // 返回 null ⇒ -stop 打印「not running」、-restart 直接起新的与它抢端口，而它其实一直在跑。
+  if (killFailed) {
+    dropMarker();
+    return { stopped: false, pid, reason: "EPERM — process kill denied (try running terminal as Administrator, or use restart-daemon.bat)" };
   }
   try {
     unlinkSync(pidFile());
   } catch {
     // already gone
   }
-  if (killFailed) return { stopped: false, pid, reason: "EPERM — process kill denied (try running terminal as Administrator, or use restart-daemon.bat)" };
   return { stopped: true, pid, stale: !victimAlive };
 }
 

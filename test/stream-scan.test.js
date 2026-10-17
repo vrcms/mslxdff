@@ -39,6 +39,21 @@ test("逐帧扫描分开统计正文与思考字符（usage 帧路径）", () =>
   assert.equal(detail.reasoningChars, 40, "思考字符必须单独累计");
 });
 
+// BUG-14：流式 tool_calls 的 arguments 分片到达，每个分片都含 "tool_calls":[{index:N…；
+// 按命中次数累加会把一次调用计成数千次（实测 4894/5999 帧命中），必须按 index 去重
+test("tool_calls 按 index 去重计数，分片不再虚高", () => {
+  const detail = blankDetail();
+  // 同一次调用（index:0）的 arguments 被切成 10 个分片
+  for (let i = 0; i < 10; i++) scanSseChunk(detail, dataLine({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: String(i) } }] } }] }));
+  assert.equal(detail.toolCalls, 1, "10 个分片 = 1 次调用");
+  // 再来一次真正的新调用（index:1）
+  scanSseChunk(detail, dataLine({ choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: "c2", function: { name: "read", arguments: "{}" } }] } }] }));
+  assert.equal(detail.toolCalls, 2, "新的 index 才算新调用");
+  // 空数组不计（空转闸门豁免依赖此口径）
+  scanSseChunk(detail, dataLine({ choices: [{ index: 0, delta: { tool_calls: [] }, finish_reason: "tool_calls" }] }));
+  assert.equal(detail.toolCalls, 2, "空数组不加计数");
+});
+
 test("无 usage 帧时走正则兜底，思考字符同样要记（reasoning_content）", () => {
   const detail = blankDetail();
   scanSseChunk(detail, dataLine({ choices: [{ index: 0, delta: { reasoning_content: "思".repeat(20) } }] }));

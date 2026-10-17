@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, unlinkSync } from "node:fs";
+import { mkdtempSync, unlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pidFile, logFile, writePid, readPid, readPidVersion, isPidAlive, stopDaemon, startDaemon } from "../src/daemon.js";
+import { pidFile, logFile, writePid, readPid, readPidVersion, isPidAlive, stopDaemon, startDaemon, daemonDir } from "../src/daemon.js";
+import { markerFile } from "../src/runtime/lifecycle-forensics.js";
 
 const DIR = mkdtempSync(join(tmpdir(), "mslxdff-daemon-"));
 
@@ -45,6 +46,47 @@ test("stopDaemon returns stopped:false when no pid", () => {
   } catch {}
   const r = stopDaemon();
   assert.equal(r.stopped, false);
+});
+
+// BUG-28：杀失败（EPERM 且 taskkill 也没成）时原代码**照样删 pid 文件**，于是这个仍在监听端口的
+// daemon 从台账里消失：下次 readPid() 返回 null ⇒ -stop 打印「not running」、-restart 直接起新的与它抢端口，
+// 而它其实一直在跑 —— 正是 daemon.js 注释里记的「不在册的幽灵 daemon，-restart 结构性盲区」。
+// 同时杀者牌（exit-marker）是「我杀成了」的声明，留着会让下次启动把**在世的**它验成 killed-by-cli。
+test("stopDaemon 杀失败时必须保留 pid 文件、并撤掉杀者牌", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-stopperr-"));
+  const prevDir = process.env.MSLXDFF_DAEMON_DIR;
+  process.env.MSLXDFF_DAEMON_DIR = dir;
+  try {
+    writePid(process.pid); // 用一个确实活着的 pid，victimAlive 才为真、才会写牌
+    const eperm = () => { const e = new Error("EPERM"); e.code = "EPERM"; throw e; };
+    const r = stopDaemon({
+      reason: "test",
+      kill: eperm,
+      taskkill: () => ({ error: null, status: 1 }), // taskkill 也失败
+    });
+    assert.equal(r.stopped, false);
+    assert.equal(r.pid, process.pid);
+    assert.equal(existsSync(pidFile()), true, "进程还活着，pid 文件不得删除（否则变成 -restart 盲区）");
+    assert.equal(readPid(), process.pid, "台账必须还认得它");
+    assert.equal(existsSync(markerFile(dir)), false, "没杀成就不能留杀者牌（会开出假死亡证明）");
+  } finally {
+    process.env.MSLXDFF_DAEMON_DIR = prevDir;
+  }
+});
+
+test("stopDaemon taskkill 兜底成功时仍按杀成功处理：删 pid 文件", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-stopok-"));
+  const prevDir = process.env.MSLXDFF_DAEMON_DIR;
+  process.env.MSLXDFF_DAEMON_DIR = dir;
+  try {
+    writePid(process.pid);
+    const eperm = () => { const e = new Error("EPERM"); e.code = "EPERM"; throw e; };
+    const r = stopDaemon({ reason: "test", kill: eperm, taskkill: () => ({ error: null, status: 0 }) });
+    assert.equal(r.stopped, true);
+    assert.equal(existsSync(pidFile()), false, "杀成功才删 pid 文件");
+  } finally {
+    process.env.MSLXDFF_DAEMON_DIR = prevDir;
+  }
 });
 
 test("startDaemon spawns a detached child and stopDaemon kills it", async () => {

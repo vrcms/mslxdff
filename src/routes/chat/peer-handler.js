@@ -1,7 +1,7 @@
 import { relay, SLOW_TOTAL_MS, STREAM_TIMEOUT_MS, STALL_TIMEOUT_MS, SCORE_STALL_MS } from "../stream.js";
 import { buildFallbackInfo } from "../fallback.js";
 import { createRelayPipeline } from "./relay-pipeline.js";
-import { racePeerCandidates } from "../peers.js";
+import { racePeerCandidates, peerStageCtx } from "../peers.js";
 
 /** 薄适配：peer 赛跑后经由 pipeline（via=peer） */
 export async function handlePeerRelay({
@@ -28,7 +28,8 @@ export async function handlePeerRelay({
   const { createPipeline = createRelayPipeline, racePeerCandidates: race = racePeerCandidates } = deps;
   evt("peer-race-start", { reqId: handlerCtx.reqId, model, peers: peers.ordered().length });
   const peerErrors = [];
-  const pctx = { ...handlerCtx, peerErrors };
+  // 三批共享同一 peer 阶段总预算（同 hedge：旧行为是每批各吃满一次等头超时，串行叠加到 90s+）
+  const pctx = peerStageCtx({ ...handlerCtx, peerErrors });
   const win =
     (await race(peers.ordered(), pctx)) ||
     (await race(peers.orderedByLastError(), pctx)) ||

@@ -156,7 +156,13 @@ export function createChatService({
       if (tried.has(uid || key)) continue;
       tried.add(uid || key);
       await maybeRefresh(auth, key);
-      const curKey = keys.includes(key) ? key : (keys[keys.indexOf(key)] || key);
+      // 刷新后用**新** accessToken 发请求：maybeRefresh → applyTokenRefresh 会把 keys[keyIdx] 就地换成 newToken
+      //（`account-store.js` 的 `keys[idx] = newToken`），而局部变量 key 仍是旧值。
+      // 旧写法 `keys.includes(key) ? key : (keys[keyIdx] || key)` 两个分支恒等于 key（命中取 key；未命中的
+      // indexOf 为 -1 ⇒ keys[-1] undefined ⇒ `|| key` 又取 key）⇒ 整行是恒等 no-op，刷新后照样拿旧 token 打上游。
+      // 取 keys[keyIdx]：未刷新时它就是 key（无行为变化），刷新后即新 token。
+      const keyIdx = keys.indexOf(key);
+      const curKey = keyIdx >= 0 ? keys[keyIdx] : key;
       let res;
       try { res = await postOnce(curKey, authForKey(curKey), payload); }
       catch (e) { try { activeRing?.onError(key); } catch {} lastErr = e; continue; }

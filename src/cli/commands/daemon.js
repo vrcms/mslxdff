@@ -4,7 +4,6 @@ import { setPort } from "../../state.js";
 import { logDir, eventsFile, callsFile, errorsFile } from "../../logs.js";
 import { effectivePort, waitForHealth, stopDaemonIfOutdated, compareSemver, argValue } from "../policy.js";
 import { printStatus } from "../status.js";
-import { compatFetch, timeoutSignal } from "../../compat.js";
 import { findDaemons, fmtAlive } from "../../runtime/proc-info.js";
 
 /** 停 daemon 并**等它真死**：只发 SIGTERM 就起新的会留下幽灵（隧道子进程把事件循环钉住，见 daemon.js waitPidGone）。 */
@@ -24,6 +23,10 @@ export async function handleStop(args) {
   const { stopped, pid, reason } = await stopDaemonHard("stop");
   if (stopped) {
     console.log(`mslxdff daemon stopped (pid ${pid})`);
+  } else if (pid) {
+    // 「有 pid 但没停成」≠「没在跑」：杀被拒时它还在监听端口，说成 not running 会让人以为可以安全重启。
+    console.log(`mslxdff daemon NOT stopped (pid ${pid})${reason ? `: ${reason}` : ""}`);
+    process.exit(1);
   } else {
     console.log(`mslxdff daemon not running${reason ? ` (${reason})` : ""}`);
   }
@@ -36,7 +39,16 @@ export async function handleRestart(args, VERSION) {
   const alive = pid ? isPidAlive(pid) : false;
   if (alive) {
     console.log(`restarting daemon (pid ${pid})...`);
-    await stopDaemonHard("restart");
+    const r = await stopDaemonHard("restart");
+    // 停不掉就别起新的（BUG-29）：旧 daemon 还占着端口 ⇒ 新进程 bind 必 EADDRINUSE 立刻退出，
+    // 而 waitForHealth 打的是**旧** daemon 的 /health（照样 200）、Windows 上 findDaemons 读不到 /proc
+    // 恒返回空 ⇒ 最后打印「restarted as ... (pid <新的死 pid>)」，把「重启失败且旧版还在跑」谎报成成功。
+    if (!r.stopped && r.pid) {
+      console.error(`⚠ 旧 daemon (pid ${r.pid}) 没能停掉：${r.reason}`);
+      console.error("  继续起新进程只会让它在 EADDRINUSE 上立刻退出，而旧版仍在应答 —— 已中止。");
+      console.error("  请用管理员终端重试（mslxdff -stop，或 taskkill /PID " + r.pid + " /F）后再 -restart。");
+      process.exit(1);
+    }
   } else if (pid) {
     console.log(`daemon pid ${pid} is stale (not running) — starting fresh...`);
     try { stopDaemon({ reason: "restart" }); } catch {}
@@ -49,18 +61,21 @@ export async function handleRestart(args, VERSION) {
   if (ghosts.length) console.log(`已清掉 ${ghosts.length} 个不在册的 daemon（pid ${ghosts.map((g) => g.pid).join(", ")}）`);
   const port = effectivePort(args);
   const spawnedPid = startDaemon([]);
-  await waitForHealth(port, 4000);
-  let ok = false;
-  try {
-    const r = await compatFetch(`http://127.0.0.1:${port}/health`, { signal: timeoutSignal(1200) });
-    ok = r.ok;
-  } catch {}
-  // 诚实报错：/health 可能由**残留的旧 daemon** 应答（它也在监听同一个端口），所以不能只看 health
+  // 只认**刚起的那个 pid**：旧 daemon 若仍占着端口，它的 /health 同样 200（BUG-29 谎报的根源）。
+  const health = await waitForHealth(port, 4000, { expectPid: spawnedPid });
+  // 诚实报错：/health 可能由**残留的旧 daemon** 应答（它也在监听同一个端口），所以不能只看 health。
+  // 新进程已经死了就更不该报成功——Windows 上 EADDRINUSE 秒退时 CLI 什么都收不到。
   const leftover = findDaemons({ self: spawnedPid });
   const leftTxt = leftover.map((g) => `pid ${g.pid}（已运行 ${fmtAlive(g.aliveSec)}）`).join("；");
+  if (!isPidAlive(spawnedPid)) {
+    console.error(`⚠ 新 daemon (pid ${spawnedPid}) 启动后立即退出 —— 端口 ${port} 大概仍被旧进程占着（EADDRINUSE）。`);
+    if (leftover.length) console.error(`  仍在跑的旧 daemon：${leftTxt}`);
+    console.error(`  详见 ${logFile()}`);
+    process.exit(1);
+  }
   if (leftover.length) {
     console.log(`⚠ 仍有 ${leftover.length} 个旧 daemon 在跑：${leftTxt} —— 它们会和新的抢出口池端口，请 kill 掉`);
-  } else if (ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);
+  } else if (health.ok) console.log(`mslxdff v${VERSION} restarted as a background daemon (pid ${spawnedPid})`);
   else console.log(`mslxdff v${VERSION} restarted (pid ${spawnedPid}) — health check pending (http://127.0.0.1:${port}/health)`);
   console.log(`endpoint:   http://localhost:${port}/v1`);
   console.log(`log:        ${logFile()}`);
@@ -79,10 +94,21 @@ export async function handlePort(args) {
   setPort(port);
   const daemon = readPid();
   if (daemon) {
-    stopDaemon({ reason: "restart" });
-    startDaemon(["-port", String(port)]);
-    await waitForHealth(port, 4000);
-    console.log(`mslxdff restarted on port ${port} (pid ${readPid()})`);
+    // 同 BUG-29：老 daemon 还在（同一个配置端口）时起新的一定抢不到端口，且 -port 已落盘，
+    // 谎报「restarted on port N」会让人以为新端口已生效，实际仍是旧的（甚至旧的监听着旧端口）。
+    const r = stopDaemon({ reason: "restart" });
+    if (!r.stopped && r.pid) {
+      console.error(`⚠ 旧 daemon (pid ${r.pid}) 没能停掉：${r.reason}`);
+      console.error(`  端口已保存为 ${port}，但它要等旧进程退出后才生效。已中止，未启动新进程。`);
+      process.exit(1);
+    }
+    const spawned = startDaemon(["-port", String(port)]);
+    const health = await waitForHealth(port, 4000, { expectPid: spawned });
+    if (!isPidAlive(spawned)) {
+      console.error(`⚠ 新 daemon (pid ${spawned}) 启动后立即退出 —— 端口 ${port} 大概仍被占用（EADDRINUSE）。详见 ${logFile()}`);
+      process.exit(1);
+    }
+    console.log(`mslxdff restarted on port ${port} (pid ${spawned})${health.ok ? "" : " — health check pending"}`);
     console.log(`endpoint:   http://localhost:${port}/v1`);
   } else {
     console.log(`port saved: ${port} (daemon not running; takes effect on next start)`);
@@ -105,8 +131,13 @@ export async function handleDaemonFlag(args, VERSION) {
       }
     }
     const spawnedPid = startDaemon(args.filter((a) => a !== "-d" && a !== "--daemon"));
-    await waitForHealth(port, 4000);
-    console.log(`mslxdff daemon started (pid ${spawnedPid})`);
+    const health = await waitForHealth(port, 4000, { expectPid: spawnedPid });
+    // 起完立刻死了 = 端口被占（旧 daemon 没清掉）。报「started」会让人以为它在服务。
+    if (!isPidAlive(spawnedPid)) {
+      console.error(`⚠ daemon (pid ${spawnedPid}) 启动后立即退出 —— 端口 ${port} 大概仍被占用（EADDRINUSE）。详见 ${logFile()}`);
+      process.exit(1);
+    }
+    console.log(`mslxdff daemon started (pid ${spawnedPid})${health.ok ? "" : " — health check pending"}`);
     console.log(`log: ${logFile()}`);
     console.log(`pid: ${pidFile()}`);
     process.exit(0);
@@ -184,8 +215,14 @@ export async function handleBareRun(args, VERSION) {
     }
   }
   const spawnedPid = startDaemon([]);
-  await waitForHealth(port, 4000);
-  console.log(`mslxdff v${VERSION} started as a background daemon (pid ${spawnedPid})`);
+  const health = await waitForHealth(port, 4000, { expectPid: spawnedPid });
+  // 裸跑是用户最常敲的命令，更不能谎报：旧 daemon 若仍占端口，新进程 EADDRINUSE 秒退，
+  // 而 waitForHealth 打的是旧 daemon 的 /health（照样 200）——见 BUG-29/30。
+  if (!isPidAlive(spawnedPid)) {
+    console.error(`⚠ daemon (pid ${spawnedPid}) 启动后立即退出 —— 端口 ${port} 大概仍被占用（EADDRINUSE）。详见 ${logFile()}`);
+    process.exit(1);
+  }
+  console.log(`mslxdff v${VERSION} started as a background daemon (pid ${spawnedPid})${health.ok ? "" : " — health check pending"}`);
   console.log(`endpoint:   http://localhost:${port}/v1`);
   console.log(`log:        ${logFile()}`);
   console.log(`pid:        ${pidFile()}`);

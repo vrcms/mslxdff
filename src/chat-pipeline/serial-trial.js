@@ -13,7 +13,7 @@ import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from
 import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
-import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
+import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff, isPoolSwitchWorthy } from "./terminal-verdict.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,7 +39,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   } = deps;
   const {
     order, reqId, requested, body, hops, useAuto, lockModel, plugins,
-    auto, upstream, peers, groups, bus, token, canFallback, canForwardPeers,
+    auto, upstream, peers, groups, bus, token, canFallback, canForwardPeers, poolFallback,
     perf0, stages, mark, evt, logCall, logError, done, handlerCtx,
     res, startedAt, logs,
   } = ctx;
@@ -60,6 +60,9 @@ export async function runSerialTrial(ctx, deps = {}) {
   }
 
   let lastErr = viaRouteLastErr;
+  // 指定 free 模型的同池互备：order 里带了兄弟模型，但只有**额度类**失败才许继续换。
+  // 参数错/5xx/空转等仍按"显式指定即报错"的旧口径收场，别把客户端自己的错伪装成换模型成功。
+  const canFailover = (err) => canFallback && (!poolFallback || isPoolSwitchWorthy(err ?? lastErr));
   // 请求级空轮等待累计（跨候选）：阶梯是「每发候选」各算的，不设顶就会 N×(2+8+30) 把客户端吊在门外
   let requestWaitedMs = 0;
   candidate: for (let idx = 0; idx < order.length; idx++) {
@@ -269,7 +272,7 @@ export async function runSerialTrial(ctx, deps = {}) {
         if (br.handled) return { done: true };
       }
     }
-    if (canFallback) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }
+    if (canFailover(lastErr)) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, pool: poolFallback || undefined, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }
     await exhaustedLocal({ res, body, lastErr, order, handlerCtx: { ...handlerCtx, model, reqId }, evt, logCall, mark, perf0, stages, done, requested, useAuto });
     return { done: true };
   }

@@ -6,11 +6,16 @@ import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys
 import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 
 const PEER_TIMEOUT_MS = 30_000;
+// peer 阶段总预算：三批候选（ordered / orderedByLastError / coolingByLastError）共享同一个
+// 截止时间，而不是每批各吃满一次等头超时。实测最坏路径是三批串行各 30s（≈90s），
+// 客户端表现为"随机转圈"；预算到点即停，把余下时间还给本地兜底。
+const DEFAULT_PEER_RACE_BUDGET_MS = 45_000;
 const PEER_STATUS_TIMEOUT_MS = 2_000;
 const DEFAULT_PEER_CONNECT_TIMEOUT_MS = 3_000;
 // SSE 响应体数据间隔超时（undici bodyTimeout）。慢模型首块后可静默思考远超 30s，
 // 沿用 30s 会把组内转发的中继活流掐成 "terminated"（实测首块后 ~31s 必断，本地直连
-// 无此限制——组内因此比直连"不流畅"）。与应用层 MAX_STREAM_MS(120s) 对齐：
+// 无此限制——组内因此比直连"不流畅"）。与 provider 请求级超时同量级（注意：**不是**与应用层
+// MAX_STREAM_MS 对齐——后者默认 0=关，见 src/routes/stream.js 的实测依据）：
 // undici 层只做最后兜底，掐流交给应用层的首块/总时长策略。
 import { summarizeRequest } from "../model-trace.js";
 const PEER_BODY_TIMEOUT_MS = 120_000;
@@ -19,6 +24,29 @@ export { PEER_BODY_TIMEOUT_MS };
 function peerConnectTimeoutMs() {
   const n = Number(process.env.MSLXDFF_PEER_CONNECT_TIMEOUT_MS);
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_PEER_CONNECT_TIMEOUT_MS;
+}
+
+// peer 阶段总预算（MSLXDFF_PEER_RACE_BUDGET_MS，0=不限）：一次 peer 阶段（同批或若干批候选）
+// 共享同一个截止时刻。调用方用 peerStageCtx() 起一个阶段，别把 deadline 挂在整个请求上下文上——
+// 否则前一个候选把预算吃光，后一个候选一进 peer 阶段就直接放弃。
+function peerRaceBudgetMs() {
+  const raw = process.env.MSLXDFF_PEER_RACE_BUDGET_MS;
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_PEER_RACE_BUDGET_MS;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "0" || s === "off" || s === "false" || s === "no") return 0;
+  const n = Number(s);
+  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_PEER_RACE_BUDGET_MS;
+}
+
+/**
+ * 起一个 peer 阶段：返回带本阶段截止时刻的上下文副本。
+ * `triedUrls`（去重集合）必须**原样沿用源 ctx 的同一引用**：它在副本上新建会让
+ * "同一请求内不重复试同一 peer" 的契约失效——换下一个候选时集合是空的，死节点被反复竞速。
+ */
+export function peerStageCtx(ctx = {}) {
+  const budgetMs = peerRaceBudgetMs();
+  const tried = ctx.triedUrls ?? (ctx.triedUrls = new Set());
+  return { ...ctx, triedUrls: tried, peerRaceDeadline: budgetMs > 0 ? Date.now() + budgetMs : 0, peerRaceBudgetMs: budgetMs };
 }
 
 // 连接级超时（DNS + TCP/TLS 握手）：黑洞节点（端口挂起）必须快速失败，
@@ -112,9 +140,18 @@ export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_
 }
 
 // controller 由调用方持有：赛跑 winner 确定后可主动 abort 其余 in-flight，
-// 避免迟到流挂满 bodyTimeout（并给对方省下无用负载）。30s timer 仅覆盖"等响应头"。
-async function forwardToPeer(peer, body, model, hops, controller = new AbortController()) {
-  const timer = setTimeout(() => controller.abort(), PEER_TIMEOUT_MS);
+// 避免迟到流挂满 bodyTimeout（并给对方省下无用负载）。
+//
+// ⚠ 这个 timer 名义上"仅覆盖等响应头"，但组员节点自己也会**压着响应头等首块**
+// （ADR-0043 空轮留口 / 首块前不 flush），于是"等头"实际就是"等对方首块"。
+// 实测（mimo-v2.6-flash-free，2026-10-17）：本地 9.7s 拿到头、首块 30~60s 才到；组员侧
+// 全部恰好卡在 30001ms 被 abort —— 30s 只够本地拿头，组员永远等不到，组网兜底退化成
+// "每次白等 30s"。故这里的等待上限与 bodyTimeout 同档（120s），真正的时间闸门交给
+// 阶段总预算（见 startPeerStage / MSLXDFF_PEER_RACE_BUDGET_MS）。
+const DEFAULT_PEER_HEADERS_TIMEOUT_MS = 120_000;
+
+async function forwardToPeer(peer, body, model, hops, controller = new AbortController(), waitMs = DEFAULT_PEER_HEADERS_TIMEOUT_MS) {
+  const timer = setTimeout(() => controller.abort(), Math.max(1, Math.round(waitMs)));
   try {
     const headers = {
       "Content-Type": "application/json",
@@ -176,10 +213,24 @@ function recordLater(fn) {
   peerRecordChain = peerRecordChain.then(fn).catch(() => {});
 }
 
+// 节点显示名：事件里同时带上 name 与 url，多组员时不必再对着 state.json 认 IP
+// （同一个 peer 对象在 prepare 后会被拷进 order，故按 url 回查）。
+function peerName(peer) {
+  return String(peer?.name || "").trim() || null;
+}
+
 export async function racePeerCandidates(candidates, ctx) {
   const tried = (ctx.triedUrls ??= new Set());
   const fresh = candidates.filter((p) => !tried.has(p.url));
+  // 阶段总预算：由 ctx.peerRaceDeadline 提供（调用方经 peerStageCtx() 起阶段）。
+  // 没传的阶段（单批调用）不带预算——保持旧行为，不外溢到整条请求。
+  const budgetMs = ctx.peerRaceBudgetMs ?? 0;
+  const deadline = Number(ctx.peerRaceDeadline) || 0;
   for (let i = 0; i < fresh.length; i += PEER_RACE_LIMIT) {
+    if (deadline > 0 && Date.now() >= deadline) {
+      ctx.evt("peer-budget-out", { peer: null, reason: `peer 阶段总预算 ${budgetMs}ms 用尽`, budgetMs, remaining: fresh.length - i });
+      break;
+    }
     const batch = fresh.slice(i, i + PEER_RACE_LIMIT);
     const prepared = (await Promise.all(batch.map((peer) => resolvePeerTarget(ctx, peer)))).filter(Boolean);
     if (!prepared.length) continue;
@@ -204,13 +255,17 @@ export async function racePeerCandidates(candidates, ctx) {
         tried.add(peer.url);
         const ctrl = new AbortController();
         ctrls.set(peer.url, ctrl);
-        ctx.evt("peer-request", { peer: peer.url, model: target, hops: ctx.hops + 1, payload: summarizeRequest(ctx.body) });
+        const name = peerName(peer);
+        ctx.evt("peer-request", { peer: peer.url, name, model: target, hops: ctx.hops + 1, payload: summarizeRequest(ctx.body) });
         // 插件 hook：peer:beforeForward — 转发给组员前观察
         if (ctx.plugins?.length) {
           runHook(ctx.plugins, "peer:beforeForward", { reqId: ctx.reqId, peer: peer.url, model: target, hops: ctx.hops + 1 }).catch(() => {});
         }
+        // 单次等待上限 = 阶段剩余预算（未超预算时用默认 120s）；预算耗尽即 abort，不再空等
+        const remainingMs = deadline > 0 ? deadline - Date.now() : 0;
+        const waitMs = deadline > 0 ? Math.max(1, Math.min(DEFAULT_PEER_HEADERS_TIMEOUT_MS, remainingMs)) : DEFAULT_PEER_HEADERS_TIMEOUT_MS;
         const t0 = performance.now();
-        forwardToPeer(peer, ctx.body, target, ctx.hops, ctrl).then((res) => {
+        forwardToPeer(peer, ctx.body, target, ctx.hops, ctrl, waitMs).then((res) => {
           const latencyMs = Math.round(performance.now() - t0);
           const failed = res instanceof Error || res.status >= 400;
           // winner 已定后被我们主动取消：静默，不记账不报错（否则污染健康统计与错误日志）
@@ -219,22 +274,28 @@ export async function racePeerCandidates(candidates, ctx) {
             if (order.length === total) finish(null);
             return;
           }
-          ctx.evt("peer-forward", { peer: peer.url, model: target, hops: ctx.hops + 1, latencyMs, ok: !failed });
           // 插件 hook：peer:result — 组员响应后观察
           if (ctx.plugins?.length) {
             runHook(ctx.plugins, "peer:result", { reqId: ctx.reqId, peer: peer.url, model: target, ok: !failed, status: failed ? (res instanceof Error ? 502 : res.status) : res.status, latencyMs }).catch(() => {});
           }
           if (failed) {
             const status = res instanceof Error ? 502 : res.status;
-            const failRec = { peer: peer.url, status, message: res instanceof Error ? errMsg(res) : null };
+            const rawMsg = res instanceof Error ? errMsg(res) : null;
+            const msg = rawMsg ? rawMsg.slice(0, 200) : null;
+            const failRec = { peer: peer.url, status, message: rawMsg };
             if (Array.isArray(ctx.peerErrors)) ctx.peerErrors.push(failRec);
-            ctx.logError(ctx.model, status, res instanceof Error ? `peer ${peer.url} ${errMsg(res)}` : `peer ${peer.url} ${status}`);
-            ctx.evt("peer-error", { peer: peer.url, model: target, status, message: res instanceof Error ? errMsg(res) : null });
+            // ⚠ 事件名与语义对齐：peer-forward 字面是"已转发成功"，失败不再占用它，
+            // 否则成功率统计（按名字 grep）会把失败也算成转发成功（现网 229 条全量里混着大量失败）。
+            ctx.evt("peer-attempt", { peer: peer.url, name, model: target, hops: ctx.hops + 1, latencyMs, ok: false, status, message: msg });
+            // 中间失败只进 events（debug 流），不进 errors.log：这条请求最终可能由别处成功送达，
+            // 写进 errors.log 会把「已恢复的中间失败」算成错误率（实测 200 成功的请求仍在 errors.log 留 4 条 502）。
+            ctx.evt("peer-error", { peer: peer.url, name, model: target, status, message: msg });
             order.push({ ok: false, peer, target, res, status });
-            recordLater(() => ctx.peers.recordError(peer.url, { status }));
+            recordLater(() => ctx.peers.recordError(peer.url, { status, message: msg }));
             recordLater(() => ctx.peers.recordResult(peer.url, { ok: false }));
             if (order.length === total) finish(null);
           } else {
+            ctx.evt("peer-forward", { peer: peer.url, name, model: target, hops: ctx.hops + 1, latencyMs, ok: true, status: res.status });
             const entry = { ok: true, peer, target, res, latencyMs, ctrl };
             order.push(entry);
             if (!settled) {
@@ -265,7 +326,8 @@ export async function racePeerCandidates(candidates, ctx) {
           const rec = ctx.peerErrors.find((x) => x.peer === o.peer.url && x.status === o.status && !x.message);
           if (rec) rec.message = snip;
         }
-        ctx.logError(ctx.model, o.status, `peer ${o.peer.url} ${o.status} body=${snip}`);
+        // 同上：中继失败只进 events（debug 流），不写 errors.log —— 这条请求还可能由本地/下一批兜住
+        ctx.evt("peer-error", { peer: o.peer.url, name: peerName(o.peer), model: o.target, status: o.status, message: `body=${snip}` });
       } catch {}
     }));
   }

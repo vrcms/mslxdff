@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { modelLogName, summarizeRequest, formatModelTrace, appendModelTrace, shouldTraceModel, upstreamEcho } from "../src/model-trace.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 test("model trace: 文件名按模型安全化", () => {
   assert.equal(modelLogName("ocgo/muse-spark-1.3-contributor"), "ocgo-muse-spark-1.3-contributor.log");
@@ -160,4 +160,36 @@ test("model trace: incoming 行带 api 短码；无值时整段不写", () => {
   assert.match(chatLine, /incoming api=chat\b/, chatLine);
   const bare = formatModelTrace({ type: "request", reqId: "r3", model: "acme/m", data: { hops: 0 }, request: req });
   assert.doesNotMatch(bare, /api=/, `未传 api 不得出现该段：${bare}`);
+});
+
+// BUG-31：裁剪策略是 slice(-100) —— 按**行数**回退，与按字节的 1MB 阈值严重不匹配。
+// 实测 cline-cline-pass-deepseek-v4.1-flash.log 到 1,006,482 字节 / 5346 行时触发，
+// 一次丢掉 5246 行（98.1% 历史），事后回溯基本不可用 —— 与 logs.js 里已修掉的 BUG-10 同型。
+test("model trace: 超限裁剪必须按字节留 3/4，不能断崖砍到 100 行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-trace-trim-"));
+  const file = join(dir, "acme.log");
+  try {
+    // 造 ~1.05MB：每行约 200 字节 × 5300 行，贴近现网实测体量
+    const line = (i) => `[2026-10-17 21:00:00] [req=r${i}] [model=acme/m] [stage=x] ${"a".repeat(150)}`;
+    const rows = Array.from({ length: 5300 }, (_, i) => line(i));
+    writeFileSync(file, rows.join("\n") + "\n");
+    const before = Buffer.byteLength(readFileSync(file, "utf8"));
+    assert.ok(before > 1024 * 1024, `构造体量需超阈值，实际 ${before}`);
+
+    appendModelTrace("acme/m", { type: "result", reqId: "after", model: "acme/m", data: {} }, { file });
+
+    const text = readFileSync(file, "utf8");
+    const after = Buffer.byteLength(text);
+    const lines = text.split("\n").filter(Boolean);
+    // 按字节留 3/4 ⇒ 约 2000+ 行；旧实现只剩 100 行
+    assert.ok(lines.length > 1000, `裁剪后行数应远多于 100，实际 ${lines.length}`);
+    assert.ok(after > 500 * 1024, `裁剪后体量应保留大部分，实际 ${after}`);
+    assert.ok(after <= 1024 * 1024 + 512, `仍须落到阈值内，实际 ${after}`);
+    // 末尾必须补换行，否则下一条会接到半截行上
+    assert.ok(text.endsWith("\n"), "裁剪结果须以换行收尾");
+    // 最新的那条必须还在
+    assert.ok(text.includes("[req=after]"), "裁剪后新写入的行不得丢失");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

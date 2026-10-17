@@ -8,6 +8,7 @@ import { upstreamEcho } from "../../model-trace.js"; // 回显头→日志字段
 import { recordRelayTalk } from "../../talk-log.js"; // 环形对话日志（问答全文，最近 1 小时）：五段流水在此汇合，落盘点只这一个
 import { recordAgentLoop } from "../../talk-full.js"; // agent 回路全量语料（talk/full JSONL，缺省开）：与 talk.log 并排各调一次，见 openspec default-on-agent-loop-capture D3
 import { isEmptyTurnDetail, captureTalkFlush } from "../stream-scan.js"; // 空轮判据单一真相（stream.js 用它决定封不封口，这里用它决定交不交回重试）+ 语料收场回收（fix-talk-capture-frame-loss D4）
+import { reportEmptyTurn } from "./empty-turn-report.js"; // 空转收场记账（为让本文件退出 20KB 硬门而拆出）
 import { performance } from "node:perf_hooks"; // attemptMs 相减必须与 attemptStartMs 的创建点同钟（performance.now 原钟），不得走 :61 的 _perfNow —— 那个位置容得下测试桩钟（P0 混钟回归）
 
 // 唯一/最后候选没有 failover 去向：首块闸门退化为纯"防连接泄漏"，放宽避免误杀慢模型
@@ -163,28 +164,10 @@ export function createRelayPipeline({
     // 对标 dsh-cline-pass 的 EMPTY_RESPONSE 语义；不记 auto 冷却（空转≠模型坏，重试多半能好）。
     // 判据单一真相在 stream-scan.js:isEmptyTurnDetail —— relay 侧「要不要封口」与这里「要不要重拉」必须同源，否则会出现留了口却不再救、或已终结却仍重拉的错拍
     // heldOpen 也计入：非流式留口返回的是上游原状态码（2xx 变体或中继的 ≥400），只认 200 会漏判 → 没人收场，连接挂死
+    // 记账本体在 empty-turn-report.js（本文件 20KB 硬门的存量超标，先拆后写）。
     const _d = out.detail || {};
     const _emptyTurn = (out.status === 200 || out.heldOpen === true) && !out.timedOut && !out.interrupted && !_d.downstreamClosed && isEmptyTurnDetail(_d);
-    if (_emptyTurn) {
-      const _why = _d.sawFinishReason ? ` (finish_reason=${_d.sawFinishReason})` : " (no content, no tool calls)";
-      // 错误包络暂扣后下游不再直观看到上游原文：把摘要带进最终报错（截断 200 字），排障不断线。
-      const _err = _d.upstreamErrorText ? ` upstream=${String(_d.upstreamErrorText).slice(0, 200)}` : "";
-      // 零正文的成因直接写进报错（不只给现象）：finish_reason=length + 大量思考 = 额度被 reasoning 吃光
-      // （实测 cline-free deepseek reasoningChars=28151、completion_tokens=8192=max_tokens、chars=0）。
-      // 同参重拉必复现，故 serial-trial 的空转重试会顺手把 max_tokens 抬一档（见 emptyRaiseCap）。
-      const _lenCapped = _d.sawFinishReason === "length";
-      const _hint = _lenCapped && (Number(_d.reasoningChars) || 0) > 0
-        ? ` [思考 ${Number(_d.reasoningChars) || 0} 字刷满 max_tokens，正文 0 字]`
-        : "";
-      try { _logError(actual, 502, `empty turn${_why}${_err}${_hint}`); } catch {}
-      _evt("upstream-error", { reqId, model: actual, status: 502, message: "empty turn", timing: null, finish: _d.sawFinishReason || null, reasoningChars: Number(_d.reasoningChars) || 0, wroteFrames: Number(_d.wroteChunks) || 0, heldOpen: out.heldOpen === true, ...upstreamEcho(upRes) });
-      _evt("fallback", { reqId, from: actual, to: null, reason: "empty turn" });
-      let _errMsg = `EMPTY_MODEL_RESPONSE: upstream returned 200 with no content${_why}${_err}${_hint} — retry or rephrase`;
-      if (_d.upstreamErrorText && _d.upstreamErrorText.includes("retryAfterSeconds")) {
-        _errMsg = _d.upstreamErrorText;
-      }
-      return { handled: false, upRes: null, lastErr: { model: actual, upstream: null, status: 502, message: _errMsg, emptyTurn: true, heldOpen: out.heldOpen === true } };
-    }
+    if (_emptyTurn) return reportEmptyTurn({ out, actual, reqId, upRes, logError: _logError, evt: _evt });
 
     // 5a. 首块超时未写字节 → 回退（显式 timedOut 字段，status 只是 HTTP 语义展示）
     if (out.timedOut === true) {
@@ -204,6 +187,11 @@ export function createRelayPipeline({
       }
       _evt("slow-model", { reqId, model: actual, elapsedMs: out.totalMs ?? (Date.now() - curStartedAt), threshold: C.STALL_TIMEOUT_MS, interrupted: true, detail: out.detail ?? null, ...upstreamEcho(upRes) });
       try { _logCall(actual, 200); } catch {}
+      // 截断（BUG-17）：已向客户端发出 STREAM_TRUNCATED，错误日志须留同一事实（旧版零记录 ⇒ 腰斩被算成"成功的慢请求"）
+      if (out.truncated === true) {
+        try { _logError(actual, 502, `STREAM_TRUNCATED: 上游中断且未发 finish_reason${out.detail?.upstreamError ? ` (${out.detail.upstreamError})` : ""}`); } catch {}
+        _evt("upstream-error", { reqId, model: actual, status: 502, message: "STREAM_TRUNCATED", ...upstreamEcho(upRes) });
+      }
       // interrupted 的 200 也是真实消耗（最贵的长生成）——照常落 usage 标 interrupted:1，口径与 5c 一致 — 见 .agents/notes/implemented/feature/2026-09-19-usage-report-jsonl.md
       if (out.status === 200) {
         try {

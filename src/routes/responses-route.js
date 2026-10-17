@@ -50,6 +50,34 @@ export function createCollector() {
   return { res, get: () => ({ status, text }) };
 }
 
+/**
+ * 纯错误帧直通判定（垫片 write 的前置拦截）：整段只含 `data:` 行、且每帧都是
+ * `{error:{…}}` 形状（无 `choices`）时，返回原样 SSE 帧数组；否则返回 null（交翻译器）。
+ * 为什么必须拦：翻译器只认 chat 帧（choices.delta），错误帧会被它静默 `continue` 掉。
+ */
+function passthroughErrorFrames(text) {
+  const src = String(text ?? "");
+  if (!src.includes("data:")) return null;
+  const out = [];
+  let sawError = false;
+  for (const rawLine of src.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith(":")) { out.push(`${line}\n\n`); continue; } // 注释帧照原样（翻译器也是跳过）
+    if (!line.startsWith("data:")) return null;
+    const payload = line.slice(5).trim();
+    if (!payload) continue;
+    if (payload === "[DONE]") { out.push("data: [DONE]\n\n"); continue; }
+    let j;
+    try { j = JSON.parse(payload); } catch { return null; } // 解析失败 = 不是我们的错误帧，交翻译器（它自会记 jsonFails）
+    if (!j || typeof j !== "object" || Array.isArray(j) || j.choices) return null; // 有 choices = chat 帧，绝不拦
+    if (!j.error) return null; // 无 choices 又无 error：形状未知，交翻译器
+    sawError = true;
+    out.push(`data: ${JSON.stringify(j)}\n\n`);
+  }
+  return sawError ? out : null;
+}
+
 // 流式：逐 write 实时翻译并转发（head 延迟到首块，避免错误状态码已发送）
 export function createLiveForwarder(realRes, translator) {
   let status = 200;
@@ -61,16 +89,30 @@ export function createLiveForwarder(realRes, translator) {
     realRes.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     for (const e of translator.begin()) realRes.write(`data: ${JSON.stringify(e)}\n\n`);
   };
+  // headersSent 必须是**计算值**：垫片的 write() 会调 sendHead() 真发头，若 headersSent 仍是普通属性
+  // （只在 end() 里置真），则「头已发但流未结束」这段窗口里它为假 ⇒ helpers.json() 会走 `!headersSent`
+  // 分支去 setHeader+end（而本垫片 setHeader 是 no-op、且真头已发）⇒ 错误体静默丢失、只剩裸关流。
+  // messages-route 的 createAnthropicForwarder 早已用 getter 实现并点名了同一个坑；本处是同契约的遗漏。
+  // 口径与 messages-route 的 createAnthropicForwarder 逐字对齐（哪里算「头已发」只此一处判）。
+  const sent = () => headSent || realRes.headersSent === true;
   const res = {
     ...createEmitter(),
     set statusCode(v) { status = v; },
     get statusCode() { return status; },
-    headersSent: false,
+    get headersSent() { return sent(); },
+    set headersSent(_v) { /* 兼容旧赋值点：真实状态由 headSent/ended 推导，不接受外部覆写 */ },
+    getHeader(k) { return String(k).toLowerCase() === "content-type" && sent() ? "text/event-stream" : undefined; },
     setHeader() {},
     write(c) {
       if (ended) return true;
       sendHead();
-      for (const e of translator.push(chunkToString(c))) realRes.write(`data: ${JSON.stringify(e)}\n\n`);
+      const text = chunkToString(c);
+      // 纯错误帧直写：helpers.json() 的 in-band 收场写的是 OpenAI 形状 `{error:{…}}`（无 choices），
+      // 若交给 chat→responses 翻译器，会被当作「非 chat 帧」静默忽略（translate.js 只认 choices.delta）——
+      // 错误在翻译层被吞掉，客户端只看到流被关。错误帧与 chat 帧形状互斥，故这里拦下直通。
+      const errOut = passthroughErrorFrames(text);
+      if (errOut != null) { for (const chunk of errOut) realRes.write(chunk); return true; }
+      for (const e of translator.push(text)) realRes.write(`data: ${JSON.stringify(e)}\n\n`);
       return true;
     },
     end(c) {

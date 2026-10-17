@@ -5,9 +5,12 @@ import os from "node:os";
 import { defaultStateFile } from "./state.js";
 import { fmtShanghaiYMDHMS } from "./time.js";
 
-const MAX_CALLS = 500;
-const MAX_ERRORS = 200;
-const MAX_BYTES = 1024 * 1024;
+// 日志桶体积上限。events.log 是排查主入口（`-log`/`-debug` 都读它），1MB ≈ 1000 行
+// ≈ 3 分钟窗口，事后回溯基本不可用；同时旧的 `slice(-100)` 回退策略与 1MB 阈值严重不匹配
+// ——一次裁剪丢弃 90% 容量（实测 1043 行 → 99 行）。阈值提到 4MB、回退按字节保留末尾 3/4，
+// 两者配平后覆盖窗口约 10 倍于改前，且不再有断崖。
+const MAX_BYTES = 4 * 1024 * 1024;
+const KEEP_RATIO = 3 / 4;
 
 export function logDir() {
   return process.env.MSLXDFF_DAEMON_DIR || dirname(defaultStateFile());
@@ -33,14 +36,30 @@ function ensureDir(dir) {
   mkdirSync(dir, { recursive: true });
 }
 
+/**
+ * 按字节从尾部回退（不截半行）：累积整行直到超出预算，丢弃更早的行。
+ * 用 `lines.slice(-N)` 之类的**行数**回退无法与**字节**阈值配平——行有长有短（events 行含 detail
+ * 对象，实测均值 ~1KB），固定行数等于固定容量，一次裁剪就是断崖。
+ */
+function keepTailByBytes(text, maxBytes) {
+  const limit = Math.max(1, Math.floor(maxBytes * KEEP_RATIO));
+  if (Buffer.byteLength(text) <= limit) return text;
+  const lines = text.split("\n");
+  let bytes = 0;
+  let i = lines.length - 1;
+  for (; i >= 0; i--) {
+    const b = Buffer.byteLength(lines[i]) + 1;
+    if (bytes + b > limit) break;
+    bytes += b;
+  }
+  return lines.slice(i + 1).join("\n");
+}
+
 function trimIfOversized(file, maxBytes = MAX_BYTES) {
   try {
     const st = statSync(file);
     if (st.size <= maxBytes) return;
-    const text = readFileSync(file, "utf8");
-    const lines = text.split("\n");
-    const keep = lines.slice(-100);
-    writeFileSync(file, keep.join("\n"));
+    writeFileSync(file, keepTailByBytes(readFileSync(file, "utf8"), maxBytes));
   } catch {
     // ignore
   }
@@ -50,10 +69,7 @@ async function trimIfOversizedAsync(file, maxBytes = MAX_BYTES) {
   try {
     const st = await stat(file);
     if (st.size <= maxBytes) return;
-    const text = await readFile(file, "utf8");
-    const lines = text.split("\n");
-    const keep = lines.slice(-100);
-    await writeFile(file, keep.join("\n"));
+    await writeFile(file, keepTailByBytes(await readFile(file, "utf8"), maxBytes));
   } catch {
     // ignore
   }

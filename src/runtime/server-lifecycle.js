@@ -18,7 +18,7 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
     loadModelAliases();
   } catch {}
 
-  const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus, plugins: loadedPlugins });
+  const router = createRouter({ token, upstream, models, auto, logs, peers, maxHops: maxHopsValue(), groups, bans, bus, plugins: loadedPlugins, version: VERSION });
   const listenHost = effectiveHost();
   const isDebug = process.env.MSLXDFF_DEBUG === "1";
   const srv = startServer({

@@ -13,6 +13,23 @@ import { apiKindOf } from "../api-kind.js";
  * 内部组合 Policy→Engine：解析 header/model → 产 order → 委托 engine 执行
  * gateway 仅薄适配：readBody + request:received hook + 调 execute
  */
+/**
+ * 指定 free 模型时是否允许横向切同池兄弟（BUG-7）。
+ * 缺省开：opencode 免费池的裸 id 模型（`mimo-v2.6-flash-free` 等）语义上就是"免费额度内随便用"，
+ * 单个模型额度耗尽不该让整条链路失败。逃生阀 `MSLXDFF_FREE_POOL_FALLBACK=0` 回到"显式指定即锁死"。
+ * 只在**非 lockModel**（即不经组内 model-lock 转发）时生效。
+ */
+// 同池互备最多横向试几个（含首个指定的那个）：额度类失败常见于"整池都满"，
+// 扫全池只会把快速失败拖成分钟级，试前几个足够区分"这个模型满"与"这池满"。
+const FREE_POOL_MAX = 4;
+
+export function freePoolFallbackOn(env = process.env) {
+  const raw = env.MSLXDFF_FREE_POOL_FALLBACK;
+  if (raw === undefined || raw === null || raw === "") return true;
+  const s = String(raw).trim().toLowerCase();
+  return !(s === "0" || s === "false" || s === "off" || s === "no");
+}
+
 export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, token, plugins, maxHops } = {}) {
   const engine = createEngine();
 
@@ -74,8 +91,11 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
 
     // order 推导 + plugin model:select 可改
     // 语义：指定模型 = 死锁单模型（本机→组员同款，挂了就报挂，不兜其他 picks）；只有 auto 才轮 picks
+    // 例外：opencode 免费池的裸 id free 模型（mimo-v2.6-flash-free / deepseek-v4.1-flash-free…）
+    // 额度耗尽时允许**同池互备**——见 freePoolFallbackOn()（BUG-7 用户点名诉求）。
     // x-mslxdff-auto-provider 头可把 auto 候选限定到单供应商（opencode=裸 id 免费池），-chat 默认带
     let order;
+    let poolFallback = false; // 指定 free 模型时的「同池互备」标记：只有额度类失败才允许继续换兄弟
     if (lockModel) order = [requested];
     else if (useAuto) {
       let cands = auto ? await auto.candidates() : [""];
@@ -88,8 +108,28 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
       }
       order = cands;
     } else {
-      if (auto && requested) { try { await auto.candidatesFor(requested); } catch {} }
-      order = [requested];
+      // 指定模型的常态是死锁单模型。**唯一例外**：裸 id 的 free 模型（opencode 免费池），
+      // 且只在**额度类**失败（429 / 具名额度判决）时才横向切同池兄弟——参数错/5xx 照旧原样透传，
+      // 不把「客户端发错了」伪装成换模型成功，也不白烧别的模型额度（见 isPoolSwitchWorthy）。
+      // candidatesFor 的持久化副作用（把指定模型加入勾选集）在任何分支都必须保留。
+      const wantFreePool = Boolean(auto && requested && freePoolFallbackOn() && isFreeModel(requested) && !String(requested).includes("/"));
+      if (auto && requested) {
+        try {
+          const cands = await auto.candidatesFor(requested);
+          if (wantFreePool && Array.isArray(cands) && cands.length) {
+            // 上限截断：串行换人是"试一试"不是"扫全池"，太多候选会把额度类失败也拖成分钟级
+            const samePool = cands
+              .filter((m) => m === requested || (isFreeModel(m) && !String(m).includes("/")))
+              .slice(0, FREE_POOL_MAX);
+            if (samePool.length > 1) {
+              order = samePool;
+              poolFallback = true;
+              evt("free-pool-fallback", { reqId, model: requested, pool: samePool, size: samePool.length });
+            }
+          }
+        } catch {}
+      }
+      if (!order) order = [requested];
     }
     if (!order.length) order = [""];
     const canFallback = order.length > 1;
@@ -115,13 +155,15 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     // 客户端会话标识（opencode 插件 chat.headers 注入）→ 透传上游做粘性路由/缓存亲和；
     // 无头时由 upstream.js 按对话首两条消息哈希兜底（不再每请求随机）
     const clientSession = String(req?.headers?.["x-session-affinity"] || req?.headers?.["x-session-id"] || "").trim() || null;
-    const handlerCtx = { reqId, api, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp };
+    // triedUrls 挂请求级并**按引用**共享：同一请求内"同一组员不重复试"的契约跨候选生效
+    // （peer 阶段各分支会 spread 出上下文副本，集合在这里建一次才不会各存一份）。
+    const handlerCtx = { reqId, api, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp, triedUrls: new Set() };
     if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
     await engine.run({
       reqId, startedAt, req, res, body: req?.body, policy,
       useAuto, lockModel, requested, hops,
-      canFallback, canForwardPeers,
+      canFallback, canForwardPeers, poolFallback,
       perf0, stages, mark, evt, logCall, logError, done, handlerCtx,
       auto, upstream, peers, groups, bus, token, plugins, logs,
       order,

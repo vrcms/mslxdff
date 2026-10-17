@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultStateFile } from "../../state.js";
 import { loadToken, refreshToken } from "../../state.js";
-import { stopDaemon, pidFile, logFile } from "../../daemon.js";
+import { stopDaemon, pidFile, logFile, isPidAlive } from "../../daemon.js";
 import { logDir, eventsFile, callsFile, errorsFile, recentEvents, timelineFile, recentTimeline } from "../../logs.js";
 import { fmtEvent } from "../format.js";
 import { fmtShanghaiYMDHMS, fmtShanghaiHMS } from "../../time.js";
@@ -58,10 +58,21 @@ export async function handleUpdate(args, VERSION) {
   const daemon = readPid();
   if (daemon) {
     console.log("restarting daemon on the new version…");
-    stopDaemon({ reason: "restart" });
-    startDaemon([]);
-    await waitForHealth(resolvePort(), 4000);
-    console.log(`restarted (pid ${readPid()})`);
+    const r = stopDaemon({ reason: "restart" });
+    // 同 BUG-29：停不掉就绝不能报 restarted —— 旧版还占着端口，新进程 EADDRINUSE 秒退，
+    // 而 waitForHealth 打的是旧 daemon 的 /health，照样 200，读 pid 读到的也是旧值。
+    if (!r.stopped && r.pid) {
+      console.error(`⚠ 旧 daemon (pid ${r.pid}) 没能停掉：${r.reason}`);
+      console.error(`  新版本已装好，但旧版仍在运行（未生效）。请用管理员终端停掉它后重新 -restart。`);
+      process.exit(1);
+    }
+    const spawned = startDaemon([]);
+    const health = await waitForHealth(resolvePort(), 4000, { expectPid: spawned });
+    if (!isPidAlive(spawned)) {
+      console.error(`⚠ 新 daemon (pid ${spawned}) 启动后立即退出 —— 端口大概仍被旧进程占着（EADDRINUSE）。旧版仍在运行，升级未生效。`);
+      process.exit(1);
+    }
+    console.log(`restarted (pid ${spawned})${health.ok ? "" : " — health check pending"}`);
   }
   process.exit(0);
 }
@@ -82,9 +93,14 @@ export async function handleShowToken(args) {
 
 export async function handleUninstall(args) {
   if (!(args.includes("-uninstall") || args.includes("--uninstall"))) return false;
-  const { stopped, pid } = stopDaemon({ reason: "uninstall" });
+  const { stopped, pid, reason } = stopDaemon({ reason: "uninstall" });
   if (stopped) console.log(`mslxdff daemon stopped (pid ${pid})`);
-  else console.log("mslxdff daemon not running");
+  else if (pid) {
+    // 杀被拒 ≠ 没在跑：它还活着并持有 state/logs，继续删文件会让在跑的 daemon 半瘫（写不进也不重来）。
+    console.error(`mslxdff daemon still running (pid ${pid}) — uninstall aborted: ${reason}`);
+    console.error("先停掉它（管理员终端执行 mslxdff -stop，或 taskkill /PID " + pid + " /F），再重新 -uninstall");
+    process.exit(1);
+  } else console.log("mslxdff daemon not running");
   const stateFile = defaultStateFile();
   const dir = dirname(stateFile);
   const removed = [];

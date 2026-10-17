@@ -34,7 +34,7 @@ export async function startDaemonMain(VERSION) {
   const ctx = await setupProviders();
   const { srv, bus } = await startServerLifecycle({ VERSION, ...ctx, logs });
   void srv;
-  startGroupSync({ peers: ctx.peers, groups: ctx.groups });
+  startGroupSync({ peers: ctx.peers, groups: ctx.groups, logs });
   startBroadband({ token: ctx.token, upstream: ctx.upstream });
 
   const { setupAutoUpdate } = await import("./auto-update.js");

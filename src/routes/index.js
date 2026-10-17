@@ -1,4 +1,5 @@
 import { timingSafeEqual, createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DEFAULT_MAX_HOPS } from "../peers.js";
 import { json, notFound, authorized } from "./helpers.js";
 import { chatHandler } from "./chat.js";
@@ -9,10 +10,22 @@ import { relayHandler } from "./relay.js";
 import { responsesHandler } from "./responses-route.js";
 import { messagesHandler, countTokensHandler } from "./messages-route.js";
 
-export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins }) {
+export function createRouter({ token, upstream, models, auto, logs, peers, maxHops = DEFAULT_MAX_HOPS, groups, bans, bus, plugins, version = null }) {
+  // /health 要报版本：调用方（waitForHealth）拿它判断「应答的是不是刚起的那个」。
+  // 未显式传入时读 package.json 兜底 —— 测试直接 createRouter() 也能拿到真版本，不必逐个补参数。
+  const healthVersion = (() => {
+    if (version) return version;
+    try { return JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version ?? null; } catch { return null; }
+  })();
   return async function router(req, res) {
     const method = req.method || "GET";
     const path = (req.url || "").split("?")[0];
+    // pid/version 不是装饰：调用方（`-restart`/`-port`/`-update` 的 waitForHealth）需要它判断
+    // 「应答的到底是不是我刚起的那个」。只回 {status:"ok"} 时，旧 daemon 占着端口也能让健康检查通过，
+    // 于是「新进程 EADDRINUSE 秒退、旧版仍在服务」会被谎报成重启成功（BUG-29）。
+    if (method === "GET" && path === "/health") {
+      return json(res, 200, { status: "ok", pid: process.pid, version: healthVersion });
+    }
     // dynamic provider models route: GET /v1/providers/:id/models
     if (method === "GET" && /^\/v1\/providers\/[^/]+\/models\/?$/.test(path)) {
       if (!authorized(req, token)) {
@@ -34,11 +47,6 @@ export function createRouter({ token, upstream, models, auto, logs, peers, maxHo
 }
 
 const ROUTES = [
-  {
-    method: "GET",
-    path: "/health",
-    handler: ({ res }) => json(res, 200, { status: "ok" }),
-  },
   {
     method: "POST",
     path: "/v1/chat/completions",

@@ -21,7 +21,12 @@ test("health is public and returns ok", async () => {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { status: "ok" });
+    const body = await res.json();
+    assert.equal(body.status, "ok");
+    // pid/version 是 BUG-29 的修复前提：重启后的健康检查要能判断「应答的是不是我刚起的那个」，
+    // 否则旧 daemon 占着端口也会让 waitForHealth 通过，把 EADDRINUSE 秒退谎报成 restarted。
+    assert.equal(body.pid, process.pid);
+    assert.equal(typeof body.version, "string");
   } finally {
     await shutdown(srv);
   }

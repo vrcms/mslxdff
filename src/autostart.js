@@ -160,8 +160,11 @@ async function linuxEnable() {
   } catch {}
   // stop bare detached daemon that may hold the port, let systemd take over (best-effort, wait for port free)
   try {
-    const { isPidAlive, stopDaemon } = await import("../daemon.js");
-    const { resolvePort } = await import("../server.js");
+    // 路径相对**本文件**解析：本文件在 src/ 下，daemon.js 与 server.js 都在 src/ 内。
+    // 旧写的 `../daemon.js` / `../server.js` 从 src/ 出发指向仓库根 —— 两处都不存在，
+    // 整个「停裸 daemon → 等端口释放 → 让 systemd 接管」的分支被后面的 catch {} 静默吞掉、从未执行过。
+    const { isPidAlive, stopDaemon } = await import("./daemon.js");
+    const { resolvePort } = await import("./server.js");
     const port = resolvePort();
     const pidFile = join(homedir(), ".config", "mslxdff", "daemon.pid");
     const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");

@@ -9,7 +9,7 @@ import { createRouter } from "../src/routes.js";
 import { createUpstreamClient } from "../src/upstream.js";
 import { createPeersService } from "../src/peers.js";
 import { createAutoSelector } from "../src/auto.js";
-import { hedgeDelayMs, shouldHedge, isFastFailStatus } from "../src/routes/hedge.js";
+import { hedgeDelayMs, shouldHedge } from "../src/routes/hedge.js";
 
 function tmpStateFile() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-hedge-"));
@@ -52,15 +52,6 @@ describe("hedge config", () => {
     assert.equal(shouldHedge({ ...base, model: "workbuddy/coding-glm-5.3-free" }), true);
   });
 
-  test("isFastFailStatus detects 429/502/503/504", () => {
-    assert.equal(isFastFailStatus(429), true);
-    assert.equal(isFastFailStatus(502), true);
-    assert.equal(isFastFailStatus(503), true);
-    assert.equal(isFastFailStatus(504), true);
-    assert.equal(isFastFailStatus(400), false);
-    assert.equal(isFastFailStatus(200), false);
-    assert.equal(isFastFailStatus(500), false);
-  });
 });
 
 describe("hedge integration with real servers", () => {

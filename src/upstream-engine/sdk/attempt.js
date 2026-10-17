@@ -77,6 +77,10 @@ export function markerHeaders(marker) {
 
 // 错误路径诊断：AI SDK 的 APICallError 对 HTTP 4xx 的 requestBodyValues 是空对象（provider-utils 实测），
 // 故用包装 fetch 捕获真实发出的 body，在上游非 2xx 时打印 tool 序列断裂点与尾部序列。
+//
+// ⚠ 转储的**价值条件是 issues 非空**（工具序列断裂才需要看序列），触发条件才是「非 2xx」——两者
+// 曾混同，导致 3020 次非 2xx 里有 2945 次（97.5%）打印「一切正常」的转储，正是 daemon.log 膨胀主因
+// （7MB/60,321 行，无上限）。故 only-if-issues：无断裂只留一行摘要，把真信号从噪音里捞出来。
 function logRequestDiagnosis(bodyText, status) {
   if (!bodyText || typeof bodyText !== "string") return;
   let parsed = null;
@@ -84,7 +88,11 @@ function logRequestDiagnosis(bodyText, status) {
   const msgs = parsed?.messages;
   if (!Array.isArray(msgs)) return;
   const { issues, summary } = diagnoseToolSequence(msgs);
-  console.error(`[sdk-upstream] ${status} ${summary} issues=${issues.length ? issues.join(" | ") : "none"}`);
+  if (!issues.length) {
+    console.error(`[sdk-upstream] ${status} ${summary} issues=none`);
+    return;
+  }
+  console.error(`[sdk-upstream] ${status} ${summary} issues=${issues.join(" | ")}`);
   console.error(`[sdk-upstream] head: ${compactSequence(msgs, 0, 6)}`);
   console.error(`[sdk-upstream] tail: ${compactSequence(msgs, Math.max(0, msgs.length - 40))}`);
 }

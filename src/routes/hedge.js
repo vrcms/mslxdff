@@ -8,11 +8,6 @@ function hedgeDelayMs() {
   return 1000;
 }
 
-function isFastFailStatus(status) {
-  const s = Number(status);
-  return s === 429 || s === 502 || s === 503 || s === 504;
-}
-
 function shouldHedge({ isStream, canForwardPeers, hedgeDelayMs: d, hasPeers, model }) {
   if (!isStream) return false;
   if (!canForwardPeers) return false;
@@ -81,7 +76,7 @@ function getFirstChunkPromise(body) {
   return { promise: p, handle: it, kind: "node" };
 }
 
-export { hedgeDelayMs, isFastFailStatus, shouldHedge };
+export { hedgeDelayMs, shouldHedge };
 
 export async function hedgedFirstChunkRace({
   localUpRes,
@@ -130,14 +125,17 @@ export async function hedgedFirstChunkRace({
   if (debugHedge) try { console.log(`[hedge] trigger slow hedge after ${hedgeDelay}ms`); } catch {}
   evt?.("hedge-trigger", { reason: "slow", hedgeDelayMs: hedgeDelay, triggerAtMs: Date.now() - t0 });
 
-  const { racePeerCandidates } = await import("./peers.js");
+  const { racePeerCandidates, peerStageCtx } = await import("./peers.js");
   const candidates = handlerCtx.peers.ordered();
+  // 三批共享同一「peer 阶段总预算」（peerStageCtx 设 deadline，racePeerCandidates 按剩余量裁剪等待）：
+  // 旧行为是每批各吃满一次等头超时，串行叠加可到 90s+（实测 peer 阶段 63s、total 137s）。
+  const stage = peerStageCtx(handlerCtx);
   let peerWin = null;
   try {
     peerWin =
-      (await racePeerCandidates(candidates, handlerCtx)) ||
-      (await racePeerCandidates(handlerCtx.peers.orderedByLastError(), handlerCtx)) ||
-      (await racePeerCandidates(handlerCtx.peers.coolingByLastError(), handlerCtx));
+      (await racePeerCandidates(candidates, stage)) ||
+      (await racePeerCandidates(stage.peers.orderedByLastError(), stage)) ||
+      (await racePeerCandidates(stage.peers.coolingByLastError(), stage));
   } catch (_) {
     peerWin = null;
   }
