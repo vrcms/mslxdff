@@ -115,25 +115,37 @@ export function fmtPool({ pooled, total, exits }) {
 }
 
 /**
- * 身份指纹：每个端口的短设备 id / WARP 内网地址 / 对端端点 / 注册时间。
+ * 身份指纹：每个端口的短设备 id / WARP 内网 IPv6 尾段 / 对端端点 / 注册时间。
  * 为什么必须有：4 条隧道只拿到 2 个出口地址时（真机 2026-10-17），只有这组读数能区分
- * 「设备本身被写重复了」和「CF 的共享 NAT 把不同设备折叠成一个出口」——没有它就只能猜。
+ * 「设备本身被写重复了」和「CF 把不同设备折叠成一个出口」——没有它就只能猜。
+ *
+ * ⚠ 判据**不看 IPv4**：`172.16.0.2` 是 WARP 的**固定接口地址**（6 次实测全是它：组长 4 台 +
+ * 本机 2 台；公开的 wgcf 生成配置里同样是 `Address = 172.16.0.2/32`），按它判「重复」是误报
+ * （2026-10-17 十一次修订前确实这么误报过）。每台设备真正唯一的是 **IPv6**（`2606:4700:110:…`）
+ * 与密钥对，所以指纹打 v6 尾段。
  */
+/** v6 尾段做指纹（`2606:4700:110:81b5:56ec:72b3:9542:e3de` → `…:9542:e3de`）；缺了给「无」。 */
+export function v6Tail(v6) {
+  const s = String(v6 || "");
+  if (!s) return "无";
+  const parts = s.split(":");
+  return parts.length > 2 ? `…:${parts.slice(-2).join(":")}` : s;
+}
 export function fmtIdentityDetail(nodes = []) {
   const out = [];
   const byId = new Map();
-  const byV4 = new Map();
+  const byEp = new Map();
   for (const n of nodes || []) {
     if (n?.id) byId.set(n.id, [...(byId.get(n.id) || []), n.port]);
-    if (n?.v4) byV4.set(n.v4, [...(byV4.get(n.v4) || []), n.port]);
-    out.push(`[warp-pool]     :${n?.port} 设备=${n?.id ? String(n.id).slice(0, 8) : "无id"} 内网=${n?.v4 || "无"} 端点=${n?.endpoint || "?"} 注册=${String(n?.registeredAt || "?").slice(0, 19)}`);
+    if (n?.endpoint) byEp.set(n.endpoint, [...(byEp.get(n.endpoint) || []), n.port]);
+    out.push(`[warp-pool]     :${n?.port} 设备=${n?.id ? String(n.id).slice(0, 8) : "无id"} 内网v6=${v6Tail(n?.v6)} 端点=${n?.endpoint || "?"} 注册=${String(n?.registeredAt || "?").slice(0, 19)}`);
   }
-  // cut 只给设备 id 用（UUID 太长）：内网地址必须原样打，截短了就成了「172.16.0」
-  const dups = (m, cut = 0) => [...m.entries()].filter(([, p]) => p.length > 1).map(([k, p]) => `${cut ? String(k).slice(0, cut) : String(k)} ← :${p.join(",:")}`).join("；");
-  const dupId = dups(byId, 8);
-  const dupV4 = dups(byV4);
+  const dupId = [...byId.entries()].filter(([, p]) => p.length > 1).map(([k, p]) => `${String(k).slice(0, 8)} ← :${p.join(",:")}`).join("；");
   if (dupId) out.push(`[warp-pool] ${MARK.warn} 设备 id 重复：${dupId} —— 同一个 WARP 设备被写到多个端口，出口必然相同；删掉重复端口的 node-<port>.json 再重启，它会重新注册`);
-  if (dupV4) out.push(`[warp-pool] ${MARK.warn} WARP 内网地址重复：${dupV4} —— 同一内网地址必是同一出口`);
+  // 端点全同 = 大家都从同一个 CF 入口出去（CF 对每次注册都回同一个 hostname）：出口撞车由此而来
+  const total = (nodes || []).length;
+  const sameEp = [...byEp.entries()].find(([, p]) => total > 1 && p.length === total);
+  if (sameEp) out.push(`[warp-pool] ${MARK.step} ${total} 条隧道都用同一个端点（${sameEp[0]}）—— CF 对每次注册都回同一个 hostname，故大家都从同一个 CF 入口出去，出口地址撞车由此而来（想分散：把 node-<port>.json 的 endpoint 改成别的 WARP 入口 IP 后重启）`);
   return out;
 }
 

@@ -972,19 +972,22 @@ test("report：启动自检发现端口被另一个 daemon 占着 ⇒ 必须单�
   assert.match(all, /kill 1558055/);
 });
 
-test("report：身份指纹必须能判「设备写重复」还是「CF 共享 NAT 折叠」——真机 4 条隧道只拿到 2 个出口", () => {
+test("report：身份指纹必须能判「设备写重复」还是「CF 折叠」——判据不看 IPv4（172.16.0.2 是固定接口地址）", () => {
   const same = fmtIdentityDetail([
-    { port: 10800, id: "aaaa1111bbbb", v4: "172.16.0.2", endpoint: "162.159.192.1:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
-    { port: 10801, id: "aaaa1111bbbb", v4: "172.16.0.2", endpoint: "162.159.192.1:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
+    { port: 10800, id: "aaaa1111bbbb", v4: "172.16.0.2", v6: "2606:4700:110:81b5:56ec:72b3:9542:e3de", endpoint: "engage.cloudflareclient.com:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
+    { port: 10801, id: "aaaa1111bbbb", v4: "172.16.0.2", v6: "2606:4700:110:831c:c474:cfce:964c:cbcd", endpoint: "engage.cloudflareclient.com:2408", registeredAt: "2026-10-16T10:00:00.000Z" },
   ]).join("\n");
-  assert.match(same, /:10800 设备=aaaa1111 内网=172\.16\.0\.2 端点=162\.159\.192\.1:2408 注册=2026-10-16T10:00:00/);
+  assert.match(same, /:10800 设备=aaaa1111 内网v6=…:9542:e3de 端点=engage\.cloudflareclient\.com:2408 注册=2026-10-16T10:00:00/);
   assert.match(same, /设备 id 重复：aaaa1111 ← :10800,:10801/);
-  assert.match(same, /WARP 内网地址重复：172\.16\.0\.2 ← :10800,:10801/);
+  assert.doesNotMatch(same, /内网地址重复/, "172.16.0.2 是 WARP 固定接口地址（6 次实测），按它判重复是误报");
+  assert.match(same, /2 条隧道都用同一个端点（engage\.cloudflareclient\.com:2408）/, "端点全同才是出口撞车的根因读数");
   const distinct = fmtIdentityDetail([
-    { port: 10800, id: "aaaa1111", v4: "172.16.0.2", endpoint: "e", registeredAt: "t" },
-    { port: 10801, id: "bbbb2222", v4: "172.16.0.3", endpoint: "e", registeredAt: "t" },
+    { port: 10800, id: "aaaa1111", v4: "172.16.0.2", v6: "2606:4700:110:1:2:3:4:5", endpoint: "162.159.192.1:2408", registeredAt: "t" },
+    { port: 10801, id: "bbbb2222", v4: "172.16.0.2", v6: "2606:4700:110:6:7:8:9:a", endpoint: "162.159.193.1:2408", registeredAt: "t" },
   ]).join("\n");
-  assert.doesNotMatch(distinct, /重复/, "设备各不相同就不许报重复（此时出口相同只能是 CF 的 NAT 折叠）");
+  assert.doesNotMatch(distinct, /重复/, "设备各不相同就不许报重复");
+  assert.doesNotMatch(distinct, /都用同一个端点/, "端点不同就不许报「都同一个端点」");
+  assert.match(fmtIdentityDetail([{ port: 1, id: "x", endpoint: "e", registeredAt: "t" }]).join("\n"), /内网v6=无/, "缺 v6 不许抛");
 });
 
 test("report：出口分散结论必须自洽（隧道数 ≠ 名额数）并给出下一步命令——旧措辞「同时在线就有 N 份名额」与共享 NAT 自相矛盾", () => {
