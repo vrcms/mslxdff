@@ -35,7 +35,14 @@ function keepTailByBytes(text, maxBytes) {
     if (bytes + b > limit) break;
     bytes += b;
   }
-  return lines.slice(i + 1).join("\n");
+  // 至少保留最后一条：单行超 limit 时否则返回空串 = 清空整个轮转日志。
+  // 判据是「结果为空」——文件尾有换行时 split 的最后一个元素是空串，`i === lines.length-1` 判不到内容行。
+  const kept = lines.slice(i + 1).join("\n");
+  if (!kept) {
+    const nonEmpty = lines.filter((l) => l !== "");
+    if (nonEmpty.length) return nonEmpty[nonEmpty.length - 1];
+  }
+  return kept;
 }
 
 export function appendRotationLog({ uid, model, totalMs, balanceHit, error, clock = Date.now, fs: fsOverride, dirs: dirsOverride, maxBytes = 1024 * 1024 } = {}) {

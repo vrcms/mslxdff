@@ -52,7 +52,22 @@ function keepTailByBytes(text, maxBytes) {
     if (bytes + b > limit) break;
     bytes += b;
   }
-  return lines.slice(i + 1).join("\n");
+  // 至少保留最后一条：单行本身超过 limit 时（超大 detail/堆栈）上面的循环会一路退到第一条内容行之前，
+  // 返回空串 = 整个日志被清空，比截断更糟（一次丢掉全部历史，且看起来像"日志坏了"）。
+  // 判据是「保留结果为空」而不是 `i === lines.length-1`：文件以换行结尾时 split 出来的最后一个元素是
+  // 空串，`lines.length-1` 指向它，与真正的内容行不同（这一处曾写错，实测保底从未生效）。
+  // 宁可让这一条略微超出预算，也要留住"最新发生了什么"。
+  // 至少保留最后一条：单行本身超过 limit 时（超大 detail/堆栈）上面的循环会一路退到第一条内容行之前，
+  // 返回空串 = 整个日志被清空，比截断更糟（一次丢掉全部历史，且看起来像"日志坏了"）。
+  // 判据是「保留结果为空」而不是 `i === lines.length-1`：文件以换行结尾时 split 出来的最后一个元素是
+  // 空串，`lines.length-1` 指向它，与真正的内容行不同（这一处曾写错，实测保底从未生效）。
+  // 宁可让这一条略微超出预算，也要留住"最新发生了什么"。
+  const kept = lines.slice(i + 1).join("\n");
+  if (!kept && lines.length) {
+    const last = lines.filter((l) => l !== "");
+    if (last.length) return last[last.length - 1];
+  }
+  return kept;
 }
 
 function trimIfOversized(file, maxBytes = MAX_BYTES) {

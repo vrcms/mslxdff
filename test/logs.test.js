@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -114,6 +114,30 @@ test("module-level default helpers use the same state dir", async () => {
     const calls = defaultRecentCalls(1);
     assert.equal(calls[0].model, "z");
     assert.ok(readFileSync(callsFile(), "utf8").length > 0);
+  } finally {
+    delete process.env.MSLXDFF_DAEMON_DIR;
+  }
+});
+
+// BUG-33：keepTailByBytes 在「单行本身超过 limit」时一路退到 -1，返回空串 = 整个日志被清空。
+// 三处裁剪点（logs.js / model-trace.js / rotation-log.js）共用同一算法，故这是同一处边界缺陷。
+// 触发条件：某条日志行超过 maxBytes*3/4（超大 detail/堆栈/error 字段）。
+test("日志裁剪：单行超过预算时至少保留该行，绝不能清空整个文件", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-log-huge-"));
+  process.env.MSLXDFF_DAEMON_DIR = dir;
+  try {
+    const f = join(dir, "events.log");
+    // 造一条远超 4MB*3/4 的巨型行（模拟超大 detail），再加一条正常行
+    // 必须**超过** MAX_BYTES(4MB) 才会进入回退循环；且单行超过 limit(3MB) 才触发边界。
+    // 关键：巨型行必须是**唯一/最后**一条 —— 若后面再追加一条小行，裁剪会保留那条小行，
+    // 边界（返回空串）就被掩盖，测试抓不到缺陷（实测踩过这个坑）。
+    const huge = "H".repeat(6 * 1024 * 1024);
+    writeFileSync(f, `{"ts":1,"type":"huge","detail":"${huge}"}\n`);
+    // 触发裁剪：写一条同样超预算的巨型行，且不再追加任何小行
+    appendEvent({ type: "huge2", detail: "J".repeat(6 * 1024 * 1024) }, { file: f });
+    const text = readFileSync(f, "utf8");
+    assert.ok(text.length > 0, "绝不能被清空 —— 清空比截断更糟，一次丢掉全部历史");
+    assert.match(text, /"type":"huge2"/, "单行超预算时至少留住最新那一条");
   } finally {
     delete process.env.MSLXDFF_DAEMON_DIR;
   }
