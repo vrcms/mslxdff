@@ -14,6 +14,17 @@ const logs = { appendCall, appendError, appendEvent, appendTimeline, appendModel
 export async function startDaemonMain(VERSION) {
   const { installLifecycleLog } = await import("./lifecycle-log.js");
   installLifecycleLog({ version: VERSION, logs });
+  // 接管：内存里若还有旧的 mslxdff daemon，先请它退出。它不在 daemon.pid 里（-restart 结构性碰不到它），
+  // 两个 daemon 会互抢 warp-pool 的端口（真机 2026-10-17：旧 daemon 活了一整天，日志只显示「起一条死一条」）。
+  // 必须早于 setupProviders —— 那一步才建池抢端口。debug 前台有自己的收口逻辑，不在这里抢。
+  if (process.env.MSLXDFF_DAEMON === "1" && process.env.MSLXDFF_DEBUG !== "1") {
+    try {
+      const { takeoverOlderDaemons } = await import("../daemon.js");
+      await takeoverOlderDaemons({ log: (m) => console.log(m) });
+    } catch (e) {
+      console.log(`[daemon] 接管旧 daemon 失败（不阻断启动）：${String(e?.message || e)}`);
+    }
+  }
   const ctx = await setupProviders();
   const { srv, bus } = await startServerLifecycle({ VERSION, ...ctx, logs });
   void srv;

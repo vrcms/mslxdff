@@ -143,6 +143,7 @@
 - **作用**：显式以后台 daemon 启动。同样 **只升不降**：先 `stopDaemonIfOutdated()`（仅 `VERSION > runningVersion` 才停旧），若已在跑更高版本则 `keeping` 并复用，不另起降级。`spawn detached` 后等待健康检查。
 - **环境**：子进程带 `MSLXDFF_DAEMON=1` 标记；父进程等待后打印 `daemon started (pid XXX)`、`log`、`pid`。
 - **与其他参数混用**：`startDaemon` 会过滤掉 `-d/--daemon` 再透传其余参数（如 `-port 8989`）。
+- **启动自愈（2026-10-17）**：daemon 起来时先扫 `/proc`，若内存里还有**比它旧**的 mslxdff daemon（不在 `daemon.pid` 里、`-restart` 结构性碰不到的那种）就先 SIGTERM → 5s → SIGKILL 请出去，避免两个 daemon 互抢 warp-pool 端口（日志：`[daemon] 内存里还有别的 mslxdff daemon：pid …（已运行 6h12m，比本进程旧）—— 先请它退出`；清完 `✓ 已请走 N 个旧 daemon`）；与本次启动**几乎同时**的不动，由 8989 的 bind 决定谁活（防两边互杀）。
 - **示例**：
   ```bash
   mslxdff -d

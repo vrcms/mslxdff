@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
-import { findDaemons, fmtAlive } from "./runtime/proc-info.js";
+import { aliveSec, findDaemons, fmtAlive } from "./runtime/proc-info.js";
 
 export function daemonDir() {
   return process.env.MSLXDFF_DAEMON_DIR || join(os.homedir(), ".config", "mslxdff");
@@ -144,4 +144,52 @@ export async function reapGhostDaemons({ self = process.pid, list = () => findDa
   const t1 = Date.now();
   while (Date.now() - t1 < killWaitMs && stuck.some((g) => isAlive(g.pid))) await sleep(100);
   return ghosts.filter((g) => !isAlive(g.pid));
+}
+
+/**
+ * 接管：内存里若还有**别的** mslxdff daemon，先把比我们旧的那批请出去。
+ * 为什么必须有（用户点名要求 + 真机 2026-10-17 事故）：`-restart` 只认 `daemon.pid`，
+ * 不在册的 daemon（SIGTERM 后没真退出、pid 文件又被删掉的那个）会活一整天，与新版互抢
+ * warp-pool 的 4 个端口——日志里只能看到「起一条死一条」，看不出是两个 daemon 在互杀。
+ * 判据：比自己早启动 ≥ `minAgeMs` 的一律清（SIGTERM → 等 → SIGKILL）；与本次启动几乎同时的不动
+ * （谁该活由 8989 的 bind 决定，`server-lifecycle` 的 EADDRINUSE 自愈会收口），避免两边互杀。
+ * 全程不抛（接管失败绝不能挡住启动）。
+ * @returns {Promise<{killed:number[], skipped:number[], remaining:number[]}>}
+ */
+export async function takeoverOlderDaemons({
+  self = process.pid,
+  list = () => findDaemons({ self }),
+  kill = process.kill,
+  isAlive = isPidAlive,
+  log = () => {},
+  minAgeMs = 3000,
+  settleMs = 5000,
+  killWaitMs = 2000,
+  myAliveSec = undefined,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  const sibs = list();
+  if (!sibs.length) return { killed: [], skipped: [], remaining: [] };
+  const mine = myAliveSec === undefined ? aliveSec(self) : myAliveSec;
+  // 取不到运行时长（非 Linux / 读不到 /proc）时保守处理：一律当成「旧的」，因为只允许一个 daemon 活着
+  const isOlder = (d) => mine == null || d.aliveSec == null || (d.aliveSec - mine) * 1000 >= minAgeMs;
+  const older = sibs.filter(isOlder);
+  const skipped = sibs.filter((d) => !isOlder(d));
+
+  for (const d of older) log(`[daemon] 内存里还有别的 mslxdff daemon：pid ${d.pid}（父 ${d.ppid}，已运行 ${fmtAlive(d.aliveSec)}，比本进程旧）—— 先请它退出，否则两个 daemon 会抢同一批端口（warp-pool 起一条死一条的真因）`);
+  for (const d of older) { try { kill(d.pid, "SIGTERM"); } catch {} }
+  const t0 = Date.now();
+  while (Date.now() - t0 < settleMs && older.some((d) => isAlive(d.pid))) await sleep(100);
+  const stuck = older.filter((d) => isAlive(d.pid));
+  for (const d of stuck) log(`[daemon] pid ${d.pid} 收到 SIGTERM 后 ${Math.round((Date.now() - t0) / 1000)}s 仍没退，补 SIGKILL`);
+  for (const d of stuck) { try { kill(d.pid, "SIGKILL"); } catch {} }
+  const t1 = Date.now();
+  while (Date.now() - t1 < killWaitMs && stuck.some((d) => isAlive(d.pid))) await sleep(100);
+
+  const remaining = older.filter((d) => isAlive(d.pid));
+  const killed = older.filter((d) => !isAlive(d.pid)).map((d) => d.pid);
+  for (const d of skipped) log(`[daemon] ⚠ 同机还有 pid ${d.pid}（与本次启动几乎同时，不是旧的）—— 不动它，由 8989 的 bind 决定谁活`);
+  if (remaining.length) log(`[daemon] ⚠ 请不走：pid ${remaining.map((d) => d.pid).join(",")}（SIGKILL 都没用，可能是僵尸或权限不足）—— 它仍会抢端口，请手动 kill -9`);
+  else if (killed.length) log(`[daemon] ✓ 已请走 ${killed.length} 个旧 daemon（pid ${killed.join(",")}），本进程独占`);
+  return { killed, skipped: skipped.map((d) => d.pid), remaining: remaining.map((d) => d.pid) };
 }

@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { aliveSec, findDaemons, fmtAlive, isDaemonArgv, isZombie, otherDaemonParent, parseCmdline, parseStat } from "../src/runtime/proc-info.js";
-import { reapGhostDaemons, waitPidGone } from "../src/daemon.js";
+import { reapGhostDaemons, takeoverOlderDaemons, waitPidGone } from "../src/daemon.js";
 
 test("proc：parseStat 从最后一个 ')' 之后切（comm 带空格/括号也不许错位）", () => {
   const raw = "1234 (node (x) y) S 1 1234 1234 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0";
@@ -122,4 +122,57 @@ test("daemon：reapGhostDaemons 清掉「不在册」的 daemon 并返回确实�
   assert.ok(sigs.some(([p, s]) => p === 42 && s === "SIGKILL"), "42 不听 SIGTERM ⇒ 必须补 SIGKILL");
   assert.ok(logs.some((l) => l.includes("不在册的 daemon pid=41") && l.includes("已运行 1m")), "必须报出是哪个 pid、已运行多久");
   assert.deepEqual(await reapGhostDaemons({ list: () => [], log: () => {} }), [], "没有幽灵就别刷日志");
+});
+
+test("daemon：takeoverOlderDaemons 启动时先请走「比我们旧」的 daemon（内存里有 mslxdff 就先让旧的退出）", async () => {
+  const logs = [];
+  const live = new Set([71, 72, 73]);
+  const sigs = [];
+  const kill = (pid, sig) => {
+    sigs.push([pid, sig]);
+    if (sig === "SIGKILL") live.delete(pid);
+    else if (pid === 71) live.delete(pid); // 71 听 SIGTERM；72 装死要补刀；73 是同期启动，不该被碰
+  };
+  const r = await takeoverOlderDaemons({
+    self: 99,
+    myAliveSec: 2,
+    list: () => [
+      { pid: 71, ppid: 1, aliveSec: 22320 },
+      { pid: 72, ppid: 1, aliveSec: 3600 },
+      { pid: 73, ppid: 1, aliveSec: 3 },
+    ],
+    kill,
+    isAlive: (pid) => live.has(pid),
+    sleep: async () => {},
+    settleMs: 1,
+    killWaitMs: 1,
+    log: (m) => logs.push(m),
+  });
+  assert.deepEqual(r.killed.slice().sort((a, b) => a - b), [71, 72], "比我们旧的两个都要请走");
+  assert.deepEqual(r.skipped, [73], "与本次启动几乎同时的不动（避免两边互杀）");
+  assert.deepEqual(r.remaining, []);
+  assert.ok(sigs.some(([p, s]) => p === 72 && s === "SIGKILL"), "72 不听 SIGTERM ⇒ 必须补 SIGKILL");
+  assert.ok(logs.some((l) => l.includes("pid 71") && l.includes("已运行 6h12m") && l.includes("比本进程旧")), "必须报出是哪个 pid、已运行多久");
+  assert.ok(logs.some((l) => l.includes("已请走 2 个旧 daemon")), "清完要报结论");
+  assert.ok(logs.some((l) => l.includes("pid 73") && l.includes("几乎同时")), "同期启动的要说明为什么不动它");
+});
+
+test("daemon：takeoverOlderDaemons 请不走时诚实报出（僵尸/权限）；没有兄弟就不刷日志", async () => {
+  const logs = [];
+  const r = await takeoverOlderDaemons({
+    self: 99,
+    myAliveSec: 2,
+    list: () => [{ pid: 81, ppid: 1, aliveSec: 9999 }],
+    kill: () => {},
+    isAlive: () => true,
+    sleep: async () => {},
+    settleMs: 1,
+    killWaitMs: 1,
+    log: (m) => logs.push(m),
+  });
+  assert.deepEqual(r.remaining, [81]);
+  assert.deepEqual(r.killed, []);
+  assert.ok(logs.some((l) => l.includes("请不走：pid 81") && l.includes("kill -9")), "请不走必须诚实报出并给出手动命令");
+  const quiet = await takeoverOlderDaemons({ list: () => [], log: () => { throw new Error("没有兄弟就不该打日志"); } });
+  assert.deepEqual(quiet, { killed: [], skipped: [], remaining: [] });
 });
