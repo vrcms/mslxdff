@@ -18,6 +18,26 @@ function defaultDirs() {
   return [...dirs];
 }
 
+// 裁剪保留比例（按字节）。阈值 `st.size` 是**字节**，原先的回退 `content.slice(-512*1024)` 是**字符** ——
+// 量纲不匹配：中文（3 字节/字符）下保留后字节数浮动，且 slice 按字符切会**切在半行**上
+// （实测开头得到 `"el=workbuddy/deepseek totalMs="`，下一行接上去就把日志结构毁了）。
+// 与 logs.js / model-trace.js 同口径：按字节留 3/4，且不截半行。
+const KEEP_RATIO = 3 / 4;
+
+function keepTailByBytes(text, maxBytes) {
+  const limit = Math.max(1, Math.floor(maxBytes * KEEP_RATIO));
+  if (Buffer.byteLength(text) <= limit) return text;
+  const lines = text.split("\n");
+  let bytes = 0;
+  let i = lines.length - 1;
+  for (; i >= 0; i--) {
+    const b = Buffer.byteLength(lines[i]) + 1;
+    if (bytes + b > limit) break;
+    bytes += b;
+  }
+  return lines.slice(i + 1).join("\n");
+}
+
 export function appendRotationLog({ uid, model, totalMs, balanceHit, error, clock = Date.now, fs: fsOverride, dirs: dirsOverride, maxBytes = 1024 * 1024 } = {}) {
   // 兼容旧调用：appendRotationLog({uid,model,totalMs,balanceHit,error}) 形式，clock/fs 可选
   const useFs = fsOverride || { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync, join };
@@ -32,8 +52,9 @@ export function appendRotationLog({ uid, model, totalMs, balanceHit, error, cloc
         try {
           const st = useFs.statSync(file);
           if (st.size > maxBytes) {
-            const content = useFs.readFileSync(file, "utf8");
-            useFs.writeFileSync(file, content.slice(-512 * 1024));
+            // 按字节回退（不截半行），与 logs.js / model-trace.js 同口径。
+            const kept = keepTailByBytes(useFs.readFileSync(file, "utf8"), maxBytes);
+            useFs.writeFileSync(file, kept.endsWith("\n") || !kept ? kept : `${kept}\n`);
           }
         } catch {}
       } catch {}
