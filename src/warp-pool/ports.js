@@ -108,3 +108,15 @@ export function portInUse(port, { host = "127.0.0.1", timeoutMs = 800, connectFn
     sock.once("error", () => finish(false));
   });
 }
+
+/**
+ * 等端口真正空出来（SIGTERM 之后套接字要几百毫秒才释放，这期间连得上 ≠ 别人的进程占着）。
+ * 返回 true = 空了；false = 等了 rounds 轮还是被占。
+ */
+export async function waitPortFree(port, { inUse = portInUse, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), rounds = 12, stepMs = 250 } = {}) {
+  for (let i = 0; i < rounds; i++) {
+    if (!(await inUse(port))) return true;
+    await sleep(stepMs);
+  }
+  return !(await inUse(port));
+}

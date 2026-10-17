@@ -8,7 +8,7 @@ import { ensureDir, loadNodes, removeNode, saveNode } from "./nodes.js";
 import { registerWarpDevice } from "./register.js";
 import { ensureBinary, probeTunnel, resolveAsset, startTunnel, writeTunnelConf } from "./wireproxy.js";
 import { createReviver, labelExits, tailReason } from "./revive.js";
-import { portInUse, reclaimPort } from "./ports.js";
+import { portInUse, reclaimPort, waitPortFree } from "./ports.js";
 import { wireRotation } from "./identity.js";
 
 /** 重拨节流：连续失败指数退避。网络不通的机器绝不能让重注册把 CF 刷到 429。 */
@@ -38,6 +38,9 @@ export function createWarpPool({
   ensureBin = ensureBinary,
   start = startTunnel,
   probe = probeTunnel,
+  reclaim = reclaimPort,
+  inUse = portInUse,
+  waitFree = waitPortFree,
   now = Date.now,
   rnd = Math.random,
   wait = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -75,7 +78,12 @@ export function createWarpPool({
   let redialGapMs = REDIAL_MIN_GAP_MS;
 
   // 兜底清理：Node 退出不会回收 spawn 的子进程，daemon 突然退出时同步杀掉隧道。
+  // 同时置 closed：否则「杀子进程 → onExit → 立刻复活」会在退出过程中再 spawn 出一批孤儿（真机：每次重启漏一批）。
   process.once("exit", () => {
+    closed = true;
+    try {
+      reviver.stop();
+    } catch {}
     for (const t of tunnels.values()) {
       try {
         t.stop();
@@ -83,13 +91,14 @@ export function createWarpPool({
     }
   });
 
-  /** 起一条隧道的完整动作：清残留 → 写 conf → 确认端口真空着 → spawn → 记表。 */
+  /** 起一条隧道的完整动作：确认不是重复起 → 清残留 → 写 conf → 等端口真空出来 → spawn → 记表。 */
   async function bringUp(node) {
-    await reclaimPort({ dir: cfg.dir, port: node.port, log }); // 清上一代孤儿（daemon 被强杀时子进程不会自己退）
+    if (tunnels.has(node.port)) return; // 已归我们管：绝不再清残留（reclaim 会把自己这条隧道当残留杀掉）
+    await reclaim({ dir: cfg.dir, port: node.port, log }); // 清上一代孤儿（daemon 被强杀时子进程不会自己退）
     writeTunnelConf(cfg.dir, node);
-    if (tunnels.has(node.port)) return;
-    if (await portInUse(node.port)) {
-      throw new Error(`端口 :${node.port} 已被非本池进程占用，拒绝再起（硬起只会 bind 失败、无限重启刷屏）`);
+    // SIGTERM 之后套接字要几百毫秒才释放，这期间连得上 ≠ 别人的进程占着——先等它真空出来再判
+    if (!(await waitFree(node.port, { inUse }))) {
+      throw new Error(`端口 :${node.port} 被非本池进程占着，拒绝再起（硬起只会 bind 失败、无限重启刷屏）；查明：ss -ltnp | grep :${node.port}`);
     }
     const t = start({
       binPath,
@@ -100,7 +109,7 @@ export function createWarpPool({
         tunnels.delete(port);
         const why = tailReason(tail) || "进程没留下任何输出";
         log(`[warp-pool] :${port} 隧道意外退出（退出码 ${code}${signal ? `，信号 ${signal}` : ""}）：${why}`);
-        void reviver.onExit(port);
+        if (!closed) void reviver.onExit(port); // 收摊中就别复活了，否则退出过程里又 spawn 出一批孤儿
       },
     });
     tunnels.set(node.port, t);
@@ -117,6 +126,35 @@ export function createWarpPool({
     log,
   });
 
+  /** 探活闸门参数：刚起的隧道要等 WireGuard 握手完成才通（真机：一起来就探 ⇒ 4 条全没通 ⇒ 池为空、WARP 白开）。 */
+  const PROBE_SETTLE_MS = 2_000;
+  const PROBE_ATTEMPTS = 2;
+
+  /**
+   * 入池前的实测闸门：给握手留时间 → 逐个探活 → 探不通的绝不进池。
+   * 为什么必须有：wireproxy 进程活着但隧道转不动流量时，请求会挂到超时（比直连更糟）。
+   * @returns {Promise<Array<object>>} 通过探活的节点
+   */
+  async function probeGate(list) {
+    const live = [];
+    await wait(PROBE_SETTLE_MS);
+    for (const n of list) {
+      if (!tunnels.has(n.port)) continue;
+      let r = { ok: false };
+      for (let i = 1; i <= PROBE_ATTEMPTS; i++) {
+        r = await probe({ port: n.port, baseUrl, path: cfg.probePath });
+        if (r.ok) break;
+        if (i < PROBE_ATTEMPTS) await wait(PROBE_SETTLE_MS);
+      }
+      if (r.ok) {
+        live.push(n);
+        log(`[warp-pool] :${n.port} 探通（HTTP ${r.status}），进池`);
+      } else {
+        log(`[warp-pool] :${n.port} 探了 ${PROBE_ATTEMPTS} 次都不通（${r.status || r.error || "?"}），不进池：进池会把请求挂到超时，比直连更糟`);
+      }
+    }
+    return live;
+  }
   async function bootstrap() {
     if (closed) return;
     ensureDir(cfg.dir);
@@ -162,14 +200,8 @@ export function createWarpPool({
       }
     }
 
-    // 入池前实测探活：WARP 握手不通时 wireproxy 进程照样在跑却转不动流量（挂到超时），那种节点进池会黑洞全部请求
-    const live = [];
-    for (const n of nodes) {
-      if (!tunnels.has(n.port)) continue;
-      const r = await probe({ port: n.port, baseUrl, path: cfg.probePath });
-      if (r.ok) live.push(n);
-      else log(`[warp-pool] :${n.port} 隧道没探通（${r.status || r.error || "?"}），不进池：进池会把请求挂到超时，比直连更糟`);
-    }
+    // 入池前实测探活：WARP 握手没完成时 wireproxy 在跑却转不动流量（请求会挂到超时），那种节点进池会黑洞全部请求
+    const live = await probeGate(nodes);
     if (live.length) {
       await dispatcher.setNodes(live.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
       log(`[warp-pool] 出口池就绪：${live.length} 条隧道可用（选路策略 ${cfg.strategy}${cfg.rotate ? "，撞 429 会自动换身份换出口" : ""}）`);
@@ -215,10 +247,15 @@ export function createWarpPool({
         }
         await wait(gapMs(cfg, rnd));
       }
-      if (!closed && [...tunnels.keys()].length) {
-        // 重拨确实把隧道拉起来了 ⇒ 退避复位
-        redialGapMs = REDIAL_MIN_GAP_MS;
-        await dispatcher.setNodes([...tunnels.keys()].map((port) => ({ port, uri: `http://127.0.0.1:${port}` })));
+      if (!closed && tunnels.size) {
+        // 重拨起来的隧道同样要过闸门：没过探活的隧道进池 = 把请求挂到超时（原先这里直接 setNodes，等于绕过闸门）
+        const alive = await probeGate([...tunnels.keys()].map((port) => ({ port })));
+        if (alive.length) {
+          redialGapMs = REDIAL_MIN_GAP_MS; // 确实有隧道能通 ⇒ 退避复位
+          await dispatcher.setNodes(alive.map((n) => ({ port: n.port, uri: `http://127.0.0.1:${n.port}` })));
+        } else {
+          log("[warp-pool] 重拨后仍没有一条隧道探通，保持直连（等下一轮健康检查）");
+        }
       }
     },
   });

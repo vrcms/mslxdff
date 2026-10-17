@@ -78,7 +78,7 @@ export function createRotatingDispatcher({
     if (!e) return;
     e.fails += 1;
     e.cooldownUntil = now() + cooldownMs;
-    log(`[warp-pool] 节点 :${e.port} 连续失败 ${e.fails} 次，冷却 ${Math.round(cooldownMs / 1000)}s`);
+    if (e.fails === 1 || e.fails % 10 === 0) log(`[warp-pool] 节点 :${e.port} 连续失败 ${e.fails} 次，冷却 ${Math.round(cooldownMs / 1000)}s（中间次数静默：健康探活每分钟一轮，一个不通的节点曾把日志刷成 12 行/分钟）`);
   }
 
   function markOk(index) {

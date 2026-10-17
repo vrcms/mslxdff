@@ -17,7 +17,7 @@ import { parseExitIp, createReviver, labelExits, tailReason } from "../src/warp-
 import { createWarpDispatcher, createWarpPool, redialPlan } from "../src/warp-pool/index.js";
 import { createIdentityRotator, readExitIp, wireRotation } from "../src/warp-pool/identity.js";
 import { writeTunnelConf } from "../src/warp-pool/wireproxy.js";
-import { isOurWireproxy, parseCmdline, portInUse, reclaimPort } from "../src/warp-pool/ports.js";
+import { isOurWireproxy, parseCmdline, portInUse, reclaimPort, waitPortFree } from "../src/warp-pool/ports.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "warp-pool-test-"));
 const logDirFn = () => join(tmpdir(), "warp-pool-logdir");
@@ -746,13 +746,90 @@ test("index：端口被别的进程占着 ⇒ 拒绝起隧道（硬起只会 bin
       probe: async () => ({ ok: true, status: 200 }),
       wait: async () => {},
       rnd: () => 0,
+      reclaim: async () => [],
+      waitFree: (port, opts) => waitPortFree(port, { ...opts, rounds: 2, stepMs: 5 }),
     });
     await pool.ready;
     assert.deepEqual(started, [], "端口被占 ⇒ 一条隧道都不许起");
-    assert.ok(logs.some((l) => l.includes("已被非本池进程占用")), "必须说清为什么不硬起");
+    assert.ok(logs.some((l) => l.includes("被非本池进程占着")), "必须说清为什么不硬起");
     assert.equal(pool.stats().tunnels, 0);
     await pool.close();
   } finally {
     await new Promise((r) => srv.close(r));
   }
+});
+
+// ---------- 二次真机修复（2026-10-16 深夜）：清残留 / 等端口释放 / 探活闸门 / 日志不刷屏 ----------
+
+test("ports：waitPortFree 等端口真正释放（SIGTERM 之后套接字要几百 ms 才走，这期间连得上不算被占）", async () => {
+  const seq = [true, true, false];
+  let i = 0;
+  assert.equal(await waitPortFree(10800, { inUse: async () => seq[Math.min(i++, seq.length - 1)], sleep: async () => {} }), true, "占用消退后必须放行");
+  assert.equal(await waitPortFree(10800, { inUse: async () => true, sleep: async () => {}, rounds: 3 }), false, "始终被占必须判否");
+});
+
+test("index：清残留紧挨在起隧道之前、每端口各一次（绝不在自己管着时清，否则会杀掉自己的隧道）", async () => {
+  const dir = tmp();
+  const order = [];
+  const pool = createWarpPool({
+    env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "2", MSLXDFF_WARP_BASE_PORT: "10945" },
+    log: () => {},
+    ensureBin: async () => "C:/fake/wireproxy",
+    register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::f", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
+    reclaim: async ({ port }) => {
+      order.push(`reclaim${port}`);
+      return [];
+    },
+    inUse: async () => false,
+    waitFree: async () => true,
+    start: ({ port }) => {
+      order.push(`start${port}`);
+      return { port, stop() {} };
+    },
+    probe: async () => ({ ok: true, status: 200 }),
+    wait: async () => {},
+    rnd: () => 0,
+  });
+  await pool.ready;
+  assert.deepEqual(order, ["reclaim10945", "start10945", "reclaim10946", "start10946"], "每端口只清一次，且紧接 spawn");
+  await pool.close();
+});
+
+test("index：探活闸门先等握手、不通再探一次（真机：一起来就探 ⇒ 4 条全没通 ⇒ 池为空、WARP 白开）", async () => {
+  const dir = tmp();
+  const waits = [];
+  let probes = 0;
+  const pool = createWarpPool({
+    env: { MSLXDFF_WARP_POOL: "1", MSLXDFF_WARP_DIR: dir, MSLXDFF_WARP_COUNT: "1", MSLXDFF_WARP_BASE_PORT: "10955" },
+    log: () => {},
+    ensureBin: async () => "C:/fake/wireproxy",
+    register: async () => ({ id: "id", token: "tk", v4: "172.16.0.2", v6: "2606:4700::9", peerKey: "PK=", endpoint: "e:2408", privateKey: "PRIVKEY=" }),
+    reclaim: async () => [],
+    inUse: async () => false,
+    waitFree: async () => true,
+    start: ({ port }) => ({ port, stop() {} }),
+    probe: async () => {
+      probes += 1;
+      return probes >= 2 ? { ok: true, status: 200 } : { ok: false, status: 0, error: "handshake timeout" };
+    },
+    wait: async (ms) => waits.push(ms),
+    rnd: () => 0,
+  });
+  await pool.ready;
+  assert.equal(probes, 2, "第一次探不通必须再探一次");
+  assert.ok(waits.filter((ms) => ms === 2_000).length >= 2, "起隧道后先等握手，重试前还要再等一次");
+  assert.equal(pool.stats().nodes.length, 1, "第二次探通 ⇒ 进池");
+  await pool.close();
+});
+
+test("rotate：markFailure 只在第 1 次与整十次报（健康探活每分钟一轮，不刷日志）", () => {
+  const logs = [];
+  const d = createRotatingDispatcher({
+    nodes: [{ port: 10800, uri: "http://127.0.0.1:10800" }],
+    agentFactory: () => ({ dispatch: () => true, close: async () => {} }),
+    log: (m) => logs.push(m),
+  });
+  for (let i = 0; i < 12; i++) d.markFailure(0);
+  assert.equal(logs.length, 2, "12 次失败只报 2 行（第 1 次 + 第 10 次）");
+  assert.equal(d.stats()[0].fails, 12, "计数照旧累计");
 });
