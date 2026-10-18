@@ -1,21 +1,25 @@
 // raccoon 扫码登录状态机与会话续期。
-// 实测依据：`POST /api/web/auth/v1/login_with_qrcode_code` **匿名可达**（HTTP 200 {"code":0,"data":{"status":"pending"}}），
-// 故整条登录链路不需要验证码、不需要浏览器组件（短信登录才要阿里云滑块，本期不做）。
-import { randomBytes } from "node:crypto";
+// ⚠ 2026-10 上游改版（本机实测）：扫码登录**不再是**「客户端自造 code + 旧 web 端点」。
+//   新链路 `/api/iam/v1/auth/mp/qrcode` 里 code 由**服务端签发**（`qr-<uuid>`）并下发
+//   scan_path / expires_in / poll_interval。旧写法（`randomBytes(16)` 当 code）在新通道下
+//   没有服务端会话 —— 微信扫码后查不到该码，症状正是「二维码已过期或已被使用」。
+//   新通道同样匿名可达、不需要验证码，故整条链路仍不需要浏览器组件（短信登录才要滑块，本期不做）。
 import {
   RACCOON_LOGIN_POLL_INTERVAL_MS,
   RACCOON_LOGIN_TIMEOUT_MS,
   RACCOON_REQUEST_TIMEOUT_MS,
-  raccoonQrLoginUrl,
+  raccoonQrCancelUrl,
+  raccoonQrCreateUrl,
   raccoonQrPageUrl,
+  raccoonQrPollUrl,
   raccoonRefreshUrl,
   raccoonUserInfoUrl,
 } from "./const.js";
 import { raccoonAnonymousHeaders, raccoonAuthHeaders } from "./headers.js";
 import { decodeJwtExpMs } from "./auth.js";
-import { parseRaccoonEnvelope, raccoonEnvelopeText } from "./envelope.js";
+import { isRaccoonOk, parseRaccoonEnvelope, raccoonEnvelopeText } from "./envelope.js";
 
-/** 上游 `data.status` 四态（pack.js RACCOON_QR_STATUS 同形）。 */
+/** 上游 `data.status` 四态（与网站登录页 chunk 实测一致）。 */
 export const RACCOON_QR_STATUS = Object.freeze({
   pending: "pending",
   logging: "logging",
@@ -23,24 +27,17 @@ export const RACCOON_QR_STATUS = Object.freeze({
   success: "success",
 });
 
-/** 一次性登录码：16 字节 hex（32 字符），既是二维码内容参数也是轮询凭据。 */
-export function createQrCode() {
-  return randomBytes(16).toString("hex");
-}
-
-/** 二维码/链接内容：用户用手机扫码或直接打开它完成确认。 */
-export function buildQrUrl(code) {
-  return raccoonQrPageUrl(code);
-}
+/** 码在服务端不存在/已作废时 IAM 通道回的业务码。 */
+export const RACCOON_QR_EXPIRED_CODE = "AUTH_QRCODE_EXPIRED";
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function postJson(url, body, { fetchImpl = fetch, env = process.env, timeoutMs = RACCOON_REQUEST_TIMEOUT_MS } = {}) {
+async function postJson(url, body, { fetchImpl = fetch, env = process.env, timeoutMs = RACCOON_REQUEST_TIMEOUT_MS, method = "POST" } = {}) {
   let res;
   try {
     res = await fetchImpl(url, {
-      method: "POST",
-      headers: raccoonAnonymousHeaders({ env }),
+      method,
+      headers: { ...raccoonAnonymousHeaders({ env }), "Accept-Language": "zh-CN" },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -54,6 +51,46 @@ async function postJson(url, body, { fetchImpl = fetch, env = process.env, timeo
     throw new Error(`raccoon: 响应不是 JSON（HTTP ${res.status}）`);
   }
   return parseRaccoonEnvelope(parsed, res.status);
+}
+
+/**
+ * 请服务端签发一个二维码会话。
+ *
+ * 返回 `{ qrcodeCode, scanPath, expiresIn, pollInterval, qrUrl }`。
+ * 任何字段不合契约都**抛错**而不是产出降级码 —— 自造 code 正是这次故障的根因，
+ * 再"兜底"一个扫不出来的码等于把同一类故障换个说法。
+ */
+export async function createQrSession(opts = {}) {
+  const envelope = await postJson(raccoonQrCreateUrl(), { product_codes: [] }, opts);
+  if (!isRaccoonOk(envelope)) throw new Error(`raccoon: 二维码签发失败：${raccoonEnvelopeText(envelope)}`);
+  const code = typeof envelope.data?.qrcode_code === "string" ? envelope.data.qrcode_code.trim() : "";
+  if (!code) throw new Error("raccoon: 二维码签发响应缺少 qrcode_code");
+  const scanPath = typeof envelope.data.scan_path === "string" ? envelope.data.scan_path : "/login/mp";
+  const expiresIn = Number(envelope.data.expires_in);
+  const pollInterval = Number(envelope.data.poll_interval);
+  return {
+    qrcodeCode: code,
+    scanPath,
+    expiresInMs: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn * 1000 : RACCOON_LOGIN_TIMEOUT_MS,
+    pollIntervalMs: Number.isFinite(pollInterval) && pollInterval > 0
+      ? Math.max(1000, Math.min(60_000, pollInterval * 1000))
+      : RACCOON_LOGIN_POLL_INTERVAL_MS,
+    qrUrl: raccoonQrPageUrl(code, scanPath),
+  };
+}
+
+/** 递归渲染用的二维码内容；scanPath 由签发响应给出。 */
+export function buildQrUrl(code, scanPath) {
+  return raccoonQrPageUrl(code, scanPath);
+}
+
+/** 回收服务端会话（过期/退出时调用，失败不影响用户）。 */
+export async function cancelQrSession(code, opts = {}) {
+  try {
+    await postJson(raccoonQrCancelUrl(), { qrcode_code: String(code || ""), status: "canceled" }, { ...opts, method: "PUT" });
+  } catch {
+    // 取消是礼貌动作，不是流程一部分：网络不通时静默即可（码自己会到期）
+  }
 }
 
 /** 从登录成功信封里取凭据；缺 access_token 视为失败（不写半截凭据）。 */
@@ -74,32 +111,44 @@ export function raccoonCredentialFromEnvelope(envelope) {
 
 /**
  * 轮询一轮。网络抖动一律折成 `pending`（用户还在扫码，不该因为一次超时把整轮打断）；
- * `canceled` / `success` 是终态。
+ * `canceled` / `expired` / `success` 是终态。
  */
 export async function pollQrLoginOnce(code, opts = {}) {
   let envelope;
   try {
-    envelope = await postJson(raccoonQrLoginUrl(), { qrcode_code: String(code || "") }, opts);
+    envelope = await postJson(raccoonQrPollUrl(), { qrcode_code: String(code || "") }, opts);
   } catch {
     return { status: RACCOON_QR_STATUS.pending };
   }
-  if (envelope.code !== 0 || envelope.data === undefined) return { status: RACCOON_QR_STATUS.pending };
+  if (!isRaccoonOk(envelope)) {
+    // 码在服务端不存在/已作废 —— 必须区分出来：继续轮询只会一直失败，用户却以为还在等扫描
+    if (String(envelope.code) === RACCOON_QR_EXPIRED_CODE) return { status: "expired" };
+    return { status: RACCOON_QR_STATUS.pending };
+  }
+  if (envelope.data === undefined) return { status: RACCOON_QR_STATUS.pending };
   const status = typeof envelope.data.status === "string" ? envelope.data.status : "";
   const expiredAt = typeof envelope.data.expired_at === "string" ? envelope.data.expired_at : undefined;
+  const pollIntervalMs = Number.isFinite(Number(envelope.data.poll_interval)) && Number(envelope.data.poll_interval) > 0
+    ? Number(envelope.data.poll_interval) * 1000
+    : undefined;
+  const jitter = pollIntervalMs === undefined ? {} : { pollIntervalMs };
   if (status === RACCOON_QR_STATUS.canceled) return { status: RACCOON_QR_STATUS.canceled };
-  if (status === RACCOON_QR_STATUS.logging) return { status: RACCOON_QR_STATUS.logging, ...(expiredAt ? { expiredAt } : {}) };
+  if (status === RACCOON_QR_STATUS.logging) return { status: RACCOON_QR_STATUS.logging, ...jitter, ...(expiredAt ? { expiredAt } : {}) };
   if (status === RACCOON_QR_STATUS.success) {
     try {
-      return { status: RACCOON_QR_STATUS.success, credential: raccoonCredentialFromEnvelope(envelope) };
+      return { status: RACCOON_QR_STATUS.success, ...jitter, credential: raccoonCredentialFromEnvelope(envelope) };
     } catch {
-      return { status: RACCOON_QR_STATUS.pending };
+      return { status: RACCOON_QR_STATUS.pending, ...jitter };
     }
   }
-  return { status: RACCOON_QR_STATUS.pending };
+  return { status: RACCOON_QR_STATUS.pending, ...jitter };
 }
 
 /**
- * 轮询直到终态。返回 `{ status, credential? }`；
+ * 轮询直到终态。返回 `{ status, credential? }`。
+ *
+ * `deadlineMs` 用**服务端下发的有效期**（不是本地常量）：码的生死由上游决定，
+ * 本地猜一个更长的窗口只会在码已作废后继续空转，把「已过期」拖成「超时」。
  * 超时返回 `{ status: "timeout" }`（调用方据此输出人话并非零退出）。
  */
 export async function pollQrLogin(code, {
@@ -113,6 +162,7 @@ export async function pollQrLogin(code, {
 } = {}) {
   const deadline = now() + timeoutMs;
   let ticks = 0;
+  let interval = intervalMs;
   for (;;) {
     const result = await pollQrLoginOnce(code, { fetchImpl, env });
     ticks += 1;
@@ -121,8 +171,11 @@ export async function pollQrLogin(code, {
     }
     if (result.status === RACCOON_QR_STATUS.success) return result;
     if (result.status === RACCOON_QR_STATUS.canceled) return { status: RACCOON_QR_STATUS.canceled };
+    if (result.status === "expired") return { status: "expired" };
+    // 服务端可以调快/调慢节奏，以它下发的为准（夹在 1s–60s，防被一个坏值卡住）
+    if (Number.isFinite(result.pollIntervalMs)) interval = Math.max(1000, Math.min(60_000, result.pollIntervalMs));
     if (now() >= deadline) return { status: "timeout" };
-    await sleepFn(intervalMs);
+    await sleepFn(interval);
   }
 }
 
@@ -150,12 +203,13 @@ export async function refreshRaccoonCredential(credential, opts = {}) {
     throw new Error(`raccoon: 续期响应不是 JSON（HTTP ${res.status}）`);
   }
   const envelope = parseRaccoonEnvelope(parsed, res.status);
-  if (res.status === 401 || envelope.code === 200003) {
+  // 登录态失效判据两代都收：旧通道数字 200003，IAM 通道字符串 AUTH_ACCESS_TOKEN_EXPIRED
+  if (res.status === 401 || envelope.code === 200003 || String(envelope.code) === "AUTH_ACCESS_TOKEN_EXPIRED") {
     const err = new Error("raccoon: 登录态已过期，请重新登录");
     err.authExpired = true;
     throw err;
   }
-  if (envelope.code !== 0) throw new Error(`raccoon: 续期失败：${raccoonEnvelopeText(envelope)}`);
+  if (!isRaccoonOk(envelope)) throw new Error(`raccoon: 续期失败：${raccoonEnvelopeText(envelope)}`);
   const accessToken = typeof envelope.data?.access_token === "string" ? envelope.data.access_token : "";
   if (!accessToken) throw new Error("raccoon: 续期响应缺少 access_token");
   const nextRefresh = typeof envelope.data.refresh_token === "string" && envelope.data.refresh_token.length > 0
@@ -181,7 +235,7 @@ export async function fetchRaccoonUserInfo(credential, opts = {}) {
     });
     if (!res.ok) return {};
     const envelope = parseRaccoonEnvelope(await res.json(), res.status);
-    if (envelope.code !== 0 || envelope.data === undefined) return {};
+    if (!isRaccoonOk(envelope) || envelope.data === undefined) return {};
     const pick = (k) => (typeof envelope.data[k] === "string" ? envelope.data[k] : "");
     return {
       userId: pick("id"),

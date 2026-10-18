@@ -130,10 +130,11 @@ test("CLI: raccoon login 打印二维码/URL、落盘、补齐 allowlist（注�
   const lines = [];
   const saved = [];
   const ok = await handleRaccoonLogin("raccoon", "login", [], {
-    qrCode: "a".repeat(32),
+    // 二维码由服务端签发（2026-10 改版）：注入一个固定会话，不碰真实上游
+    qrSession: { qrcodeCode: "qr-test", scanPath: "/login/mp", expiresInMs: 300_000, pollIntervalMs: 2000 },
     fetchImpl: async (url) => {
-      if (String(url).includes("login_with_qrcode_code")) {
-        return jsonRes({ code: 0, data: { status: "success", access_token: "tok-login", refresh_token: "ref-login" } });
+      if (String(url).includes("/auth/mp/qrcode/login")) {
+        return jsonRes({ code: "OK", data: { status: "success", access_token: "tok-login", refresh_token: "ref-login" } });
       }
       return jsonRes({ code: 0, data: { id: "uid-1", name: "小浣熊" } });
     },
@@ -161,8 +162,8 @@ test("CLI: raccoon login 超时 → 非零退出 + 人话，不落盘", async ()
   const lines = [];
   let exited = 0;
   await handleRaccoonLogin("raccoon", "login", [], {
-    qrCode: "b".repeat(32),
-    fetchImpl: async () => jsonRes({ code: 0, data: { status: "pending" } }),
+    qrSession: { qrcodeCode: "qr-test", scanPath: "/login/mp", expiresInMs: 300_000, pollIntervalMs: 2000 },
+    fetchImpl: async () => jsonRes({ code: "OK", data: { status: "pending" } }),
     log: (m) => lines.push(String(m)),
     exit: (c) => { exited = c; },
     saveAccount: async () => { throw new Error("超时不应落盘"); },
@@ -172,6 +173,37 @@ test("CLI: raccoon login 超时 → 非零退出 + 人话，不落盘", async ()
   });
   assert.equal(exited, 1);
   assert.ok(lines.join("\n").includes("超时"));
+});
+
+test("CLI: raccoon login 签发失败 → 人话 + 非零退出，不渲染假码", async () => {
+  const lines = [];
+  let exited = 0;
+  await handleRaccoonLogin("raccoon", "login", [], {
+    fetchImpl: async () => jsonRes({ code: "SOMETHING_ELSE", message: "上游抖了" }),
+    log: (m) => lines.push(String(m)),
+    exit: (c) => { exited = c; },
+  });
+  assert.equal(exited, 1);
+  const out = lines.join("\n");
+  assert.ok(out.includes("无法获取二维码"));
+  assert.ok(!out.includes("login/mp?code="), "签发失败不得打印一个扫不出来的码");
+});
+
+test("CLI: raccoon login 上游判码过期（AUTH_QRCODE_EXPIRED）→ 「已过期」而非「超时」", async () => {
+  const lines = [];
+  let exited = 0;
+  await handleRaccoonLogin("raccoon", "login", [], {
+    qrSession: { qrcodeCode: "qr-test", scanPath: "/login/mp", expiresInMs: 300_000, pollIntervalMs: 2000 },
+    fetchImpl: async () => {
+      return jsonRes({ code: "AUTH_QRCODE_EXPIRED", message: "二维码已过期或已被使用" });
+    },
+    log: (m) => lines.push(String(m)),
+    exit: (c) => { exited = c; },
+  });
+  assert.equal(exited, 1);
+  const out = lines.join("\n");
+  assert.ok(out.includes("二维码已过期"), `应如实报过期，实际：${out.slice(-200)}`);
+  assert.ok(!out.includes("登录已超时"));
 });
 
 test("CLI: raccoon quota 未登录 → 人话指引 + 非零退出（--json 亦然）", async () => {

@@ -13,13 +13,14 @@ import {
   ensureRaccoonDeviceId,
 } from "../src/providers/raccoon/account-store.js";
 import {
-  createQrCode,
+  createQrSession,
   buildQrUrl,
+  cancelQrSession,
   pollQrLoginOnce,
   pollQrLogin,
   refreshRaccoonCredential,
 } from "../src/providers/raccoon/login.js";
-import { parseRaccoonEnvelope, isRaccoonAuthFailure } from "../src/providers/raccoon/envelope.js";
+import { parseRaccoonEnvelope, isRaccoonAuthFailure, isRaccoonOk } from "../src/providers/raccoon/envelope.js";
 
 const tmpDir = () => mkdtempSync(join(tmpdir(), "mslxdff-raccoon-"));
 const jsonResponse = (obj, status = 200) => ({ ok: status < 400, status, json: async () => obj });
@@ -106,13 +107,45 @@ test("account-store: 多号各留一个 token；syncRaccoonKeys 能把分叉的 
   }
 });
 
-test("login: createQrCode 为 32 位 hex；buildQrUrl 带 code 与 appname", () => {
-  const code = createQrCode();
-  assert.match(code, /^[0-9a-f]{32}$/);
-  const url = buildQrUrl(code);
-  assert.ok(url.startsWith("https://xiaohuanxiong.com/login/mp?code="));
-  assert.ok(url.includes(`code=${code}`));
-  assert.ok(url.includes(encodeURIComponent("商汤小浣熊官网")));
+test("login: createQrSession 用服务端签发的 code/scan_path，URL 带 source=platform", async () => {
+  // 2026-10 上游改版后的真实响应形状（本机实测）
+  const resp = async () => jsonResponse({
+    code: "OK",
+    message: "success",
+    data: { expires_in: 300, poll_interval: 2, qrcode_code: "qr-abc123", scan_path: "/login/mp", status: "pending" },
+  });
+  const s = await createQrSession({ fetchImpl: resp });
+  assert.equal(s.qrcodeCode, "qr-abc123");
+  assert.equal(s.scanPath, "/login/mp");
+  assert.equal(s.expiresInMs, 300_000);
+  assert.equal(s.pollIntervalMs, 2000);
+  assert.ok(s.qrUrl.includes("code=qr-abc123"));
+  assert.ok(s.qrUrl.includes("source=platform"), "新版网关按 source 区分扫码来源，缺了会被判非法码");
+  assert.ok(s.qrUrl.includes(encodeURIComponent("商汤小浣熊官网")));
+});
+
+test("login: createQrSession 缺 qrcode_code 必须抛错，绝不降级出自造码", async () => {
+  const noCode = async () => jsonResponse({ code: "OK", data: { expires_in: 300, poll_interval: 2, scan_path: "/login/mp" } });
+  await assert.rejects(() => createQrSession({ fetchImpl: noCode }), /qrcode_code/);
+  const failed = async () => jsonResponse({ code: "SOMETHING_ELSE", message: "boom" });
+  await assert.rejects(() => createQrSession({ fetchImpl: failed }), /签发失败/);
+});
+
+test("login: raccoonQrPageUrl 只接受站内相对 scan_path（防被响应带着跳外站）", () => {
+  assert.ok(buildQrUrl("c", "/login/mp").startsWith("https://xiaohuanxiong.com/login/mp?"));
+  for (const evil of ["//evil.com/x", "https://evil.com/x", "/a\\b", "/a b", ""]) {
+    assert.ok(buildQrUrl("c", evil).startsWith("https://xiaohuanxiong.com/login/mp?"), `拒绝非法 scan_path: ${evil}`);
+  }
+});
+
+test("login: cancelQrSession 走 PUT 且吞掉失败（取消是礼貌动作）", async () => {
+  let seen = null;
+  const ok = async (url, init) => { seen = { url, init }; return jsonResponse({ code: "OK" }); };
+  await cancelQrSession("qr-1", { fetchImpl: ok });
+  assert.equal(seen.init.method, "PUT");
+  assert.equal(JSON.parse(seen.init.body).status, "canceled");
+  const boom = async () => { throw new Error("net down"); };
+  await cancelQrSession("qr-1", { fetchImpl: boom }); // 不应抛
 });
 
 test("login: pollQrLoginOnce 四态 + 网络异常折 pending + 缺 token 不算成功", async () => {
@@ -169,10 +202,46 @@ test("login: refresh 换 token；缺新 refresh 沿用旧的；401 抛 authExpir
   );
 });
 
-test("envelope: 200001/200003/401 判为登录态失效，0 不算", () => {
+test("login: IAM 通道（code:\"OK\"）四态照常判定，AUTH_QRCODE_EXPIRED 单列 expired", async () => {
+  // 新通道信封：code 是字符串 "OK"，不是数字 0 —— 旧判据 `code !== 0` 会把成功全判成失败
+  const iam = (data) => async () => jsonResponse({ code: "OK", message: "success", data });
+  assert.equal((await pollQrLoginOnce("c", { fetchImpl: iam({ status: "pending" }) })).status, "pending");
+  assert.equal((await pollQrLoginOnce("c", { fetchImpl: iam({ status: "canceled" }) })).status, "canceled");
+  const ok = await pollQrLoginOnce("c", { fetchImpl: iam({ status: "success", access_token: "tok", refresh_token: "ref" }) });
+  assert.equal(ok.status, "success");
+  assert.equal(ok.credential.access_token, "tok");
+
+  // 码被服务端作废：必须报 expired，不能让用户对着一个死码一直等
+  const dead = async () => jsonResponse({ code: "AUTH_QRCODE_EXPIRED", message: "二维码已过期" });
+  assert.equal((await pollQrLoginOnce("c", { fetchImpl: dead })).status, "expired");
+  const polled = await pollQrLogin("c", { fetchImpl: dead, sleepFn: async () => {} });
+  assert.equal(polled.status, "expired");
+});
+
+test("login: 轮询按服务端下发的 poll_interval 调速", async () => {
+  const seen = [];
+  let n = 0;
+  const seq = async () => {
+    n += 1;
+    return jsonResponse({
+      code: "OK",
+      data: n < 2 ? { status: "pending", poll_interval: 5 } : { status: "success", access_token: "tok", poll_interval: 5 },
+    });
+  };
+  const r = await pollQrLogin("c", { fetchImpl: seq, intervalMs: 2000, sleepFn: async (ms) => { seen.push(ms); } });
+  assert.equal(r.status, "success");
+  assert.equal(seen[0], 5000, "服务端说 5s 就该 5s，不能用本地默认 2s");
+});
+
+test("envelope: 200001/200003/401 判为登录态失效，0 与 \"OK\" 都算成功", () => {
   assert.equal(isRaccoonAuthFailure(parseRaccoonEnvelope({ code: 200001 }), 200), true);
   assert.equal(isRaccoonAuthFailure(parseRaccoonEnvelope({ code: 200003 }), 200), true);
   assert.equal(isRaccoonAuthFailure(parseRaccoonEnvelope({ code: 0 }), 401), true);
   assert.equal(isRaccoonAuthFailure(parseRaccoonEnvelope({ code: 0 }), 200), false);
   assert.equal(parseRaccoonEnvelope({ code: 0, data: { status: "pending" } }).data.status, "pending");
+  // 两代通道的成功码
+  assert.equal(isRaccoonOk(parseRaccoonEnvelope({ code: 0 })), true);
+  assert.equal(isRaccoonOk(parseRaccoonEnvelope({ code: "OK" })), true);
+  assert.equal(isRaccoonOk(parseRaccoonEnvelope({ code: "AUTH_QRCODE_EXPIRED" })), false);
+  assert.equal(isRaccoonOk(parseRaccoonEnvelope({ code: 200003 })), false);
 });

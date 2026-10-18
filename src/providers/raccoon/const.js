@@ -10,10 +10,18 @@ export const RACCOON_LLM_PREFIX = "/api/web/llm/v2";
 export const RACCOON_AUTH_PREFIX = "/api/web/auth/v1";
 export const RACCOON_POINTS_PREFIX = "/api/web/points/v1";
 export const RACCOON_DESKTOP_PREFIX = "/api/web/desktop/v1";
+/**
+ * 新一代身份通道前缀（2026-10 上游改版实测）。
+ * 扫码登录已从 `/api/web/auth/v1/login_with_qrcode_code` 迁到这里，契约完全变了：
+ * code 由**服务端签发**（`qr-<uuid>`），并下发 scan_path / expires_in / poll_interval。
+ * 旧的「客户端自造 code」在新通道里没有服务端会话 —— 微信扫码后查不到该码，
+ * 正好表现为「二维码已过期或已被使用」，故整条扫码链路必须走新端点。
+ * ⚠ 信封也不同：这套用 `code: "OK"` 而不是 `code: 0` —— 判成功一律用 isRaccoonOk()。
+ */
+export const RACCOON_IAM_PREFIX = "/api/iam/v1";
 
 export const raccoonModelCatalogUrl = () => `${RACCOON_ORIGIN}${RACCOON_LLM_PREFIX}/model_catalog`;
 export const raccoonChatUrl = () => `${RACCOON_ORIGIN}${RACCOON_LLM_PREFIX}/chat/completions`;
-export const raccoonQrLoginUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/login_with_qrcode_code`;
 export const raccoonRefreshUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/refresh`;
 export const raccoonUserInfoUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/user_info`;
 export const raccoonBalanceUrl = () => `${RACCOON_ORIGIN}${RACCOON_POINTS_PREFIX}/balance`;
@@ -21,13 +29,26 @@ export const raccoonBillsUrl = (limit = 50) =>
   `${RACCOON_ORIGIN}${RACCOON_POINTS_PREFIX}/bills?paging.limit=${Number(limit) || 50}&paging.offset=0`;
 export const raccoonLoginGrantUrl = () => `${RACCOON_ORIGIN}${RACCOON_DESKTOP_PREFIX}/login/points/grant`;
 
+/** 服务端签发二维码（POST，body 可带 `{ product_codes: [] }`）。 */
+export const raccoonQrCreateUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/mp/qrcode`;
+/** 轮询扫码状态（POST，body `{ qrcode_code }`）。 */
+export const raccoonQrPollUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/mp/qrcode/login`;
+/** 取消二维码（PUT，body `{ qrcode_code, status: "canceled" }`）——过期/离开页面时礼貌回收。 */
+export const raccoonQrCancelUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/mp/qrcode`;
+
 /**
- * 扫码登录深链接：终端编成二维码，**必须用微信「扫一扫」**打开确认（浏览器直接打开会 404）。
- * 形如 `https://xiaohuanxiong.com/login/mp?code=<hex>&appname=商汤小浣熊官网`。
- * 实测：服务器对任意路径都回同一份 SPA 外壳（HTTP 200），但 SPA 路由表里没有 `login/mp`（只有 `login` + 兜底 `*`）→ 浏览器必 404，属正常而非链接失效。
+ * 扫码登录深链接：终端编成二维码，**必须用微信「扫一扫」**打开确认。
+ * code 与 scan_path 都由 `POST /auth/mp/qrcode` 下发（scan_path 实测为 `/login/mp`），
+ * 形如 `https://xiaohuanxiong.com/login/mp?code=qr-xxxx&appname=商汤小浣熊官网&source=platform`。
+ * `source=platform` 来自网站登录页实测（chunk c3.js）：新版网关按它区分扫码来源，缺了会被判非法码。
+ * ⚠ scan_path 是**服务端数据**，拼进 URL 前必须校验（只允许站内单斜杠开头的相对路径），
+ *   否则一个被篡改的响应就能把用户导向任意外站。
  */
-export const raccoonQrPageUrl = (code) =>
-  `${RACCOON_ORIGIN}/login/mp?code=${encodeURIComponent(String(code || ""))}&appname=${encodeURIComponent("商汤小浣熊官网")}`;
+export const raccoonQrPageUrl = (code, scanPath = "/login/mp") => {
+  const path = typeof scanPath === "string" && /^\/[^\s\\#]*$/.test(scanPath) && !scanPath.startsWith("//") ? scanPath : "/login/mp";
+  return `${RACCOON_ORIGIN}${path}?code=${encodeURIComponent(String(code || ""))}`
+    + `&appname=${encodeURIComponent("商汤小浣熊官网")}&source=platform`;
+};
 
 export const RACCOON_DEFAULT_CLIENT_VERSION = "v1.0.35";
 export const RACCOON_CLIENT_PLATFORM = "desktop-windows";

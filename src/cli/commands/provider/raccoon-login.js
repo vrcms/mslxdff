@@ -1,11 +1,15 @@
 // mslxdff -provider raccoon login — 扫码登录（终端二维码 + 轮询）。
-// 实测该链路匿名可达且**不需要验证码**；成功后落盘 auths/raccoon-<uid>.json（0600）
+// ⚠ 2026-10 上游改版：二维码必须**先由服务端签发**（POST /api/iam/v1/auth/mp/qrcode），
+//   拿到 qrcode_code + scan_path 才能渲染。旧的「本地自造 code」在新通道下没有服务端会话，
+//   微信扫码后查不到该码 → 手机端报「二维码已过期或已被使用」。详见 src/providers/raccoon/login.js。
+// 该链路匿名可达且**不需要验证码**；成功后落盘 auths/raccoon-<uid>.json（0600）
 // 并把兜底目录只增不减补齐进 allowlist（避免「登录成功却处处 403」）。
 import { normalizeProviderId } from "../../../providers/model-id.js";
 import { compatFetch } from "../../../compat.js";
 import {
   buildQrUrl,
-  createQrCode,
+  cancelQrSession,
+  createQrSession,
   fetchRaccoonUserInfo,
   pollQrLogin,
 } from "../../../providers/raccoon/login.js";
@@ -17,6 +21,8 @@ import { claimRaccoonLoginReward, raccoonClaimStatus } from "../../../providers/
 
 const LOGIN_SUBS = new Set(["login", "auth", "oauth"]);
 
+const RELOGIN_HINT = "   （可重试：mslxdff -provider raccoon login）";
+
 export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   const pid = normalizeProviderId(id) || String(id || "").toLowerCase();
   if (pid !== "raccoon") return false;
@@ -26,9 +32,6 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   const log = deps.log || ((m) => console.log(m));
   const exit = deps.exit || ((code) => process.exit(code));
 
-  const code = deps.qrCode || createQrCode();
-  const url = buildQrUrl(code);
-
   log("=".repeat(60));
   log("  Raccoon 登录（商汤小浣熊 · 积分制模型池）");
   log("=".repeat(60));
@@ -37,12 +40,26 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   log("  2. 确认后本机自动继续（CLI 轮询，无需回调）");
   log("");
 
+  // 签发二维码：这一步失败就没有可扫的码，必须当场说清楚，不能拿一个假码糊过去
+  let session;
+  try {
+    session = deps.qrSession || await createQrSession({ fetchImpl });
+  } catch (error) {
+    log(`❌ 无法获取二维码：${error?.message ?? error}`);
+    log("   （多为网络不通或上游改版；可重试：mslxdff -provider raccoon login）");
+    exit(1);
+    return true;
+  }
+  const code = deps.qrCode || session.qrcodeCode;
+  const url = deps.qrUrl || buildQrUrl(code, session.scanPath);
+
   const art = renderTerminal(encodeQr(url));
   if (art) {
     log(art);
     log("");
   }
   log(`  登录链接：${url}`);
+  log(`  有效期：${Math.round(session.expiresInMs / 1000)} 秒（过期请重跑本命令）`);
   log("");
   log("🔄 等待扫码确认…");
 
@@ -51,28 +68,26 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
     out = await pollQrLogin(code, {
       fetchImpl,
       sleepFn: deps.sleepFn,
-      intervalMs: deps.intervalMs,
-      timeoutMs: deps.timeoutMs,
+      intervalMs: deps.intervalMs ?? session.pollIntervalMs,
+      timeoutMs: deps.timeoutMs ?? session.expiresInMs,
       onTick: deps.onTick,
     });
   } catch (error) {
     log("");
     log(`❌ 登录失败：${error?.message ?? error}`);
-    log("   （可重试：mslxdff -provider raccoon login）");
+    log(RELOGIN_HINT);
     exit(1);
     return true;
   }
 
-  if (out.status === "canceled") {
-    log("");
-    log("❌ 已在手机端取消登录（未写入任何凭据）");
-    exit(1);
-    return true;
-  }
   if (out.status !== "success") {
+    // 非终态失败：回收服务端会话（失败也不打断），并对每种结局给一句人话
+    await cancelQrSession(code, { fetchImpl });
     log("");
-    log("❌ 登录已超时，请重新运行 login");
-    log("   （可重试：mslxdff -provider raccoon login）");
+    if (out.status === "canceled") log("❌ 已在手机端取消登录（未写入任何凭据）");
+    else if (out.status === "expired") log("❌ 二维码已过期（上游作废了本次会话）");
+    else log("❌ 登录已超时");
+    log(RELOGIN_HINT);
     exit(1);
     return true;
   }
