@@ -9,6 +9,7 @@
 // 都必须先把 [DONE] 暂扣住**（tail 槽），否则错误永不可见、还会留下两个终止符。
 // 拆出原因：这些策略与 relay 本体同处一文件会破仓库 20KB 硬门，且语义本就独立（不碰上游读取与闸门计时）。
 import { json } from "./helpers.js";
+import { isTrivialFrame } from "./stream-scan.js";
 
 // 暂扣上限：正常空轮的前缀就是几帧空 delta + 一个 [DONE]；超过即说明不是这个形状，别为它囤内存。
 export const HOLD_MAX_FRAMES = 64;
@@ -137,27 +138,77 @@ export function createRevocablePrefix(res, detail, { maxFrames = HOLD_MAX_FRAMES
     try { res.write(t.buf); } catch { /* 下游已断开 */ }
     return true; // 告诉收场方：[DONE] 已经由这一帧发出去了，别再补第二个
   };
+  /**
+   * 暂扣一帧。终止帧进 tail 槽（无论是否已提交）；否则进 pending（未提交时可整段撤销）。
+   * 返回 false = pending 超上限放不下，调用方必须改为提交，别默默丢字节。
+   *
+   * **必须自己拼 carry**：上一块的半截终止行扣在 carry 里，本块就是它的续块。若让调用方分别处理，
+   * 两块会走各自的路径（carry 被收场 `flushCarry` 补一个换行 → 终止帧被拆成两行、客户端认不出终止符），
+   * 更糟的是**本块会因「不含 data:」被判成非空帧而被迫提交**，直接摧毁空轮留口（BUG-40 实测：
+   * 空轮 + `[DONE]` 被 TCP 切两块时 heldOpen 由 true 变 false、wrotePayload 由 false 变 true，
+   * 救援静默失效）。拼接是字节流的本分：carry 之后紧跟的必然是该行的续字节。
+   */
+  function holdFrame(buf, size) {
+    let b = buf;
+    if (carry) {
+      // 只有「本块恰好补完那个终止行」才该拼；否则 carry 里是上一块**残缺的一行**，
+      // 必须按序先放出去（writeNow 会补换行），硬拼会把它与本帧粘成 `data: [DOdata: {...` ——
+      // 非法行，客户端认不出终止符（实测终止符数=0）。已提交时更是如此：此时本帧要直写。
+      const joined = Buffer.concat([toBuf(carry.buf) ?? Buffer.alloc(0), toBuf(buf) ?? Buffer.alloc(0)]);
+      if (committed && !splitTrailingDone(joined) && doneLinePrefix(joined) === 0) {
+        writeNow(buf, size); // writeNow 内部先 flushCarry（带换行），帧序与行完整性都保住
+        return true;
+      }
+      b = joined;
+      carry = null;
+      size = b.length;
+    }
+    // 本块夹带终止帧：头段照常走本函数，终止帧扣进 tail（行锚定，正文里的字面量不算）
+    const sp = splitTrailingDone(b);
+    if (sp) {
+      if (sp.head.length && !holdFrame(sp.head, sp.head.length)) return false;
+      if (tail) flushTail();
+      tail = { buf: sp.rest, size: sp.rest.length };
+      return true;
+    }
+    // 尾部是终止行前缀（终止帧被 TCP 切开）：扣住等下一块拼上再判
+    const pl = doneLinePrefix(b);
+    if (pl > 0) {
+      const head = b.subarray(0, b.length - pl);
+      if (head.length && !holdFrame(head, head.length)) return false;
+      const keep = pl < b.length ? b.subarray(b.length - pl) : b;
+      carry = { buf: keep, size: keep.length };
+      return true;
+    }
+    if (committed) { writeNow(b, size); return true; }
+    if (pending.length >= maxFrames || pendingBytes + size > maxBytes) return false;
+    pending.push({ buf: b, size });
+    pendingBytes += size;
+    return true;
+  }
   return {
     get committed() { return committed; },
     get heldFrames() { return pending.length + (tail ? 1 : 0); },
+    hold: holdFrame,
     /**
-     * 暂扣一帧。isDone=true 的帧进 tail 槽（无论是否已提交）；否则进 pending（未提交时可整段撤销）。
-     * 返回 false = pending 超上限放不下，调用方必须改为提交，别默默丢字节。
+     * 本块是否仍属「可撤销前缀」——必须连同 carry 一起判，且**半截终止行本身也算**。
+     * 只看本块会漏两种：① 续块（`NE]\n\n`）自身不含 `data:`，`isTrivialFrame` 必判 false；
+     * ② 首块（`data: [DO`）自身是半个终止帧，JSON 解析失败也判 false。两者都会让调用方走 submit
+     * 提交、留口失效（BUG-40）。凡尾部是终止行前缀的一律按可暂扣处理：它会进 carry 等下一块。
      */
-    hold(buf, size, isDone = false) {
-      if (isDone) {
-        // 半截终止行若还扣着（上一块尾部像终止行前缀、本块却是独立完整终止帧），必须先放出去：
-        // 直接塞进 tail 会让它和 [DONE] 粘成 `data: [DOdata: [DONE]` —— 非法行，客户端认不出终止符（实测数=0）。
-        if (carry) flushCarry();
-        if (tail) flushTail();
-        tail = { buf, size };
-        return true;
+    isTrivial(txt) {
+      const t = Buffer.from(String(txt ?? ""), "utf8");
+      // 尾部是终止行前缀（`data: [DO`）：它是**残缺的一行**，会被扣进 carry 等续块，本身不含模型产出。
+      // 不认它就会走 submit 提交、留口失效（BUG-40）。这一判必须在有无 carry 时都跑——首块通常无 carry。
+      if (doneLinePrefix(t) > 0) return true;
+      if (carry) {
+        const joined = Buffer.concat([toBuf(carry.buf) ?? Buffer.alloc(0), t]);
+        // carry 是**上一块残缺的一行**，只有本块恰好补完它（成为完整终止帧，或仍是其前缀）才算续块。
+        // 否则本块与 carry 无关（如半截行后跟一个独立空帧）：按序先放 carry、本块单独判，
+        // 硬拼会把两个无关的帧粘成非法行。
+        if (doneLinePrefix(joined) > 0 || splitTrailingDone(joined)) return true;
       }
-      if (committed) { writeNow(buf, size); return true; }
-      if (pending.length >= maxFrames || pendingBytes + size > maxBytes) return false;
-      pending.push({ buf, size });
-      pendingBytes += size;
-      return true;
+      return isTrivialFrame(t.toString("utf8"));
     },
     /**
      * 提交：按序补写 pending（不含 tail），再写本帧，此后一律直写。

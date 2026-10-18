@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { applyFallbackHeaders } from "./fallback.js";
 import { json } from "./helpers.js";
-import { scanSseChunk, flushScanRemainder, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk, isTrivialFrame } from "./stream-scan.js"; // 逐帧观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣 + 可撤销前缀判据（纯函数与建桶判据全在 stream-scan）
+import { scanSseChunk, flushScanRemainder, preflightMs, createTalkBucketIfEnabled, captureTalkFallback, isEmptyTurnDetail, holdableChunk } from "./stream-scan.js"; // 逐帧观测累加器 + 锚点偏移 + 对话正文 + 空轮判据 + 错误包络暂扣（纯函数与建桶判据全在 stream-scan；可撤销判据走 prefix.isTrivial）
 import { holdEndEnabled, createRevocablePrefix, endEmptyTurnStream, endTruncatedStream, flushPrefixTail } from "./stream-hold.js"; // 空轮可撤销前缀 / 延后封口 / 终局收场（拆出去是为了不破 stream.js 20KB 硬门）
 import { chunkText, cancelBody, hasPayload, bodyChunks, enrichFirstReply, scanNonStreamReply } from "./stream-body.js"; // 读取层工具（字节→文本 / 取消上游 / 注释帧判定 / 自持 reader 迭代 / 首块富化 / 非流式先判后写），为让本文件退回 20KB 以内而拆出
 
@@ -233,15 +233,16 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
               // 注释帧等非数据帧：与改前一致直写（客户端视作噪声，不影响可撤销性）
               wroteAny = true;
               prefix.writeNow(outChunk, size);
-            } else if (gained || !revocableHold || !isTrivialFrame(txt)) {
-              // 有模型产出（正文/工具/思考）、留口已关、或看不懂的异形帧：按序补写暂扣前缀 + 本帧，
-              // 这条流就此提交不可撤销（透传契约要求解析失败的帧必须原样走，绝不为救空轮扣下）
+            } else if (gained || !revocableHold || !prefix.isTrivial(txt)) {
+              // 有模型产出、留口已关、或看不懂的异形帧：按序补写暂扣前缀 + 本帧，此流就此提交不可撤销
+              //（透传契约：解析失败的帧必须原样走，绝不为救空轮扣下）。
+              // 可撤销判定走 prefix.isTrivial 而非裸 isTrivialFrame：半截终止行扣在 prefix 的 carry 里，
+              // 只看本块会把它的续块判成非空，留口静默失效（BUG-40）。
               wroteAny = true;
               wrotePayload = true; detail.wrotePayload = true;
               prefix.submit(outChunk, size);
-            } else if (!prefix.hold(outChunk, size, txt.includes("[DONE]"))) {
-              // 可撤销前缀：空 delta 暂扣（判为空轮时整段撤销，留给重拉的正文）；
-              // [DONE] 无论是否已提交都进 tail 槽 —— 错误帧必须能排在它前面，否则客户端一见 [DONE] 就收尾
+            } else if (!prefix.hold(outChunk, size)) {
+              // 可撤销前缀按序暂扣（[DONE] 进 tail 槽让位给错误帧；终止帧识别收进 prefix，见 holdFrame）
               wroteAny = true;
               wrotePayload = true; detail.wrotePayload = true;
               prefix.submit(outChunk, size); // 暂扣超上限（异常形状）→ 被迫提交，退回旧行为
