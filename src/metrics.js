@@ -1,4 +1,5 @@
 import { normalizeFullId, toFullId } from "./providers/model-id.js";
+import { cacheReadTokens, cacheWriteTokens } from "./usage/cache-fields.js";
 
 export { normalizeFullId, toFullId };
 
@@ -33,7 +34,15 @@ export function extractUsageFromJson(parsed) {
   // reasoning_tokens 透传
   const rt = u.completion_tokens_details?.reasoning_tokens ?? u.reasoning_tokens;
   if (Number.isFinite(Number(rt))) out.reasoning_tokens = Number(rt);
-  return Object.keys(out).length ? out : null;
+  // 「什么都没报」的判据只看原有三个核心字段：只有缓存字段的空包仍算未报（保持原语义）
+  if (!Object.keys(out).length) return null;
+  // 缓存读数：候选链单一来源 = usage/cache-fields.js（与 /v1/messages 的 usage 翻译同源）。
+  // 命中只在上游真报 >0 时落字段；写入字段存在即落（显式 0 也算已报）——「未知」与「0」必须可区分。
+  const cr = cacheReadTokens(u);
+  if (cr > 0) out.cache_read_input_tokens = cr;
+  const cw = cacheWriteTokens(u);
+  if (cw != null) out.cache_creation_input_tokens = cw;
+  return out;
 }
 
 export function extractUsageFromSseText(sseText) {

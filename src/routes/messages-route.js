@@ -23,6 +23,7 @@ import {
 } from "../anthropic/translate.js";
 import { estimateTokens } from "../anthropic/count-tokens.js";
 import { sseToChatJson } from "../anthropic/sse-aggregate.js";
+import { claudeSessionId } from "../anthropic/session-id.js";
 import {
   detectSearchRequest,
   runWebSearch,
@@ -308,6 +309,15 @@ export async function messagesHandler(ctx) {
   }));
   const pipeline = createChatPipeline(ctx);
   const fakeReq = withBody(req, chatBody);
+  // 会话身份（照抄 cc-switch session.rs:107-231）：Claude Code 把会话 id 放在**请求体 metadata**里
+  // （metadata.user_id 的 JSON session_id / 旧 `_session_` 后缀 / metadata.session_id），只读 header 会漏，
+  // 上游的缓存亲和与粘性路由就拿不到稳定 key ⇒ 每轮换 key。这里补进既有的 x-session-id 通道
+  // （chat-pipeline 已消费该头；不改管线，只影响 /v1/messages）。
+  const sid = claudeSessionId(req.headers, body);
+  if (sid) {
+    fakeReq.headers = { ...fakeReq.headers, "x-session-id": fakeReq.headers?.["x-session-id"] || sid.sessionId };
+    alog("session", JSON.stringify({ source: sid.source, id: sid.sessionId.slice(0, 12) }));
+  }
   // ADR-0055：请求侧 token 估算 thunk（路由层也 memoize，与决策 4「每请求至多算一次」对齐；
   // translator 内部还有一层 memoize，双保险）。
   let estCache;
@@ -336,11 +346,11 @@ export async function messagesHandler(ctx) {
       }
       // 上游偶发非 chat 形状（无 choices）：包成单 text 块，绝不 500（照 responses-route.js 先例）
       if (!Array.isArray(chatJson.choices)) {
-        const r = chatJsonToAnthropic({ choices: [{ message: { content: String(text).slice(0, 8000) } }] }, chatBody.model, { estInput });
+        const r = chatJsonToAnthropic({ choices: [{ message: { content: String(text).slice(0, 8000) } }] }, chatBody.model, { estInput, thinking: emitThinking() });
         alog("done-nonchat", JSON.stringify({ ms: Date.now() - t0, bytes: text.length }));
         return json(res, 200, r);
       }
-      const out = chatJsonToAnthropic(chatJson, chatBody.model, { estInput });
+      const out = chatJsonToAnthropic(chatJson, chatBody.model, { estInput, thinking: emitThinking() });
       alog("done-json", JSON.stringify({ ms: Date.now() - t0, status, blocks: out.content.length, stop: out.stop_reason, usage: out.usage }));
       return json(res, 200, out);
     }

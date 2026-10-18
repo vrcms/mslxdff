@@ -196,8 +196,8 @@ function mkModel(id, over = {}) {
 }
 
 function cellOf(text, id, col, table = "token") {
-  // 两张表都有模型 id：Token 表 6 列（split 后 8 段）、性能表 5 列（7 段）——按段数区分，别拿错表
-  const want = table === "token" ? 8 : 7;
+  // 两张表都有模型 id：Token 表 7 列（split 后 9 段）、性能表 5 列（7 段）——按段数区分，别拿错表
+  const want = table === "token" ? 9 : 7;
   const parts = text.split("\n").map((l) => l.split("│")).find((p) => p.length === want && p[1].trim() === id);
   assert.ok(parts, `找不到${table}表的行：${id}`);
   return parts.map((c) => c.trim())[col];
@@ -215,11 +215,26 @@ test("思考列四态：精确无标 / 估算带 ~ / 真 0 显示 0 / 未知显�
     totals: mkModel("合计", { reasoningTokens: 2700, reasoningSource: "mixed", requests: 12 }),
   };
   const text = renderStats(report, { hours: 24 });
-  assert.equal(cellOf(text, "m/reported", 5), "1.5k", "上报值不加 ~");
-  assert.equal(cellOf(text, "m/estimated", 5), "1.2k~", "估算必须带 ~");
-  assert.equal(cellOf(text, "m/zero", 5), "0", "真没思考才是 0");
-  assert.equal(cellOf(text, "m/none", 5), "—", "未知不得渲染成 0（fmtTok 的 Number(null)||0 陷阱）");
-  assert.equal(cellOf(text, "合计", 5), "2.7k~", "混合来源整列标 ~");
+  assert.equal(cellOf(text, "m/reported", 6), "1.5k", "上报值不加 ~");
+  assert.equal(cellOf(text, "m/estimated", 6), "1.2k~", "估算必须带 ~");
+  assert.equal(cellOf(text, "m/zero", 6), "0", "真没思考才是 0");
+  assert.equal(cellOf(text, "m/none", 6), "—", "未知不得渲染成 0（fmtTok 的 Number(null)||0 陷阱）");
+  assert.equal(cellOf(text, "合计", 6), "2.7k~", "混合来源整列标 ~");
+});
+
+test("Token 表新增「缓存命中」列：N (p%)；无命中读数显示 —（不拿 0 冒充没缓存）", () => {
+  const report = {
+    windowHours: 24,
+    models: [
+      mkModel("m/hit", { promptTokens: 429, cacheReadTokens: 384, cacheRows: 1, cacheHitRate: 0.8951 }),
+      mkModel("m/none", { cacheReadTokens: 0, cacheRows: 0, cacheHitRate: null }),
+    ],
+    totals: mkModel("合计", { promptTokens: 858, cacheReadTokens: 384, cacheRows: 1, cacheHitRate: 0.4476 }),
+  };
+  const text = renderStats(report, { hours: 24 });
+  assert.equal(cellOf(text, "m/hit", 5), "384 (89.5%)");
+  assert.equal(cellOf(text, "m/none", 5), "—");
+  assert.ok(text.includes("缓存命中：N (p%)"), "说明行必须在");
 });
 
 test("性能表新增「首字样本」列，显示 样本数/流式请求数", () => {

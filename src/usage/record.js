@@ -92,6 +92,9 @@ export function recordChatUsage({ model, via, usage, ttfbMs, totalMs, tps, inter
     reasoning_chars: Number.isFinite(rc) && rc > 0 ? Math.trunc(rc) : 0,
     // 上游是否明确上报过思考 tokens（metrics.js 只在数值有限时才写 reasoning_tokens）
     reasoning_reported: Number.isFinite(usage?.reasoning_tokens) ? 1 : 0,
+    // —— 缓存读数（候选链单一来源 = usage/cache-fields.js；metrics 投影里「字段缺失＝上游没报」）——
+    cache_read_tokens: Number.isFinite(Number(usage?.cache_read_input_tokens)) ? Number(usage.cache_read_input_tokens) : null,
+    cache_creation_tokens: Number.isFinite(Number(usage?.cache_creation_input_tokens)) ? Number(usage.cache_creation_input_tokens) : null,
     // 调用方没表态时整字段不落盘：「未知」≠「非流式」，覆盖度分母宁低不假高
     ...(stream === undefined ? {} : { stream: stream ? 1 : 0 }),
     ttfbMs: Number.isFinite(ttfbMs) ? ttfbMs : null,

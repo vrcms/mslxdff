@@ -72,7 +72,7 @@ function renderTable(headers, rows, aligns = []) {
 }
 
 function tokenRow(id, r) {
-  return [id, r.requests, fmtTok(r.promptTokens), fmtTok(r.completionTokens), reasoningCell(r), fmtTok(r.totalTokens)];
+  return [id, r.requests, fmtTok(r.promptTokens), fmtTok(r.completionTokens), cacheCell(r), reasoningCell(r), fmtTok(r.totalTokens)];
 }
 
 // 思考列的四态渲染：~ 只跟估算/混合来源；none（未知）显示 —，绝不显示成 0 冒充「不思考」
@@ -80,6 +80,14 @@ function reasoningCell(r) {
   if (r.reasoningSource === "none") return "—";
   const text = fmtTok(r.reasoningTokens);
   return r.reasoningSource === "estimated" || r.reasoningSource === "mixed" ? `${text}~` : text;
+}
+
+// 缓存命中列：`N (p%)` = 上游上报的缓存读 token ÷ 窗口输入总数（上游 prompt_tokens 含命中）。
+// 窗口内没有任何命中读数（cacheRows=0）显示 —：不拿 0 冒充「这个模型没缓存」。
+function cacheCell(r) {
+  if (!r.cacheRows || !(r.cacheReadTokens > 0)) return "—";
+  const tokens = fmtTok(r.cacheReadTokens);
+  return r.cacheHitRate == null ? tokens : `${tokens} (${(r.cacheHitRate * 100).toFixed(1)}%)`;
 }
 
 function performanceRow(id, r) {
@@ -106,7 +114,7 @@ export function renderStats(report, { hours = null, model = null } = {}) {
   lines.push(`成功请求：${totals.requests} 次 · 模型：${models.length} 个`);
   lines.push("");
   lines.push("Token 用量");
-  lines.push(renderTable(["模型", "请求", "输入", "输出", "思考", "合计"], tokenRows, ["left", right, right, right, right, right]));
+  lines.push(renderTable(["模型", "请求", "输入", "输出", "缓存命中", "思考", "合计"], tokenRows, ["left", right, right, right, right, right, right]));
   lines.push("");
   lines.push("响应性能");
   lines.push(renderTable(["模型", "首字", "总耗时", "速度", "首字样本"], performanceRows, ["left", right, right, right, right]));
@@ -115,6 +123,7 @@ export function renderStats(report, { hours = null, model = null } = {}) {
   lines.push("思考：数值后带 ~ = 按思考字符÷4 估算（上游未上报）；— = 未上报且无可估内容；0 = 上游明确上报本轮无思考。");
   lines.push("首字样本：n/N = 有首字样本数/流式请求数，N=0 时首字显示 —（样本太少的均值不可当全量真值）。");
   lines.push("速度 = 输出 tokens ÷ 生成耗时（总耗时−首字），按窗口加权；只统计成功请求。");
+  lines.push("缓存命中：N (p%) = 上游上报的缓存读 token ÷ 窗口输入总数（上游输入总数含命中）；— = 窗口内没有命中读数（上游未报或确无命中）。");
   lines.push("口径差异：-status / -model stats 的首字仍取自 state 的终生 EMA（按转发入口量），与本表**不同源**。");
   lines.push("范围：只含经 8989 网关的成功请求；不含失败请求和 -chat 直连。");
   const keepDays = usageKeepDays();

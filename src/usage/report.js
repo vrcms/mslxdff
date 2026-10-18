@@ -55,6 +55,9 @@ function blank(id) {
     reasoningEstimatedRows: 0,
     reasoningChars: 0,
     streamRequests: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    cacheRows: 0,
   };
 }
 
@@ -77,6 +80,13 @@ function finalize(a) {
     ttfSamples: a.ttfbN,
     streamRequests: a.streamRequests,
     avgTps: a.completionMsSum > 0 ? Number((a.tpsTokSum / (a.completionMsSum / 1000)).toFixed(1)) : null,
+    cacheReadTokens: a.cacheReadTokens,
+    cacheCreationTokens: a.cacheCreationTokens,
+    cacheRows: a.cacheRows,
+    // 命中率 = 缓存读 ÷ 输入总数（上游 prompt_tokens **含**缓存命中，故分母用输入总数；
+    // 实测佐证：cache 命中那发 prompt_tokens=429 = 客户端 input 45 + cache_read 384）。
+    // 窗口内没有任何命中读数时给 null → 渲染成 —，绝不拿 0 冒充「没缓存」。
+    cacheHitRate: a.cacheRows > 0 && a.promptTokens > 0 ? Number((a.cacheReadTokens / a.promptTokens).toFixed(4)) : null,
   };
 }
 
@@ -95,6 +105,10 @@ function fold(acc, r) {
   acc.reasoningChars += tok(r.reasoning_chars);
   // 首字样本分母：非流式行既无首字也不该摊进分母；缺 stream 的旧行按未知保守计入
   if (r.stream !== 0) acc.streamRequests++;
+  // 缓存读数：只有上游真报了命中（字段存在且 >0）才算「有读数」——分母不拿未报的请求凑
+  const cr = tok(r.cache_read_tokens);
+  if (cr > 0) { acc.cacheReadTokens += cr; acc.cacheRows++; }
+  acc.cacheCreationTokens += tok(r.cache_creation_tokens);
 
   const ttfb = ms(r.ttfbMs ?? r.ttfb_ms);
   if (ttfb != null) {

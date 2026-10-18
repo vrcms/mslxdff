@@ -17,6 +17,7 @@
 import { chunkToString } from "../responses/translate.js";
 import { createTokenCounter } from "../text-tokens.js";
 import { newMessageId, newToolUseId } from "./shared.js";
+import { cacheReadTokens, cacheWriteTokens } from "../usage/cache-fields.js";
 
 // re-export：拆档不改对外接口，调用方与测试仍从本文件取这些符号
 export { messagesToChatBody, toolResultTextOf } from "./request-body.js";
@@ -34,20 +35,21 @@ export { newMessageId, newToolUseId, anthropicError } from "./shared.js";
  */
 export function toAnthropicUsage(u = {}, fallback = null) {
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  // 缓存读数候选链的**单一来源**在 ../usage/cache-fields.js（metrics.js 的日志投影同源）：
+  // 命中＝「存在且 >0」才采信（显式 0 视为未报，防中转桩 0 掩蔽真命中）；写入＝字段存在即采信。
   const src = u && typeof u === "object" ? u : {};
   const prompt = num(src.prompt_tokens ?? src.input_tokens);
   const output = num(src.completion_tokens ?? src.output_tokens);
-  const cacheRead = num(src.cache_read_input_tokens ?? src.prompt_tokens_details?.cached_tokens ?? src.input_tokens_details?.cached_tokens);
-  const cacheWrite = num(src.cache_creation_input_tokens ?? src.prompt_tokens_details?.cache_creation_input_tokens);
+  const cacheRead = cacheReadTokens(src);
+  const cacheWrite = cacheWriteTokens(src) ?? 0;
   const usage = {
     input_tokens: Math.max(0, prompt - cacheRead - cacheWrite),
     output_tokens: output,
     cache_read_input_tokens: cacheRead,
     cache_creation_input_tokens: cacheWrite,
   };
-  // cache 非零也算「报了」：SDK 通道（upstream-engine/sdk/sse.js 的 usageToOpenAI）会输出
-  // `{prompt_tokens:0, …, prompt_tokens_details:{cached_tokens:N}}` 这种形状，若当未报整条覆盖，
-  // 客户端「input + cache_read」会把同一段前缀算两遍（正是上面扣减要防的事，评审 P2）。
+  // cache 非零也算「报了」：SDK 通道会输出 `{prompt_tokens:0, …, prompt_tokens_details:{cached_tokens:N}}`，
+  // 若当未报整条覆盖，客户端「input + cache_read」会把同一段前缀算两遍。
   if (fallback && !(prompt > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0)) return { ...usage, ...(fallback() || {}) };
   return usage;
 }
@@ -88,14 +90,20 @@ export function textFromChatContent(c) {
 export function chatJsonToAnthropic(chatJson = {}, model = "", opts = {}) {
   const choice = chatJson.choices?.[0] || {};
   const message = choice.message || {};
+  const id = typeof chatJson.id === "string" && chatJson.id.startsWith("msg_") ? chatJson.id : newMessageId();
   const content = [];
+  // 思考块排在正文前：上游把思考放在 message.reasoning_content（DeepSeek/MiMo/聚合网关）；
+  // 照抄 cc-switch transform.rs:614-641 的前置顺序。signature 用本仓占位（ADR-0052：缺签名
+  // Claude Code 直接丢弃整块）；外发开关与流式同源（MSLXDFF_ANTHROPIC_THINKING=0 关）。
+  const rt = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
+  if (opts.thinking === true && rt) content.push({ type: "thinking", thinking: rt, signature: thinkingSignature(id, 0) });
   const text = textFromChatContent(message.content);
   if (text) content.push({ type: "text", text });
   for (const tc of message.tool_calls || []) {
     content.push({ type: "tool_use", id: String(tc.id || newToolUseId()), name: String(tc.function?.name || ""), input: parseToolInput(tc.function?.arguments) });
   }
   return {
-    id: typeof chatJson.id === "string" && chatJson.id.startsWith("msg_") ? chatJson.id : newMessageId(),
+    id,
     type: "message",
     role: "assistant",
     model: model || chatJson.model || "",
@@ -112,6 +120,7 @@ function fallbackUsage(opts = {}, content = []) {
   for (const b of content) {
     if (b?.type === "text") counter.add(b.text || "");
     else if (b?.type === "tool_use") counter.add(JSON.stringify(b.input ?? {})); // 只计参数：与流式 pushTool 同口径（name 从不进 gen）
+    else if (b?.type === "thinking") counter.add(b.thinking || ""); // thinking 也按 output 计费（与流式 pushThinking 同口径）
   }
   const n = typeof opts.estInput === "function" ? Number(opts.estInput()) : 0;
   return { input_tokens: Number.isFinite(n) && n > 0 ? Math.floor(n) : 0, output_tokens: counter.tokens() };

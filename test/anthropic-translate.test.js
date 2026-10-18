@@ -40,12 +40,15 @@ describe("messagesToChatBody — 请求映射", () => {
       messages: [{ role: "user", content: "hi" }],
     });
     assert.equal(b.messages[0].role, "system");
-    assert.equal(b.messages[0].content, "A\n\nB");
+    // 对齐 cc-switch transform.rs:261：块间用 "\n"（跨轮字节稳定，取稳前缀缓存）
+    assert.equal(b.messages[0].content, "A\nB");
   });
 
-  test("text 块数组 content 折叠为字符串", () => {
-    const b = messagesToChatBody({ model: "m", messages: [{ role: "user", content: [{ type: "text", text: "x" }, { type: "text", text: "y" }] }] });
-    assert.equal(b.messages[0].content, "xy");
+  test("text 块数组 content：单块化简为字符串，多块保留分片数组（对齐 cc-switch transform.rs:524-535）", () => {
+    const one = messagesToChatBody({ model: "m", messages: [{ role: "user", content: [{ type: "text", text: "x" }] }] });
+    assert.equal(one.messages[0].content, "x");
+    const two = messagesToChatBody({ model: "m", messages: [{ role: "user", content: [{ type: "text", text: "x" }, { type: "text", text: "y" }] }] });
+    assert.deepEqual(two.messages[0].content, [{ type: "text", text: "x" }, { type: "text", text: "y" }]);
   });
 
   test("base64 图 → data URL 多模态数组，url 图源样转", () => {
@@ -474,4 +477,33 @@ describe("content 部件数组兼容", () => {
     assert.ok(JSON.stringify(evs).includes("数组正文"), JSON.stringify(evs));
     assert.equal(t.getFinal().finish, "stop");
   });
+});
+
+// —— 对齐 cc-switch 的 usage 候选序与非流式思考（transform.rs:750-798 / 614-641）——
+test("usage：命中候选补 prompt_cache_hit_tokens 与 input_tokens_details.cached_tokens，显式 0 视为未报", () => {
+  const a = toAnthropicUsage({ prompt_tokens: 100, completion_tokens: 5, prompt_cache_hit_tokens: 80 });
+  assert.equal(a.cache_read_input_tokens, 80);
+  assert.equal(a.input_tokens, 20);
+  // 靠前字段被中转硬编码桩 0 → 继续往后找（cc-switch #8045/#8041）
+  const b = toAnthropicUsage({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 0 }, prompt_cache_hit_tokens: 60 });
+  assert.equal(b.cache_read_input_tokens, 60);
+  const c = toAnthropicUsage({ prompt_tokens: 100, input_tokens_details: { cached_tokens: 40 } });
+  assert.equal(c.cache_read_input_tokens, 40);
+});
+
+test("usage：写入量 cache_write 候选（显式 0 也算已报），input = prompt − 命中 − 写入", () => {
+  const a = toAnthropicUsage({ prompt_tokens: 100, cache_creation_input_tokens: 0, input_tokens_details: { cache_write_tokens: 10 } });
+  assert.equal(a.cache_creation_input_tokens, 0); // 直传 0 优先（与 cc-switch transform.rs:767-776 同口径）
+  const b = toAnthropicUsage({ prompt_tokens: 100, prompt_tokens_details: { cache_write_tokens: 10 } });
+  assert.equal(b.cache_creation_input_tokens, 10);
+  assert.equal(b.input_tokens, 90);
+});
+
+test("非流式 chatJsonToAnthropic：reasoning_content → 前置 thinking 块（带占位签名，开关可关）", () => {
+  const out = chatJsonToAnthropic({ choices: [{ message: { content: "答", reasoning_content: "想" }, finish_reason: "stop" }] }, "m", { thinking: true });
+  assert.deepEqual(out.content.map((b) => b.type), ["thinking", "text"]);
+  assert.equal(out.content[0].thinking, "想");
+  assert.ok(out.content[0].signature);
+  const off = chatJsonToAnthropic({ choices: [{ message: { content: "答", reasoning_content: "想" } }] }, "m", {});
+  assert.deepEqual(off.content.map((b) => b.type), ["text"]);
 });
