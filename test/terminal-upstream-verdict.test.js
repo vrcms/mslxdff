@@ -121,6 +121,50 @@ test("对照：403 FreeTierError 身份闸门仍短路——BUG-41 只放开额�
   assert.equal(counts.peer, 0, "闸门型判决（组员回同一条）与额度型判决必须区分，这条不许被一起放开");
 });
 
+// BUG-42（BUG-41 的下一层）：本机 429 后确实去问了组员（BUG-41 生效），但**同池兄弟模型一个都没试**，
+// 直接 exhausted-local 收场。现网取证 req mvd6f8zh-08fq / mvd6eaep-wym3（2026-10-18，
+// deepseek-v4.1-flash-free，pool=[…,big-pickle,space-bunny-free,longcat-2.5-preview-free] size=4）：
+// 时间线 `upstream-error 429 → peer-attempt×3 → peer-race-lose → relay-miss → exhausted-local`，
+// 中间**没有 fallback 换兄弟事件**。根因：peer-handler 见组员里混了 fetch failed 的 502，把 lastErr
+// 揉成 `{status:502, message:"peers failed:..."}`（peer-handler.js:43-44 allLimit=false），覆盖了本机
+// 直连那条明确的 429 额度判决 → canFailover 里 isPoolSwitchWorthy(502) 判 false → 同池互备关闭。
+// 「到组员网络通不通」被当成了「这个模型额度够不够」——两件事必须分开。
+test("BUG-42：本机 429 → 组员接力揉出 502 也不许冲掉额度判决 → 必须换下一个同池兄弟模型（把额度榨干）", async () => {
+  const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
+  const evts = [];
+  const tried = [];
+  // 两个兄弟模型都 429（额度型）；接力阶段的 peer/broad 桩分别返回 502 "peers failed" / 未处理，
+  // 复现现网「lastErr 被接力覆盖成 502」的场景。断言第二兄弟仍被 model-try。
+  const chat = async (payload) => { tried.push(payload.model); return resp(429, FREE_USAGE_BODY); };
+  const { c } = ctx({
+    order: ["a-free", "b-free"], requested: "a-free",
+    canFallback: true, poolFallback: true,
+    groups: { name: "g", members: [] },
+    chat,
+    evt: (t, d) => evts.push({ t, ...d }),
+  });
+  await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
+  // 关键断言：接力把 lastErr 揉成 502 后，第二个兄弟模型仍必须被试（不能第一发 429 就问组员问完就收场）。
+  assert.deepEqual(tried, ["a-free", "b-free"], "同池每个兄弟都要拿各自额度撞一遍，这才是『把额度榨干』");
+  assert.ok(evts.some((e) => e.t === "fallback" && e.from === "a-free" && e.to === "b-free"), "必须落一条换兄弟的 fallback 事件");
+  assert.equal(evts.filter((e) => e.t === "model-try").length, 2, "两个候选都要进 model-try");
+});
+
+test("对照 BUG-42：poolFallback=true 但上游回非额度错（400 参数错）时，不许靠兜底扩池——闸门还在", async () => {
+  const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
+  const tried = [];
+  const chat = async (payload) => { tried.push(payload.model); return resp(400, `{"error":{"message":"max_tokens must be <= 8192"}}`); };
+  const { c } = ctx({
+    order: ["a-free", "b-free"], requested: "a-free",
+    canFallback: true, poolFallback: true,
+    groups: { name: "g", members: [] }, chat,
+  });
+  await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
+  // 400 参数错既不是 429 也非终局 ⇒ poolWorthy=false；接力 lastErr=502 也非额度 ⇒ isPoolSwitchWorthy=false
+  // ⇒ 不换兄弟（别把客户端自己的错伪装成换模型成功、白烧别的模型额度）。
+  assert.deepEqual(tried, ["a-free"], "非额度失败不许扩池——BUG-42 只救被接力冲掉的额度判决，不拆闸门");
+});
+
 test("terminalShortcircuitOff: 缺省开（终局不接力），MSLXDFF_TERMINAL_SHORTCIRCUIT=0 回旧行为", () => {
   assert.equal(terminalShortcircuitOff({}), false);
   assert.equal(terminalShortcircuitOff({ MSLXDFF_TERMINAL_SHORTCIRCUIT: "0" }), true);
@@ -165,7 +209,7 @@ function ctx(over = {}) {
     auto: over.auto ?? null, upstream: { chat: over.chat || up(403, FREE_TIER_BODY) },
     peers: over.peers ?? { ordered: () => [{ url: "http://p1:8989", token: "t" }] },
     groups: over.groups ?? null, bus: null, token: "t",
-    canFallback: over.canFallback ?? false, canForwardPeers: true,
+    canFallback: over.canFallback ?? false, canForwardPeers: true, poolFallback: over.poolFallback ?? false,
     perf0: 0, stages: [], mark: () => {}, evt: over.evt || (() => {}),
     logCall: over.logCall || (() => {}), logError: over.logError || (() => {}), done: null, handlerCtx: {},
     startedAt: Date.now(), logs: null, shareKeys: {}, res,
