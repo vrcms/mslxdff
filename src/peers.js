@@ -1,7 +1,10 @@
 import { loadPeers, savePeers, loadPeerErrors, savePeerErrors, loadPeerStats, savePeerStats } from "./state.js";
 
-export const DEFAULT_PEER_COOLDOWN_MS = 30_000;
-export const DEFAULT_PEER_LIMIT_COOLDOWN_MS = 5 * 60_000;
+// 组员失败冷却分级（2026-10-18 用户拍板）：
+// 非额度失败（502/5xx/超时，可能几秒就恢复）→ 短冷却 10s，到点自动重新纳入候选、继续挨个重试；
+// 额度类（连续 2 次 429）→ 长冷却 10min（额度当天不会因快重试恢复，反复撞只会白烧配额）。
+export const DEFAULT_PEER_COOLDOWN_MS = 10_000;
+export const DEFAULT_PEER_LIMIT_COOLDOWN_MS = 10 * 60_000;
 export const DEFAULT_PEER_HEAT_MS = 5 * 60_000;
 export const DEFAULT_MAX_HOPS = 3;
 export const DEFAULT_BROADBAND_STALE_MS = 90_000;

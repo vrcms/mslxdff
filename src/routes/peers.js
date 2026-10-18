@@ -52,7 +52,7 @@ export function peerStageCtx(ctx = {}) {
 // 连接级超时（DNS + TCP/TLS 握手）：黑洞节点（端口挂起）必须快速失败，
 // 不能占用 30s 的响应超时（曾把一次请求拖到 92s）。仅 undici 可用时生效。
 let peerDispatcher = null;
-function getPeerDispatcher() {
+export function getPeerDispatcher() {
   if (peerDispatcher) return peerDispatcher;
   const { Agent } = getUndici();
   if (!Agent) return null;
@@ -66,6 +66,28 @@ function getPeerDispatcher() {
     });
   } catch { peerDispatcher = null; }
   return peerDispatcher;
+}
+
+/**
+ * 保热：用**组员转发同一条连接池**（getPeerDispatcher）打 GET /health，把 (本机→组员) 的连接
+ * 保持在温热、且**正是 chat 会复用的那条 socket**（裸 fetch 的全局池热的是另一条，等于白热）。
+ * /health 无鉴权、无副作用、零额度。绝不抛；返回 {ok}。
+ */
+export async function warmPeerHealth(url, { timeoutMs = 5000 } = {}) {
+  const base = String(url || "").replace(/\/+$/, "");
+  if (!base) return { ok: false, error: "no url" };
+  const dispatcher = getPeerDispatcher();
+  try {
+    const res = await compatFetch(`${base}/health`, {
+      headers: { Accept: "application/json" },
+      signal: timeoutSignal(timeoutMs),
+      ...(dispatcher ? { dispatcher } : {}),
+    });
+    try { if (res.body) await res.text().catch(() => {}); } catch {}
+    return { ok: Boolean(res?.ok), status: res?.status };
+  } catch (e) {
+    return { ok: false, error: errMsg(e) };
+  }
 }
 
 // 跨 caller 中继必须剥离 reasoning 加密态：encrypted_content 由上游按 caller（出口）签发，

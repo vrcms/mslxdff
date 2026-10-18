@@ -11,6 +11,13 @@ export function startServer({ router, signals = true, host, onBeforeClose }, por
       res.end(JSON.stringify({ error: String(err?.message || err) }));
     });
   });
+  // 空闲 keep-alive 连接必须活得比**客户端池**（打我们的组员/peer 用 undici keepAliveTimeout=30s，
+  // routes/peers.js:64）更久，否则出现两端超时打架：服务端 Node 默认 5s 就单方面掐掉闲置连接，
+  // 而组长池里的 socket 账面上还活着（<30s），下一次真请求复用死 socket ⇒ `fetch failed`
+  //（现网 2026-10-18 16:16：三个组员同时 fetch failed，peer-race 全灭、收场 502——间歇性、下一发又好的形态）。
+  // 65s = 30s 客户端余量 + 一倍缓冲；headersTimeout 必须 > keepAliveTimeout（Node 断言要求），取 70s。
+  server.keepAliveTimeout = Number(process.env.MSLXDFF_KEEPALIVE_TIMEOUT_MS) || 65_000;
+  server.headersTimeout = Number(process.env.MSLXDFF_HEADERS_TIMEOUT_MS) || 70_000;
 
   const ready = () =>
     new Promise((resolve, reject) => {

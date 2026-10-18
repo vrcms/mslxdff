@@ -99,11 +99,11 @@ export function slowCooldownMs() {
 }
 export function peerCooldownMs() {
   const n = Number(process.env.MSLXDFF_PEER_COOLDOWN_MS);
-  return Number.isInteger(n) && n > 0 ? n : 30_000;
+  return Number.isInteger(n) && n > 0 ? n : 10_000;
 }
 export function peerLimitCooldownMs() {
   const n = Number(process.env.MSLXDFF_PEER_LIMIT_COOLDOWN_MS);
-  return Number.isInteger(n) && n > 0 ? n : 5 * 60_000;
+  return Number.isInteger(n) && n > 0 ? n : 10 * 60_000;
 }
 export function peerHeatMs() {
   const n = Number(process.env.MSLXDFF_PEER_HEAT_MS);
