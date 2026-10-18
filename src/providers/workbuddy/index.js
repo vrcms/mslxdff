@@ -213,5 +213,5 @@ export function createWorkbuddyProvider({
 }
 
 // re-export submodules for tests that import directly
-export { decodeJwtExp, isAuthError, isInsufficientStatus } from "./auth.js";
+export { decodeJwtExp, isAuthError, isInsufficientStatus, isRateLimitedStatus, parseRateLimitResetMs } from "./auth.js";
 export { createBalanceCache } from "./balance.js";

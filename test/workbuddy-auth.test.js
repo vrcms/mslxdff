@@ -61,6 +61,31 @@ test("auth: isInsufficientStatus handles cached zero and 402", async () => {
   assert.equal(isInsufficientStatus(200, "", { total: 100 }), false);
 });
 
+test("auth: 6004 中文限流报文被判为 rate-limited，且**不是** insufficient", async () => {
+  const { isRateLimitedStatus, isInsufficientStatus, parseRateLimitResetMs } = await import("../src/providers/workbuddy/auth.js");
+  // 2026-10-17 实锤原文（腾讯 workbuddy 国内站）
+  const real = JSON.stringify({
+    code: 6004,
+    msg: "您的使用量已超出频率限制，将在 2026-10-18 21:14:48 UTC+8 重置，您也可以切换其他模型继续使用。",
+    requestId: "ba4e4235-060f-49a7-8c72-852144382ccb",
+  });
+  assert.equal(isRateLimitedStatus(429, real), true, "6004 必须识别为限流");
+  assert.equal(isRateLimitedStatus(403, real), false, "只有 429 才按限流处理");
+  assert.equal(isRateLimitedStatus(429, ""), false);
+  // 关键回归：6004 绝不能被当成「额度耗尽」，否则该号会被 setBalance(total:0) 永久跳过
+  assert.equal(isInsufficientStatus(429, real, { total: 2840.44 }), false, "限流不等于没额度");
+  assert.equal(isInsufficientStatus(429, real, null), false);
+  // 其它英文形态同样识别
+  assert.equal(isRateLimitedStatus(429, '{"error":"rate limit exceeded"}'), true);
+  assert.equal(isRateLimitedStatus(429, '{"error":"Too Many Requests"}'), true);
+  // 重置时刻解析（UTC+8 → 毫秒）
+  const now = Date.parse("2026-10-18T20:00:00+08:00");
+  assert.equal(parseRateLimitResetMs(real, () => now), 74 * 60_000 + 48_000);
+  assert.equal(parseRateLimitResetMs("no time here", () => now), 0);
+  // 已过期不返回负数
+  assert.equal(parseRateLimitResetMs(real, () => Date.parse("2026-10-19T00:00:00+08:00")), 0);
+});
+
 test("auth: concurrent same uid dedupes refresh to single fetch", async () => {
   let refreshCalls = 0;
   const srv = await stub((req, res) => {

@@ -193,3 +193,82 @@ test("chat: 400 upstream body stays readable after auth-class check", async () =
   } finally { await closeSrv(srv); }
 });
 
+
+test("chat: 429/6004（中文限流）自动换号，且不把该号余额标 0", async () => {
+  const calls = [];
+  const srv = await stub((req, res) => {
+    if (req.url.includes("/v2/chat/completions")) {
+      const uid = req.headers["x-user-id"];
+      calls.push(uid);
+      if (uid === "uid-a") {
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          code: 6004,
+          msg: "您的使用量已超出频率限制，将在 2026-10-18 21:14:48 UTC+8 重置，您也可以切换其他模型继续使用。",
+          requestId: "ba4e4235-060f-49a7-8c72-852144382ccb",
+        }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end("data: ok\n\n");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: 0 }));
+  });
+  try {
+    const { createWorkbuddyProvider } = await import("../src/providers/workbuddy/index.js");
+    const { createBalanceCache } = await import("../src/providers/workbuddy/balance.js");
+    const bal = createBalanceCache();
+    bal.setCachedBalance("uid-a", { total: 2840.44, dailyPacks: 23, activeCount: 37, nextExpire: null });
+    const p = createWorkbuddyProvider({
+      baseUrl: urlOf(srv),
+      apiKeys: ["k-a", "k-b"],
+      auths: [
+        { uid: "uid-a", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-a" },
+        { uid: "uid-b", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-b" },
+      ],
+      balanceCache: bal,
+      logger: { append() {} },
+    });
+    const res = await p.chat({ model: "hy3", messages: [] });
+    assert.equal(res.status, 200, "撞限流应换到另一个号并成功");
+    assert.deepEqual(calls, ["uid-a", "uid-b"], "必须真的换了号");
+    const cached = bal.getCachedBalance("uid-a");
+    assert.equal(cached?.total, 2840.44, "限流不得把余额改成 0（否则该号被永久跳过）");
+    await p.close();
+  } finally { await closeSrv(srv); }
+});
+
+test("chat: 全部账号都是 6004 时返回 429 且不崩溃", async () => {
+  const calls = [];
+  const srv = await stub((req, res) => {
+    if (req.url.includes("/v2/chat/completions")) {
+      calls.push(req.headers["x-user-id"]);
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 6004, msg: "您的使用量已超出频率限制，将在 2026-10-18 21:14:48 UTC+8 重置。" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: 0 }));
+  });
+  try {
+    const { createWorkbuddyProvider } = await import("../src/providers/workbuddy/index.js");
+    const p = createWorkbuddyProvider({
+      baseUrl: urlOf(srv),
+      apiKeys: ["k-a", "k-b"],
+      auths: [
+        { uid: "uid-a", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-a" },
+        { uid: "uid-b", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-b" },
+      ],
+      logger: { append() {} },
+    });
+    const res = await p.chat({ model: "hy3", messages: [] });
+    assert.equal(res.status, 429);
+    assert.equal(calls.length, 2, "两个号都应被试过");
+    assert.deepEqual([...new Set(calls)].sort(), ["uid-a", "uid-b"]);
+    const txt = await res.text();
+    assert.match(txt, /6004|频率限制/);
+    await p.close();
+  } finally { await closeSrv(srv); }
+});

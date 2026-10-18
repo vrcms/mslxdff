@@ -27,6 +27,32 @@ export function isInsufficientStatus(status, bodyText, cached) {
   return false;
 }
 
+// 频率限制：上游「这个号这一秒用量超了」——该换号顶，但**不是**这个号没额度了。
+// 与 isInsufficientStatus 严格分开：后者命中会被 chat.js 把该号余额标 0（永久跳过），
+// 而腾讯 workbuddy 的 6004 是「使用量已超出频率限制，将在 <时间> 重置」+ 中文措辞，
+// 既不含任何英文字样也没有额度码——历史上正是这里不认，导致 429 原样吐给客户端、从不换号。
+// Note: 为什么 6004 必须走独立判定而不是并入 insufficient — 见 .agents/notes/implemented/bug-fix/2026-10-18-workbuddy-6004-rate-limit-rotate.md
+export function isRateLimitedStatus(status, bodyText) {
+  if (status !== 429) return false;
+  const t = String(bodyText || "");
+  if (/"code"\s*:\s*6004\b/.test(t)) return true;
+  const lower = t.toLowerCase();
+  if (lower.includes("frequency limit") || lower.includes("rate limit") || lower.includes("too many requests")) return true;
+  if (t.includes("频率限制") || t.includes("请求过于频繁") || t.includes("使用量已超出")) return true;
+  return false;
+}
+
+// 上游 msg 里的重置时刻（"将在 2026-10-18 21:14:48 UTC+8 重置"）→ 建议冷却毫秒数；
+// 解析不出返回 0，调用方退回到固定冷却档，绝不因此把号判死。
+export function parseRateLimitResetMs(bodyText, clock = Date.now) {
+  const m = String(bodyText || "").match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*(?:UTC\+8)?\s*重置/);
+  if (!m) return 0;
+  const at = Date.parse(`${m[1]}T${m[2]}+08:00`);
+  if (!Number.isFinite(at)) return 0;
+  const ms = at - clock();
+  return ms > 0 ? ms : 0;
+}
+
 export function isAuthError(status, bodyText) {
   if (status === 401 || status === 403) return true;
   const t = String(bodyText || "").toLowerCase();
@@ -35,7 +61,6 @@ export function isAuthError(status, bodyText) {
   if (status === 400 && t.includes("token")) return true;
   return false;
 }
-
 export function createAuthService({
   baseUrl,
   fetchImpl,

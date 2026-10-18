@@ -1,5 +1,5 @@
 import { joinUrl } from "../base.js";
-import { isAuthError, isInsufficientStatus } from "./auth.js";
+import { isAuthError, isInsufficientStatus, isRateLimitedStatus, parseRateLimitResetMs } from "./auth.js";
 import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
 import { dispatcherFetch } from "../../upstream-engine/sdk/attempt.js";
@@ -232,7 +232,23 @@ export function createChatService({
           lastErr = failErr(`workbuddy insufficient for ${uid}: ${txt.slice(0, 120)}`, t0, clock);
           continue;
         }
-        res = rewrapBody(res, txt);
+        // 频率限制（腾讯 code 6004）：这个号撞了限流，但**额度还在**（total 可能还有几千点）。
+        // 必须换下一个号顶，且绝不能 setBalance(total:0) —— 那会把好号永久跳过，
+        // 是「429 原样吐回客户端、从不换号」在 2026-10-17 实锤的那条老路。
+        // Note: 6004 的判据与冷却分档 — 见 .agents/notes/implemented/bug-fix/2026-10-18-workbuddy-6004-rate-limit-rotate.md
+        if (isRateLimitedStatus(res.status, txt)) {
+          const resetMs = parseRateLimitResetMs(txt, clock);
+          // 冷却时长取「上游给的重置时刻」与固定下限的较大者；解析不出就只按固定档，
+          // 且**封顶 10 分钟**：6004 的重置时间可能远在数小时后，照抄会把号冻到下班。
+          const coolMs = Math.min(Math.max(resetMs || 0, cooldownMs), 10 * 60_000);
+          try { activeRing.onError(key, coolMs); } catch {}
+          doLog({ uid, model: _modelVal, totalMs: Math.round(nowMs(clock) - t0), balanceHit: false, error: `rate-limited(${coolMs}ms) ${txt.slice(0, 120)}` });
+          lastErr = failErr(`workbuddy rate limited for ${uid}: ${txt.slice(0, 120)}`, t0, clock);
+          if (activeRing.available() > 0) continue;
+          res = rewrapBody(res, txt);
+        } else {
+          res = rewrapBody(res, txt);
+        }
       }
       if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500) try { activeRing.onError(key); } catch {}
       res = withUidHeader(res, uid);
