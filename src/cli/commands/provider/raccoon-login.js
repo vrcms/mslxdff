@@ -27,6 +27,15 @@ const RELOGIN_HINT = "   （可重试：mslxdff -provider raccoon login）";
 export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   const pid = normalizeProviderId(id) || String(id || "").toLowerCase();
   if (pid !== "raccoon") return false;
+  // `login --password` 走手机号+密码（多账号免扫码）；无该旗标仍是扫码。分派必须在
+  // LOGIN_SUBS 判定之前，且只在此处转交 —— 扫码路径本身零改动。
+  if (LOGIN_SUBS.has(sub) && rest.some((x) => {
+    const s = String(x);
+    return s === "--password" || s.startsWith("--password=") || s === "-p" || s === "--phone" || s.startsWith("--phone=");
+  })) {
+    const { handleRaccoonPasswordLogin } = await import("./raccoon-password.js");
+    return handleRaccoonPasswordLogin(id, sub, rest, deps);
+  }
   if (!LOGIN_SUBS.has(sub)) return false;
 
   const fetchImpl = deps.fetchImpl || compatFetch;
@@ -93,7 +102,25 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
     return true;
   }
 
-  const credential = out.credential;
+  return await finishRaccoonLogin({ credential: out.credential, fetchImpl, deps, log });
+}
+
+/**
+ * 登录成功后的收尾四步（**扫码与密码两条路共用，单一源**）：
+ * confirm 会话 → 取用户信息 → 落盘 + 补 allowlist → 领一次性登录奖励 → 打印回执。
+ *
+ * 抽出来的理由不只是省行数：这四步的顺序有硬约束（必须先 confirm 才能用 token；领奖必须在
+ * access_token 刚签发的窗口内），任何一条路径自己重写一遍都会漏掉其中一步且难以察觉。
+ *
+ * @param {object} a
+ * @param {object} a.credential 已签发的凭据（两种登录方式同形）
+ * @param {Function} a.fetchImpl
+ * @param {object} a.deps 与原 CLI 依赖注入同形（dir/file/deviceId/saveAccount/claimReward/skipReward/env）
+ * @param {Function} a.log
+ * @param {string} [a.methodNote] 登录方式说明行（如密码登录标注手机号），纯展示
+ * @returns {Promise<boolean>} 恒 true（表示「已处理」，交还 CLI 派发链）
+ */
+export async function finishRaccoonLogin({ credential, fetchImpl, deps = {}, log, methodNote = "" }) {
   // 新登录的会话是「未确认」状态：不先 POST /iam/confirm，此后所有业务端点（含下面的领奖励、
   // 以及 daemon 的 chat）都会撞 `400 code 200901 iam_confirm_required`。登录时当场确认一次，
   // 让落盘的凭据从一开始就是可用的；确认失败不阻断（chat.js 有懒重试兜底），只在末尾如实提示。
@@ -134,6 +161,7 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
 
   log("");
   log(`✅ 登录成功！uid=${uid}  昵称=${info.name || "(空)"}  token=${raccoonTokenFingerprint(credential.access_token)}…`);
+  if (methodNote) log(methodNote);
   log(`   凭据: ${saved.file}`);
   if (!confirmed) log("   ⚠ 会话确认（iam/confirm）暂未成功 —— 不影响使用（调用时会自动重试确认），若持续报错请重跑 login");
   if (allow.added.length) log(`   allowlist 已补齐 ${allow.added.length} 个模型：${allow.added.join(", ")}`);
