@@ -44,13 +44,23 @@ export function notFound(res) {
   return json(res, 404, { error: "Not Found" });
 }
 
+// 入站请求体读取：**必须先收齐字节再一次性 decode**。
+//
+// 不要写成 `let data = ""; req.on("data", c => data += c)`：`c` 是 Buffer，`+=` 会按**每个 TCP 块**
+// 各自隐式 `toString("utf8")` —— 多字节字符（绝大多数汉字/emoji）被切在块中间时，两半各自解成
+// `U+FFFD`「�」。切块位置随网络随机 ⇒ **同一份请求体不同轮次坏的位置不同**，而这份 body 会原样
+// 转发给上游：从坏点起的字节前缀每轮都变，上游的前缀缓存从那里起永远命中不了。
+// 实测（2026-10-18，raccoon 会话 talk/full 语料）：同一会话相邻两轮的同一条历史消息里
+// 「个」↔「�」来回跳（成 U+FFFD），首差异落在历史 21%–43% 处；命中一次的对照实验里
+// 同前缀两连发 cache_read=384/429，说明上游缓存本来是好的、是被我们这份坏字节废掉的。
 export function readBody(req) {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c), "utf8")));
     req.on("end", () => {
       try {
-        resolve(data ? JSON.parse(data) : {});
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve(text ? JSON.parse(text) : {});
       } catch (err) {
         reject(err);
       }
