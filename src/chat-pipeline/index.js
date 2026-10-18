@@ -13,22 +13,6 @@ import { apiKindOf } from "../api-kind.js";
  * 内部组合 Policy→Engine：解析 header/model → 产 order → 委托 engine 执行
  * gateway 仅薄适配：readBody + request:received hook + 调 execute
  */
-/**
- * 指定 free 模型时是否允许横向切同池兄弟（BUG-7）。
- * 缺省开：opencode 免费池的裸 id 模型（`mimo-v2.6-flash-free` 等）语义上就是"免费额度内随便用"，
- * 单个模型额度耗尽不该让整条链路失败。逃生阀 `MSLXDFF_FREE_POOL_FALLBACK=0` 回到"显式指定即锁死"。
- * 只在**非 lockModel**（即不经组内 model-lock 转发）时生效。
- */
-// 同池互备最多横向试几个（含首个指定的那个）：额度类失败常见于"整池都满"，
-// 扫全池只会把快速失败拖成分钟级，试前几个足够区分"这个模型满"与"这池满"。
-const FREE_POOL_MAX = 4;
-
-export function freePoolFallbackOn(env = process.env) {
-  const raw = env.MSLXDFF_FREE_POOL_FALLBACK;
-  if (raw === undefined || raw === null || raw === "") return true;
-  const s = String(raw).trim().toLowerCase();
-  return !(s === "0" || s === "false" || s === "off" || s === "no");
-}
 
 export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, token, plugins, maxHops } = {}) {
   const engine = createEngine();
@@ -91,11 +75,10 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
 
     // order 推导 + plugin model:select 可改
     // 语义：指定模型 = 死锁单模型（本机→组员同款，挂了就报挂，不兜其他 picks）；只有 auto 才轮 picks
-    // 例外：opencode 免费池的裸 id free 模型（mimo-v2.6-flash-free / deepseek-v4.1-flash-free…）
-    // 额度耗尽时允许**同池互备**——见 freePoolFallbackOn()（BUG-7 用户点名诉求）。
+    // 指定模型的额度耗尽时**不换模型**：横向只在同模型的组员/组长间接力（本机出口 IP 耗尽 → 换组员机器），
+    // 模型永不漂移。详见 serial-trial 的 order 单元素路径与 peer 接力。
     // x-mslxdff-auto-provider 头可把 auto 候选限定到单供应商（opencode=裸 id 免费池），-chat 默认带
     let order;
-    let poolFallback = false; // 指定 free 模型时的「同池互备」标记：只有额度类失败才允许继续换兄弟
     if (lockModel) order = [requested];
     else if (useAuto) {
       let cands = auto ? await auto.candidates() : [""];
@@ -108,28 +91,13 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
       }
       order = cands;
     } else {
-      // 指定模型的常态是死锁单模型。**唯一例外**：裸 id 的 free 模型（opencode 免费池），
-      // 且只在**额度类**失败（429 / 具名额度判决）时才横向切同池兄弟——参数错/5xx 照旧原样透传，
-      // 不把「客户端发错了」伪装成换模型成功，也不白烧别的模型额度（见 isPoolSwitchWorthy）。
-      // candidatesFor 的持久化副作用（把指定模型加入勾选集）在任何分支都必须保留。
-      const wantFreePool = Boolean(auto && requested && freePoolFallbackOn() && isFreeModel(requested) && !String(requested).includes("/"));
+      // 指定模型 = 死锁单模型：额度耗尽只换组员/组长（同模型换机器），**绝不换模型**。
+      // candidatesFor 的持久化副作用（把显式指定的模型加入勾选集，供日后 auto 用）必须保留——
+      // 见 auto.js:180「显式指定某模型 = 认可它，自动加入勾选集」，历史上删它会丢勾选记录。
       if (auto && requested) {
-        try {
-          const cands = await auto.candidatesFor(requested);
-          if (wantFreePool && Array.isArray(cands) && cands.length) {
-            // 上限截断：串行换人是"试一试"不是"扫全池"，太多候选会把额度类失败也拖成分钟级
-            const samePool = cands
-              .filter((m) => m === requested || (isFreeModel(m) && !String(m).includes("/")))
-              .slice(0, FREE_POOL_MAX);
-            if (samePool.length > 1) {
-              order = samePool;
-              poolFallback = true;
-              evt("free-pool-fallback", { reqId, model: requested, pool: samePool, size: samePool.length });
-            }
-          }
-        } catch {}
+        try { await auto.candidatesFor(requested); } catch {}
       }
-      if (!order) order = [requested];
+      order = [requested];
     }
     if (!order.length) order = [""];
     const canFallback = order.length > 1;
@@ -163,7 +131,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     await engine.run({
       reqId, startedAt, req, res, body: req?.body, policy,
       useAuto, lockModel, requested, hops,
-      canFallback, canForwardPeers, poolFallback,
+      canFallback, canForwardPeers,
       perf0, stages, mark, evt, logCall, logError, done, handlerCtx,
       auto, upstream, peers, groups, bus, token, plugins, logs,
       order,

@@ -13,7 +13,7 @@ import { shouldUseGroupForModel, isHardLocalOnly, isKeyProviderDirectOnly } from
 import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
-import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff, isPoolSwitchWorthy } from "./terminal-verdict.js";
+import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,7 +39,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   } = deps;
   const {
     order, reqId, requested, body, hops, useAuto, lockModel, plugins,
-    auto, upstream, peers, groups, bus, token, canFallback, canForwardPeers, poolFallback,
+    auto, upstream, peers, groups, bus, token, canFallback, canForwardPeers,
     perf0, stages, mark, evt, logCall, logError, done, handlerCtx,
     res, startedAt, logs,
   } = ctx;
@@ -60,15 +60,13 @@ export async function runSerialTrial(ctx, deps = {}) {
   }
 
   let lastErr = viaRouteLastErr;
-  // BUG-42 同池互备判据：poolWorthy 记「本模型直连时被上游判过额度/终局」，接力揉的 502 冲不掉它（详见 ADR-0061）。
-  let poolWorthy = false;
-  const canFailover = (err) =>
-    canFallback && (!poolFallback || isPoolSwitchWorthy(err ?? lastErr) || poolWorthy);
+  // 指定模型只走单候选（order=[requested]），组员/组长接力在同模型内进行；候选间不换模型。
+  // canFallback 仅对 auto 的多候选生效。poolFallback/"同池互备"已移除：指定模型绝不漂移到别的模型。
+  const canFailover = () => canFallback;
   // 请求级空轮等待累计（跨候选）：阶梯是「每发候选」各算的，不设顶就会 N×(2+8+30) 把客户端吊在门外
   let requestWaitedMs = 0;
   candidate: for (let idx = 0; idx < order.length; idx++) {
     const model = order[idx];
-    poolWorthy = false; // 每候选独立记账：上一发 429 不代表这一发也 429
     handlerCtx.model = model;
     handlerCtx.orderLen = order.length;
     handlerCtx.idx = idx;
@@ -159,8 +157,6 @@ export async function runSerialTrial(ctx, deps = {}) {
         // 终局判决短路（判据与现网取证见 terminal-verdict.js）
         const verdict = classifyTerminalUpstream(upRes.status, upRaw);
         const terminalOn = verdict.terminal && !terminalShortcircuitOff();
-        // BUG-42 记账点：本机直连时上游判过额度/终局 ⇒ 换兄弟有账可依（接力冲不掉，详见 ADR-0061）
-        if (isPoolSwitchWorthy({ status: upRes.status, terminal: verdict.terminal })) poolWorthy = true;
         // 一行话把「判决」与「原文」一起落 errors.log（不分两行：同一发失败在 errors.log 里只该有一条）
         logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}${terminalOn ? ` · 终局判决 ${verdict.kind}（跳过组员接力）` : ""}`);
         evt("upstream-error", { reqId, model, status: upRes.status, message: upMsg.slice(0, 300), timing: upRes._t ?? null, ...upstreamEcho(upRes) });
@@ -274,7 +270,7 @@ export async function runSerialTrial(ctx, deps = {}) {
         if (br.handled) return { done: true };
       }
     }
-    if (canFailover(lastErr)) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, pool: poolFallback || undefined, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }
+    if (canFailover()) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }
     await exhaustedLocal({ res, body, lastErr, order, handlerCtx: { ...handlerCtx, model, reqId }, evt, logCall, mark, perf0, stages, done, requested, useAuto });
     return { done: true };
   }

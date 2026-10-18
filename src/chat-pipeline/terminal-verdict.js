@@ -33,8 +33,7 @@ const FREE_TIER_PATTERNS = [
   // 上游口径变化，套餐缺失则是**换号换节点都不会变**的判决，属本判据射程内却曾被漏判。
   // 实测（errors.log，2026-10-17 两次逐字相同，cline/cline-pass/deepseek-v4.1-flash）：
   // `{"error":{"code":"ENTITLEMENT_ERROR","message":"Error 403: the user is not subscribed to required model plan"}}`
-  // ⇒ 旧版 classifyTerminalUpstream 返回 {terminal:false}，照跑组员接力，且 isPoolSwitchWorthy 也返回 false
-  //   （终局为假 ⇒ 同池互备路径一并关闭），指定 free 模型的调用方只能吃 403 收场。
+  // ⇒ 旧版 classifyTerminalUpstream 返回 {terminal:false}，被误当普通 403 照跑组员接力收场。
   // 文案兜底另收一条：防上游改 code 名后只保留人类可读的 message。
   /ENTITLEMENT_ERROR/i,
   /not subscribed to required model plan/i,
@@ -130,18 +129,4 @@ export function terminalShortcircuitOff(env = process.env) {
   if (raw === undefined || raw === null || raw === "") return false;
   const s = String(raw).trim().toLowerCase();
   return s === "0" || s === "false" || s === "off" || s === "no";
-}
-
-/**
- * 「这一发失败值得换个同池模型再试」vs「换了也一样」的分界（BUG-7 的收窄口径）。
- * 只有额度/判决类失败才允许指定 free 模型横向切同池兄弟：
- *  - 429：免费池的限流几乎都是额度维度，换个模型常能立刻出字；
- *  - terminal（具名额度判决 / 模型 id 不存在）：换兄弟模型可能命中另一个可用 id。
- * 参数错（400）、上游 5xx、fetch 异常一律**不**横向切——那会把「客户端自己发错了」伪装成换模型成功，
- * 也白烧别的模型额度。
- */
-export function isPoolSwitchWorthy(lastErr) {
-  if (!lastErr) return false;
-  if (lastErr.terminal) return true;
-  return Number(lastErr.status) === 429;
 }

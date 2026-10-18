@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runSerialTrial } from "../src/chat-pipeline/serial-trial.js";
 import { runAutoRace } from "../src/chat-pipeline/auto-race.js";
-import { classifyTerminalUpstream, terminalShortcircuitOff, isPoolSwitchWorthy } from "../src/chat-pipeline/terminal-verdict.js";
+import { classifyTerminalUpstream, terminalShortcircuitOff } from "../src/chat-pipeline/terminal-verdict.js";
 
 // 现网原文（2026-10-15，~/.config/mslxdff/deepseek-v4.1-flash-free.log req=mv9m1d2v-n2y5）
 const FREE_TIER_BODY = `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}`;
@@ -34,8 +34,7 @@ test("classifyTerminalUpstream: 免费层身份判决判终局，4xx 任意码�
   assert.equal(classifyTerminalUpstream(500, FREE_TIER_BODY).terminal, false, "5xx 永远可恢复，不许终局");
 });
 
-// BUG-19：具名资格判决 ENTITLEMENT_ERROR 曾漏判 —— 既不判终局（照跑组员接力），
-// 又让 isPoolSwitchWorthy 返回 false（指定 free 模型的同池互备路径一并关闭）。
+// BUG-19：具名资格判决 ENTITLEMENT_ERROR 曾漏判，只被当普通 403（照跑组员接力）。
 // 现网原文（errors.log，2026-10-17 两次逐字相同，cline/cline-pass/deepseek-v4.1-flash）
 const ENTITLEMENT_BODY = `{"error":{"code":"ENTITLEMENT_ERROR","message":"Error 403: the user is not subscribed to required model plan"}}`;
 
@@ -45,8 +44,6 @@ test("classifyTerminalUpstream: 具名资格判决 ENTITLEMENT_ERROR 判终局�
   assert.equal(r.kind, "free-tier-blocked");
   // 文案兜底：上游改 code 名但保留人类可读 message 时仍要命中
   assert.equal(classifyTerminalUpstream(403, `{"error":{"message":"the user is not subscribed to required model plan"}}`).terminal, true);
-  // 终局 ⇒ 必须同时放开「换同池兄弟」，否则出现「判了终局却仍不换模型」的半截行为
-  assert.equal(isPoolSwitchWorthy({ status: 403, terminal: r.terminal }), true, "终局必须让同池互备也放行");
 });
 
 test("classifyTerminalUpstream: 模型 id 不存在（400/403/404/422）判终局，中英文都收", () => {
@@ -97,7 +94,6 @@ test("classifyTerminalUpstream: 429 具名额度判决（FreeUsage/GoUsage）不
   assert.equal(r.kind, undefined);
   assert.equal(classifyTerminalUpstream(429, GO_USAGE_BODY).terminal, false, "GoUsage 同族（warp verdict 并列）");
   assert.equal(classifyTerminalUpstream(429, "Rate limit exceeded. Please try again later.").terminal, false, "裸 429 限流同样可接力");
-  assert.equal(isPoolSwitchWorthy({ status: 429, message: "FreeUsageLimitError" }), true, "429 还要允许横向切同池兄弟（每个模型的池都榨一遍）");
   // 具名类名要单独兜住：防上游把 message 改了（类名比 message 稳定）
   assert.equal(classifyTerminalUpstream(429, `{"error":{"type":"FreeUsageLimitError","message":"whatever the upstream renames it to"}}`).terminal, false);
 });
@@ -122,47 +118,25 @@ test("对照：403 FreeTierError 身份闸门仍短路——BUG-41 只放开额�
 });
 
 // BUG-42（BUG-41 的下一层）：本机 429 后确实去问了组员（BUG-41 生效），但**同池兄弟模型一个都没试**，
-// 直接 exhausted-local 收场。现网取证 req mvd6f8zh-08fq / mvd6eaep-wym3（2026-10-18，
-// deepseek-v4.1-flash-free，pool=[…,big-pickle,space-bunny-free,longcat-2.5-preview-free] size=4）：
-// 时间线 `upstream-error 429 → peer-attempt×3 → peer-race-lose → relay-miss → exhausted-local`，
-// 中间**没有 fallback 换兄弟事件**。根因：peer-handler 见组员里混了 fetch failed 的 502，把 lastErr
-// 揉成 `{status:502, message:"peers failed:..."}`（peer-handler.js:43-44 allLimit=false），覆盖了本机
-// 直连那条明确的 429 额度判决 → canFailover 里 isPoolSwitchWorthy(502) 判 false → 同池互备关闭。
-// 「到组员网络通不通」被当成了「这个模型额度够不够」——两件事必须分开。
-test("BUG-42：本机 429 → 组员接力揉出 502 也不许冲掉额度判决 → 必须换下一个同池兄弟模型（把额度榨干）", async () => {
+// 【设计变更 2026-10-18】「同池互备」已取消：指定模型=死锁单模型，额度耗尽只横向换组员/组长
+// （同模型换机器），**绝不换模型**。原 BUG-42「接力揉 502 也不许冲掉额度判决 → 换下一个同池兄弟」
+// 的诉求，其前提（会换兄弟）本身已被移除，故改为反向断言：**本机 429 + 组员接力揉 502，也不换模型**。
+test("指定模型 429：组员接力揉出 502 也不换模型（死锁单模型，只换组员不换模型）", async () => {
   const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
   const evts = [];
   const tried = [];
-  // 两个兄弟模型都 429（额度型）；接力阶段的 peer/broad 桩分别返回 502 "peers failed" / 未处理，
-  // 复现现网「lastErr 被接力覆盖成 502」的场景。断言第二兄弟仍被 model-try。
   const chat = async (payload) => { tried.push(payload.model); return resp(429, FREE_USAGE_BODY); };
   const { c } = ctx({
-    order: ["a-free", "b-free"], requested: "a-free",
-    canFallback: true, poolFallback: true,
+    order: ["a-free"], requested: "a-free",
+    canFallback: false, // 单候选：指定模型 order 恒为 [requested]
     groups: { name: "g", members: [] },
     chat,
     evt: (t, d) => evts.push({ t, ...d }),
   });
   await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
-  // 关键断言：接力把 lastErr 揉成 502 后，第二个兄弟模型仍必须被试（不能第一发 429 就问组员问完就收场）。
-  assert.deepEqual(tried, ["a-free", "b-free"], "同池每个兄弟都要拿各自额度撞一遍，这才是『把额度榨干』");
-  assert.ok(evts.some((e) => e.t === "fallback" && e.from === "a-free" && e.to === "b-free"), "必须落一条换兄弟的 fallback 事件");
-  assert.equal(evts.filter((e) => e.t === "model-try").length, 2, "两个候选都要进 model-try");
-});
-
-test("对照 BUG-42：poolFallback=true 但上游回非额度错（400 参数错）时，不许靠兜底扩池——闸门还在", async () => {
-  const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
-  const tried = [];
-  const chat = async (payload) => { tried.push(payload.model); return resp(400, `{"error":{"message":"max_tokens must be <= 8192"}}`); };
-  const { c } = ctx({
-    order: ["a-free", "b-free"], requested: "a-free",
-    canFallback: true, poolFallback: true,
-    groups: { name: "g", members: [] }, chat,
-  });
-  await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
-  // 400 参数错既不是 429 也非终局 ⇒ poolWorthy=false；接力 lastErr=502 也非额度 ⇒ isPoolSwitchWorthy=false
-  // ⇒ 不换兄弟（别把客户端自己的错伪装成换模型成功、白烧别的模型额度）。
-  assert.deepEqual(tried, ["a-free"], "非额度失败不许扩池——BUG-42 只救被接力冲掉的额度判决，不拆闸门");
+  assert.deepEqual(tried, ["a-free"], "只打指定的那一个模型，绝不横向换兄弟模型");
+  assert.ok(!evts.some((e) => e.t === "fallback"), "不得落任何换模型的 fallback 事件");
+  assert.equal(counts.peer, 1, "429 后仍走组员接力（同模型换机器）");
 });
 
 test("terminalShortcircuitOff: 缺省开（终局不接力），MSLXDFF_TERMINAL_SHORTCIRCUIT=0 回旧行为", () => {
@@ -209,7 +183,7 @@ function ctx(over = {}) {
     auto: over.auto ?? null, upstream: { chat: over.chat || up(403, FREE_TIER_BODY) },
     peers: over.peers ?? { ordered: () => [{ url: "http://p1:8989", token: "t" }] },
     groups: over.groups ?? null, bus: null, token: "t",
-    canFallback: over.canFallback ?? false, canForwardPeers: true, poolFallback: over.poolFallback ?? false,
+    canFallback: over.canFallback ?? false, canForwardPeers: true,
     perf0: 0, stages: [], mark: () => {}, evt: over.evt || (() => {}),
     logCall: over.logCall || (() => {}), logError: over.logError || (() => {}), done: null, handlerCtx: {},
     startedAt: Date.now(), logs: null, shareKeys: {}, res,
