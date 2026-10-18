@@ -111,6 +111,7 @@
 | 组员开关 | `-use-group [on\|off]` / `--use-group [on\|off]` | opencode 失败时是否走组员（默认 on，off 则所有供应商仅本机；key 供应商默认恒直连，`MSLXDFF_USE_GROUP_KEYS=1` 可开回；cline/workbuddy 恒禁） |
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
+| IPv6 出口对照 | `-v6-pool [test] [--count N] [--model <id>]` | **Linux VPS** 专用：直连（IPv4）打一条 free 层请求取基线，再从 v6 段随机采 N 个源地址各打同一条（只换源地址）→ **基线 429 + v6 有 200 ⇒ 换 IP 能换到新额度**；v6 也 429 ⇒ 换 IP 抬不动。自造 `/128` 用完即撤；非 Linux 如实跳过 |
 | 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
 | 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启 |
 | 自启状态 | `-autostart status` / `--autostart status` | 查看自启状态 |
