@@ -60,11 +60,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   }
 
   let lastErr = viaRouteLastErr;
-  // 指定 free 模型的同池互备：order 里带了兄弟模型，但只有**额度类**失败才许继续换。
-  // 参数错/5xx/空转等仍按"显式指定即报错"的旧口径收场，别把客户端自己的错伪装成换模型成功。
-  // BUG-42 修复：判「值不值得换同池兄弟」不能只看接力阶段揉出来的 lastErr——那是「组员网络通不通」的
-  // 传输事实，会把本机直连拿到的「这个模型 429 额度没了」判决冲掉。`poolWorthy` 每候选重置，
-  // 记的是「**这个模型**在直连阶段被上游亲口判过额度/终局」，接力返回什么都不许覆盖它。
+  // BUG-42 同池互备判据：poolWorthy 记「本模型直连时被上游判过额度/终局」，接力揉的 502 冲不掉它（详见 ADR-0061）。
   let poolWorthy = false;
   const canFailover = (err) =>
     canFallback && (!poolFallback || isPoolSwitchWorthy(err ?? lastErr) || poolWorthy);
@@ -72,8 +68,7 @@ export async function runSerialTrial(ctx, deps = {}) {
   let requestWaitedMs = 0;
   candidate: for (let idx = 0; idx < order.length; idx++) {
     const model = order[idx];
-    // 每候选独立记账：兄弟模型的额度判决不沿用上一发（上一发 429 不代表这一发也 429）。
-    poolWorthy = false;
+    poolWorthy = false; // 每候选独立记账：上一发 429 不代表这一发也 429
     handlerCtx.model = model;
     handlerCtx.orderLen = order.length;
     handlerCtx.idx = idx;
@@ -161,13 +156,10 @@ export async function runSerialTrial(ctx, deps = {}) {
         upBody = upRaw.replace(/\s+/g, " ").slice(0, 400);
         const upMsg = upBody || `upstream ${upRes.status}`;
         lastErr = { model, upstream: upRes, status: upRes.status, message: upMsg };
-        // 终局判决短路（判据与现网取证见 terminal-verdict.js）：上游把「这个模型你别想用」——免费层身份
-        // 闸门 / 模型 id 不存在——写死在错误里时，换组员撞的是同一堵墙（实测组员回同一条 FreeTierError），
-        // 接力只会把 6s 的真相拖成 70s 的 502 "peers failed"。逃生阀 MSLXDFF_TERMINAL_SHORTCIRCUIT=0。
+        // 终局判决短路（判据与现网取证见 terminal-verdict.js）
         const verdict = classifyTerminalUpstream(upRes.status, upRaw);
         const terminalOn = verdict.terminal && !terminalShortcircuitOff();
-        // BUG-42 记账点：本机直连时上游亲口给过「额度类（429）」或「终局资格」判决 ⇒ 换同池兄弟有账可依。
-        // 这个事实记在这里（直连阶段），后面组员/宽带接力把 lastErr 揉成 502 也冲不掉它。
+        // BUG-42 记账点：本机直连时上游判过额度/终局 ⇒ 换兄弟有账可依（接力冲不掉，详见 ADR-0061）
         if (isPoolSwitchWorthy({ status: upRes.status, terminal: verdict.terminal })) poolWorthy = true;
         // 一行话把「判决」与「原文」一起落 errors.log（不分两行：同一发失败在 errors.log 里只该有一条）
         logError(model, upRes.status, `upstream ${upRes.status}${upBody ? ` body=${upBody.slice(0, 300)}` : ""}${terminalOn ? ` · 终局判决 ${verdict.kind}（跳过组员接力）` : ""}`);
