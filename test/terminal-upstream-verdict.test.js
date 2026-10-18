@@ -79,6 +79,48 @@ test("classifyTerminalUpstream: 可恢复拒绝一律不终局（换号/换节�
   }
 });
 
+// BUG-41（推翻 BUG-8 的修复方向）：429 的具名额度判决（FreeUsageLimitError/GoUsageLimitError）是
+// **按出口/按号**计的限额，不是身份闸门。三条仓内实证 + 一条机制事实：
+//   ① 本仓自测（warp-pool/verdict.js:9-10）：同一身份连发 3 次 429，**身份一换、同一个请求立刻 200**；
+//   ② warp-pool 决策表对 429 FreeUsage 明写「强制换出口」；v6 池同样据它换源地址；
+//   ③ opencode 恒不借 key（share-keys.js:15,49）⇒ 组员打 opencode 用的是**组员自己的身份与出口**，
+//      额度池彼此独立——这正是「组员多、额度还有一堆」的机制基础；
+//   ④ ADR-0058 §2 本就把 429 明列为可恢复，BUG-8 偏离了它自己写下的边界。
+// 产品裁决（用户，2026-10-18）：free 模型碰 429 是常事，机制必须**挨个穷尽组员/组长把额度榨干**，
+// 快速失败让位于额度穷尽。判终局 = 把可榨的池子按死（现网实证：满屏 peersSkipped:true）。
+const FREE_USAGE_BODY = `{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded. Please try again later."}}`;
+const GO_USAGE_BODY = `{"type":"error","error":{"type":"GoUsageLimitError","message":"Usage limit reached. Try again later."}}`;
+
+test("classifyTerminalUpstream: 429 具名额度判决（FreeUsage/GoUsage）不终局——换出口换组员就撞上还有额度的池", () => {
+  const r = classifyTerminalUpstream(429, FREE_USAGE_BODY);
+  assert.equal(r.terminal, false, "按出口计的限额判终局 = 静默跳过组员，把可用额度按死");
+  assert.equal(r.kind, undefined);
+  assert.equal(classifyTerminalUpstream(429, GO_USAGE_BODY).terminal, false, "GoUsage 同族（warp verdict 并列）");
+  assert.equal(classifyTerminalUpstream(429, "Rate limit exceeded. Please try again later.").terminal, false, "裸 429 限流同样可接力");
+  assert.equal(isPoolSwitchWorthy({ status: 429, message: "FreeUsageLimitError" }), true, "429 还要允许横向切同池兄弟（每个模型的池都榨一遍）");
+  // 具名类名要单独兜住：防上游把 message 改了（类名比 message 稳定）
+  assert.equal(classifyTerminalUpstream(429, `{"error":{"type":"FreeUsageLimitError","message":"whatever the upstream renames it to"}}`).terminal, false);
+});
+
+test("serial-trial: 429 额度判决必须挨个问组员（额度穷尽优先于快速失败），且无终局短路", async () => {
+  const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
+  const evts = [];
+  // groups 夹具非空：让宽带接力分支也走到（serial-trial.js:267 以 groups 为门），
+  // 否则 broad===0 是夹具给的假绿，终局短路删掉也照样绿。
+  const { c } = ctx({ chat: up(429, FREE_USAGE_BODY), groups: { name: "g", members: [] }, evt: (t, d) => evts.push({ t, ...d }) });
+  await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
+  assert.equal(counts.peer, 1, "组员必须被问——opencode 的额度按出口/按号计，组员池独立");
+  assert.equal(counts.broad, 1, "宽带组员同样不许被跳过");
+  assert.equal(evts.some((e) => e.t === "upstream-terminal"), false, "更不许落终局事件（那是「跳过组员」的取证）");
+});
+
+test("对照：403 FreeTierError 身份闸门仍短路——BUG-41 只放开额度判决，不许把整个短路拆掉", async () => {
+  const counts = { peer: 0, broad: 0, local: 0, exhaust: 0 };
+  const { c } = ctx({ chat: up(403, FREE_TIER_BODY) });
+  await withEnv(GROUP_ON, () => runSerialTrial(c, spyDeps(counts)));
+  assert.equal(counts.peer, 0, "闸门型判决（组员回同一条）与额度型判决必须区分，这条不许被一起放开");
+});
+
 test("terminalShortcircuitOff: 缺省开（终局不接力），MSLXDFF_TERMINAL_SHORTCIRCUIT=0 回旧行为", () => {
   assert.equal(terminalShortcircuitOff({}), false);
   assert.equal(terminalShortcircuitOff({ MSLXDFF_TERMINAL_SHORTCIRCUIT: "0" }), true);
@@ -122,7 +164,7 @@ function ctx(over = {}) {
     hops: 0, useAuto: over.useAuto ?? false, lockModel: "", plugins: [],
     auto: over.auto ?? null, upstream: { chat: over.chat || up(403, FREE_TIER_BODY) },
     peers: over.peers ?? { ordered: () => [{ url: "http://p1:8989", token: "t" }] },
-    groups: null, bus: null, token: "t",
+    groups: over.groups ?? null, bus: null, token: "t",
     canFallback: over.canFallback ?? false, canForwardPeers: true,
     perf0: 0, stages: [], mark: () => {}, evt: over.evt || (() => {}),
     logCall: over.logCall || (() => {}), logError: over.logError || (() => {}), done: null, handlerCtx: {},

@@ -19,12 +19,16 @@
 // 防上游把同一判决挪到 400/404 就失明。
 const FREE_TIER_PATTERNS = [
   /FreeTierError/i,
-  // 额度耗尽（具名判决）。裸 "Rate limit exceeded" 不在此列——那可能只是这一发撞上限流，换号换节点
-  // 就恢复；只有上游**具名**说"你的免费额度用完了"才是对同源组员同样成立的判决。
-  // 实测（errors.log，2026-10-16）：muse-spark / ll-alpha 的 429 体是
-  // `{"error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded..."}}`，旧判据漏掉它
-  // ⇒ 白跑组员接力 70s 才回错。escape hatch 同 MSLXDFF_TERMINAL_SHORTCIRCUIT=0。
-  /FreeUsageLimitError/i,
+  // ⚠ `FreeUsageLimitError` 曾列在此（BUG-8 于 2026-10-16 加入）**现已移除**（2026-10-17 纠正）：
+  // 它是**限额/限流**判决，不是身份闸门。三条独立实证都证明「换出口/换组员就恢复」⇒ 属可接力：
+  //   ① 本仓自测记录（warp-pool/verdict.js:9-10）：同一身份连发 3 次 429 FreeUsageLimitError，
+  //      **身份一换、同一个请求立刻 200**（限额按出口 IP 计）；
+  //   ② warp-pool 的决策表（verdict.js:62）对 429 FreeUsage 明写「强制换出口、跳过冷却」；
+  //   ③ v6 池（v6pool-claim-rotate.test.js:140）同样据它换源地址。
+  // 更根本：ADR-0058 §2 本就把「401/402/**429**/5xx」明列为**可恢复、接力照常**；本文件头 :9-11 也是
+  // 同一口径。BUG-8 把 429 的具名文案判成终局，偏离了本模块自己写下的边界 —— 现网代价是
+  // 组员额度还在、仍被 `peersSkipped:true` 一刀跳过（2026-10-18 events.log 满屏实证）。
+  // 改由 TRANSIENT_MARKERS 显式排除（不依赖 message 里偶然出现的 "rate limit"）。
   // 具名资格判决：上游明说「你没订阅这个模型套餐」。它比 free 层判决更硬——免费层判决还可能随
   // 上游口径变化，套餐缺失则是**换号换节点都不会变**的判决，属本判据射程内却曾被漏判。
   // 实测（errors.log，2026-10-17 两次逐字相同，cline/cline-pass/deepseek-v4.1-flash）：
@@ -56,6 +60,11 @@ const MODEL_GONE_PATTERNS = [
 // 反向护栏：形状像终局但语义是「这个号/这一发不行」，换号换节点可能就好——绝不终局。
 // 只认明确凭据/限流语义词，不收裸 `token`：`max_tokens` 之类的参数报错会被它误判成可接力。
 const TRANSIENT_MARKERS = [
+  // 限额/限流具名判决 ⇒ **可恢复**（换出口换组员就恢复，见 FREE_TIER_PATTERNS 上方三条实证）。
+  // 显式列出而非指望 message 里的 "rate limit" 字样：上游改文案时这层不能跟着失明
+  // （`FreeUsageLimitError` 的类名比它的 message 稳定得多）。
+  // GoUsageLimitError 与它同族（warp-pool/verdict.js:25 把两者并列），同样按出口计、同样可换。
+  /FreeUsageLimitError|GoUsageLimitError/i,
   /security_reject/i,
   /安全校验拒绝/,
   /isQueued/i,
