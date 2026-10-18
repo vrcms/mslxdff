@@ -33,6 +33,11 @@ function envInt(name, fallback) {
   const v = Number(process.env[name]);
   return Number.isInteger(v) && v > 0 ? v : fallback;
 }
+/** 允许 0 的数值 env（G1a 的逃生阀要认 0=关；envInt 的 `v>0` 会把 0 吞回默认值，那就是个假开关）。 */
+function envIntOrZero(name, fallback) {
+  const v = Number(process.env[name]);
+  return Number.isInteger(v) && v >= 0 ? v : fallback;
+}
 function isPreheatDisabled() {
   const raw = process.env.MSLXDFF_PREHEAT;
   if (raw === undefined || raw === null || raw === "") return false;
@@ -164,11 +169,12 @@ export function createUpstreamClient({
 
      // 首发请求（transport 已处理 network/429 等重试）
     let res;
+    const firstHeaders = buildHeaders(reqBody, { sessionId });
     try {
       res = await transport.request({
         url,
         method: "POST",
-        headers: buildHeaders(reqBody, { sessionId }),
+        headers: firstHeaders,
         body: reqBody,
         stream: reqBody.stream !== false,
         timeoutMs: connectTimeoutMs,
@@ -180,6 +186,52 @@ export function createUpstreamClient({
     }
     if (laneDebug) {
       try { console.error(`[free-lane] resp model=${body?.model} status=${res.status} ct=${res.headers?.get?.("content-type") || ""}`); } catch {}
+    }
+
+    // G1a（ADR-0061）**请求内**榨干 v6 出口池：free 模型撞出口池级 429 时，await dispatcher 换一个新
+    // 源地址、在**同一请求内**重发——额度按出口 IP 计，本节点 v6 池里的其余地址这一发就该用上，
+    // 而不是把 429 退回客户端/组长、留给"下一个请求"。
+    // 边界（探测实证过的硬约束）：① 仅头部即 429 才换（不碰半开的 200 流）；② 429 错误体已被
+    // transport 非流分支读尽，无连接泄漏；③ 每轮换的是 session 粘的那个槽（swap 原地换 addr/e.agent，
+    // 粘性映射不失效）；④ 次数上限防 429 风暴空烧认领地址；⑤ 无 rotateFor 的 dispatcher（直连/WARP）
+    // 条件短路——WARP 换出口=重注册设备 6s~600s，在请求内做只会白等，**设计上排除**。
+    if (freeLane && res.status === 429 && typeof transport.dispatcher?.rotateFor === "function") {
+      const maxRot = envIntOrZero("MSLXDFF_V6_INREQUEST_RETRIES", 3); // 0 = 关掉请求内换出口
+      let rotated = 0;
+      while (res.status === 429 && rotated < maxRot) {
+        let next = null;
+        try {
+          // 用**线上传的那个** session 头定位粘性槽（无 messages 时 buildHeaders 兜底成进程级
+          // FALLBACK_SESSION；传 null 会让 selector 轮转到别的槽，换掉一个没准真没耗尽的健康出口）
+          next = await transport.dispatcher.rotateFor(firstHeaders["x-opencode-session"] || "");
+        } catch { break; }
+        if (!next?.agent) break; // 换不到新出口（空池/全在换址/认领失败）⇒ 正常收场，不黑洞
+        rotated += 1;
+        if (laneDebug) {
+          try { console.error(`[free-lane] v6 in-request rotate #${rotated} ${next.from} -> ${next.addr} model=${body?.model}`); } catch {}
+        }
+        try {
+          res = await transport.request({
+            url,
+            method: "POST",
+            headers: buildHeaders(reqBody, { sessionId }),
+            body: reqBody,
+            stream: reqBody.stream !== false,
+            timeoutMs: connectTimeoutMs,
+            retry,
+            dispatcher: next.agent, // per-call 出口：绕开 extDispatcher 的旧槽选择
+          });
+        } catch (e) {
+          e._t = e._t || { attempts: [], waitMs: 0, totalMs: Math.round(performance.now() - t0) };
+          throw e;
+        }
+      }
+      if (rotated) {
+        res._t = { ...(res._t || {}), egressRotations: rotated, egressRecovered: res.status < 400 };
+        try {
+          appendFile(freeAnonLogFile(), `${fmtShanghaiYMDHMS(new Date())} model=${body?.model} v6-in-request-rotations=${rotated} finalStatus=${res.status}\n`).catch(() => {});
+        } catch {}
+      }
     }
 
     // 匿名兜底：仅非 anonFirst 时，public 429 + free 模型才走 hermes 空头重试

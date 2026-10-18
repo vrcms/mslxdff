@@ -195,6 +195,30 @@ export function createV6Dispatcher({
     /** 手动换某个槽的源地址（供运维/测试；正常路径由配额信号触发）。 */
     swap,
 
+    /**
+     * G1a（ADR-0061）：**请求内**换出口——撞出口池级 429 后由 upstream.js await 这一发，
+     * 把该会话粘的槽换新源地址，返回**换址完成后**的新 Agent 供同一请求立刻重发。
+     * 与 onTap 的 fire-and-forget 换址（只救下一个请求）不同，这里救的是**在飞请求**。
+     * 仅 v6 池提供本方法：换源地址成本≈0（bind/ip addr add）；WARP 的换出口=重注册设备
+     * （6s~600s，会被 CF 限流），绝不允许在请求内做——白等 N 分钟换不来更快收场。
+     * 空池/全槽换址中/该槽被并发占走 ⇒ 返回 null（调用方正常收场，绝不黑洞）。
+     * 粘性安全：swap 是**原地**换 e.addr/e.agent（index 不变），session→slot 映射不失效。
+     * @param {string} sessionKey x-opencode-session 值（无 key 时由轮转游标挑槽）
+     * @returns {Promise<null | {agent: object, addr: string, from: string}>}
+     */
+    async rotateFor(sessionKey = "") {
+      if (!list.length) return null;
+      const avail = availableIndexes();
+      if (!avail.length) return null;
+      const index = selector.pick(avail, strategy === "session" ? sessionKey : "");
+      const e = list[index];
+      if (!e) return null;
+      const r = await swap(index, { kind: "in-request-rotate", status: 429, forced: true });
+      if (r.skipped) return null;
+      const slot = list[index];
+      return { agent: slot.agent, addr: slot.addr, from: r.from };
+    },
+
     /** 只读快照（含已退休出口的最终计数——"换址到底有没有换来新额度"看这里）。 */
     stats() {
       const t = now();

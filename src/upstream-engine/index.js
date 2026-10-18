@@ -46,8 +46,10 @@ export function createUpstreamEngine(opts = {}) {
         const via = useResponses ? "@ai-sdk/openai · responses" : "@ai-sdk/openai-compatible · chat";
         try { console.error(`[upstream-engine] sdk 引擎生效（${via}）`); } catch {}
       }
-      // 保留 legacy 的匿名重试语义（仅 !anonFirst 配置下存在）
-      if (res.status === 429 && !anonFirst && isFreeModel(body?.model)) return legacy.chat(body);
+      // 保留 legacy 的匿名重试语义（仅 !anonFirst 配置下存在）；G1a 起 free-429 的**请求内 v6 换出口**
+      // 也走这条委派——重试环在 legacy.chat 里，SDK 通道撞 429 不委派就等于把换出口的额度白白留给下一发。
+      // 无 rotateFor 的 dispatcher（直连/WARP）且 anonFirst 时维持旧行为（不重复打流量）。
+      if (res.status === 429 && isFreeModel(body?.model) && (!anonFirst || typeof dispatcher?.rotateFor === "function")) return legacy.chat(body);
       return res;
     } catch (e) {
       if (e && e._sdkLoadFailed) {
