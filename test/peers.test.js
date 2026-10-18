@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPeersService, normalizePeerUrl } from "../src/peers.js";
-import { stripCallerBoundReasoning, PEER_BODY_TIMEOUT_MS } from "../src/routes/peers.js";
+import { stripCallerBoundReasoning, PEER_BODY_TIMEOUT_MS, PEER_HEADERS_TIMEOUT_MS } from "../src/routes/peers.js";
 import { createAutoSelector } from "../src/auto.js";
 import { startServer } from "../src/server.js";
 import { createRouter } from "../src/routes.js";
@@ -985,4 +985,12 @@ test("peer body timeout outlives any SSE silent gap (must not kill a thinking re
   // 实测：muse-spark 首块后 ~31s 静默，旧 30s bodyTimeout 把组内中继活流掐成 terminated。
   // 这里锁死"不能回退到小值"：undici 层只做最后兜底，掐流交给应用层首块/总时长策略。
   assert.equal(PEER_BODY_TIMEOUT_MS, 120_000);
+});
+
+test("peer headers timeout 必须与 bodyTimeout 同档（组员压头等首块，30s 会掐成 fetch failed）", () => {
+  // 实测：组员节点首块前不 flush，undici 的 headersTimeout(原 30s) 会在组建还没吐头时
+  // 把连接掐成 `fetch failed (UND_ERR_HEADERS_TIMEOUT)` —— 三个组员全部精确卡 ~30620ms。
+  // 提到 120s 不会真挂 120s：真闸门是 peerStageCtx 的 45s 阶段总预算，undici 只做最后兜底。
+  assert.equal(PEER_HEADERS_TIMEOUT_MS, 120_000, "不得回退到 30s（组员永远等不到首块）");
+  assert.equal(PEER_HEADERS_TIMEOUT_MS, PEER_BODY_TIMEOUT_MS, "两档必须同口径");
 });

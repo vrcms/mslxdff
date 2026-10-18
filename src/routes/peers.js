@@ -5,7 +5,6 @@ import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
 import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 
-const PEER_TIMEOUT_MS = 30_000;
 // peer 阶段总预算：三批候选（ordered / orderedByLastError / coolingByLastError）共享同一个
 // 截止时间，而不是每批各吃满一次等头超时。实测最坏路径是三批串行各 30s（≈90s），
 // 客户端表现为"随机转圈"；预算到点即停，把余下时间还给本地兜底。
@@ -20,6 +19,15 @@ const DEFAULT_PEER_CONNECT_TIMEOUT_MS = 3_000;
 import { summarizeRequest } from "../model-trace.js";
 const PEER_BODY_TIMEOUT_MS = 120_000;
 export { PEER_BODY_TIMEOUT_MS };
+
+// undici dispatcher 的「收到响应头」时限（headersTimeout）。**必须与 bodyTimeout 同档**：组员节点
+// 自己也压着响应头等首块（ADR-0043 首块前不 flush），undici 层若是 30s，连接会在组建还没吐头时被
+// 掐成 `fetch failed (UND_ERR_HEADERS_TIMEOUT)` —— 实测三个组员全部精确卡 ~30620ms abort，组网
+// 兜底退化成「每次白等 30s」（BUG-1 的 dispatcher 层残留：当时只改了应用层 abort 定时器，漏了这行）。
+// 提到 120s 不会让请求真的挂 120s：真正的闸门是应用层 peer 阶段总预算（peerStageCtx，缺省 45s），
+// 到点即 abort；undici 只做最后兜底，与本文件 PEER_BODY_TIMEOUT_MS / forwardToPeer 的等待上限同口径。
+const PEER_HEADERS_TIMEOUT_MS = PEER_BODY_TIMEOUT_MS;
+export { PEER_HEADERS_TIMEOUT_MS };
 
 function peerConnectTimeoutMs() {
   const n = Number(process.env.MSLXDFF_PEER_CONNECT_TIMEOUT_MS);
@@ -59,7 +67,7 @@ export function getPeerDispatcher() {
   try {
     peerDispatcher = new Agent({
       connect: { timeout: peerConnectTimeoutMs() },
-      headersTimeout: PEER_TIMEOUT_MS,
+      headersTimeout: PEER_HEADERS_TIMEOUT_MS,
       bodyTimeout: PEER_BODY_TIMEOUT_MS,
       keepAliveTimeout: 30_000,
       keepAliveMaxTimeout: 60_000,
