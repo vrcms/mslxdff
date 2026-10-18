@@ -128,6 +128,30 @@ test("claimRaccoonLoginReward: 上游不给 points 但账单确认到账 → 回
   assert.equal(r.points, RACCOON_LOGIN_REWARD_POINTS);
 });
 
+test("claimRaccoonLoginReward: 上游回 granted:false → 判已领，绝不误报成「未到账」（真实响应形状）", async () => {
+  // 实测响应：`{"code":0,"message":"success","data":{"granted":false,"popup":null}}`
+  // 重度使用的号账单会被对话消耗刷满、翻不到那条陈年 reward_grant，此时只信账单会把它
+  // 误判成 phantom（上游回执成功但未到账）—— 这是踩过的坑，必须靠 granted 兜住。
+  const urls = [];
+  const r = await claimRaccoonLoginReward({
+    credential: CRED,
+    fetchImpl: billFetcher({ before: [], after: [], urls, grant: { code: 0, message: "success", data: { granted: false, popup: null } } }),
+  });
+  assert.equal(r.alreadyClaimed, true, "granted:false 就是「本号已发过」的权威判据");
+  assert.equal(r.phantom, undefined, "不得误报成 phantom");
+  assert.equal(r.points, RACCOON_LOGIN_REWARD_POINTS);
+});
+
+test("claimRaccoonLoginReward: granted:true 且账单确认到账 → 真到账，按 popup.points 报数", async () => {
+  const after = [{ ...REWARD, created_at: "2026-10-10T02:00:00Z" }];
+  const r = await claimRaccoonLoginReward({
+    credential: CRED,
+    fetchImpl: billFetcher({ before: [], after, grant: { code: 0, data: { granted: true, popup: { source: "desktop_login", points: 3000 } } } }),
+  });
+  assert.equal(r.claimed, true);
+  assert.equal(r.points, 3000);
+});
+
 test("claimRaccoonLoginReward: 账单查询挂了 → 降级为未确认，不抛也不谎报", async () => {
   const fetchImpl = async (url) => {
     if (String(url).includes("/bills")) throw new Error("network down");

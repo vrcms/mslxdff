@@ -126,7 +126,7 @@ async function readBills(opts) {
 /**
  * 领取「桌面端登录奖励」（每号一次性）。返回三种非抛错结果之一：
  * - `{ claimed: true,  points }`  本次真到账（账单里出现了登录奖励那笔）
- * - `{ claimed: false, alreadyClaimed: true, points }`  历史已领，**且不会去碰写端点**
+ * - `{ claimed: false, alreadyClaimed: true, points }`  历史已领（账单查到，或上游回 `granted:false`）
  * - `{ claimed: false, phantom: true,  points: 0 }`  上游回了 code:0 但账单没有这笔 —— 虚回，如实报未到账
  * - `{ claimed: false, unverified: true, points: 0 }`  账单查不动，无法确认到账（不猜、不谎报）
  * grant 请求本身失败（业务码非 0）且账单也查不到已领 → 抛错（如实透出）。
@@ -145,7 +145,17 @@ export async function claimRaccoonLoginReward({ credential, fetchImpl = fetch, e
     envelope = { code: -1, message: error?.message ?? String(error), status: 0, data: undefined };
   }
 
-  // 无论上游怎么说，一律回账单复查 —— 这是唯一可信的到账凭据。
+  // 上游用 `data.granted` 直接回答「这次到底发没发」—— 这是比账单更权威的判据，优先采信。
+  // `granted === false` ⇒ 本号此前已发过（一次性礼包），**不是「未到账」**。
+  // 为什么不能只靠账单：重度使用的号（如 daemon 正在跑的那个）账单会被「对话消耗」刷满，
+  //   分页窗口里根本翻不到那条陈年 reward_grant —— 此时只信账单就会把「早就领过」
+  //   误报成「上游回执成功但账单查不到 → 未到账」（实测踩到，教训）。
+  // 官方前端同款判据：granted 为真才弹「积分已到账」，为假就静默（见 app.asar grantDesktopLoginPoints 调用点）。
+  if (envelope?.code === 0 && envelope.data?.granted === false) {
+    return { claimed: false, alreadyClaimed: true, points: RACCOON_LOGIN_REWARD_POINTS };
+  }
+
+  // 未给 granted 判据（如上游老版本/测试桩）时回退账单复查 —— 到账凭据仍以账单为准。
   const after = await readBills(opts);
   const landed = after === undefined ? undefined : findLoginRewardInBills(after);
   if (landed) {
