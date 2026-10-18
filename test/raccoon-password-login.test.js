@@ -1,6 +1,7 @@
 // raccoon 密码登录（协议层 + CLI 分派）单测。全程注入 fetchImpl 与临时目录，不碰真实上游。
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createDecipheriv } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,15 +10,41 @@ import {
   normalizeNationCode,
   normalizePhone,
 } from "../src/providers/raccoon/password-login.js";
-import { raccoonPasswordLoginUrl, RACCOON_PASSWORD_ERRORS } from "../src/providers/raccoon/const.js";
+import { raccoonEncryptField } from "../src/providers/raccoon/crypto.js";
+import {
+  RACCOON_PASSWORD_ENC_KEY,
+  RACCOON_PASSWORD_ERRORS,
+  raccoonPasswordLoginUrl,
+} from "../src/providers/raccoon/const.js";
 import { handleRaccoonLogin } from "../src/cli/commands/provider/raccoon-login.js";
 
 const jsonRes = (obj, status = 200) => ({ ok: status < 400, status, json: async () => obj });
 const tmpDir = () => mkdtempSync(join(tmpdir(), "mslxdff-raccoon-pw-"));
 
-test("password-login: 端点用 IAM 明文通道，不是需要加密手机号的 web 通道", () => {
-  assert.equal(raccoonPasswordLoginUrl(), "https://xiaohuanxiong.com/api/iam/v1/auth/login/password/phone");
-  assert.ok(!raccoonPasswordLoginUrl().includes("/api/web/"), "web 通道要求手机号加密（100003），不得走它");
+/** 解开 raccoonEncryptField 的输出，用于断言「出站确实是可还原的密文」。 */
+function decField(b64, keyStr = RACCOON_PASSWORD_ENC_KEY) {
+  const raw = Buffer.from(b64, "base64");
+  const d = createDecipheriv("aes-128-cfb", Buffer.from(keyStr, "utf8"), raw.subarray(0, 16));
+  return Buffer.concat([d.update(raw.subarray(16)), d.final()]).toString("utf8");
+}
+
+test("password-login: 端点走官方同款 web 通道（有 refresh_token，可续期）", () => {
+  assert.equal(raccoonPasswordLoginUrl(), "https://xiaohuanxiong.com/api/web/auth/v1/login_with_password");
+  assert.ok(raccoonPasswordLoginUrl().endsWith("/api/web/auth/v1/login_with_password"));
+});
+
+test("crypto: AES-128-CFB 往返可还原，IV 每次随机（密文不重复）", () => {
+  const a = raccoonEncryptField("13800138000");
+  const b = raccoonEncryptField("13800138000");
+  assert.equal(decField(a), "13800138000");
+  assert.equal(decField(b), "13800138000");
+  assert.notEqual(a, b, "每次调用必须换 IV —— 否则同一手机号密文恒定，可被重放/关联");
+  assert.equal(Buffer.from(a, "base64").length, 16 + Buffer.byteLength("13800138000"), "CFB 是流模式，密文长度恒等于明文");
+  assert.equal(decField(raccoonEncryptField("")), "", "空串也应可还原（不做 padding）");
+});
+
+test("crypto: key 必须是 16 字节，否则当场报错而不是产出坏密文", () => {
+  assert.throws(() => raccoonEncryptField("x", "too-short"), /16 字节/);
 });
 
 test("password-login: nation_code 归一 —— 收 86/+86/数字，拒空与超长", () => {
@@ -36,7 +63,7 @@ test("password-login: 手机号归一去掉空格/连字符/括号", () => {
   assert.equal(normalizePhone("(138)00138000"), "13800138000");
 });
 
-test("password-login: 成功路径 —— 出站体是明文三字段，回来的是 credential 形状", async () => {
+test("password-login: 出站 phone/password 都是密文，且可还原成归一后的值", async () => {
   let seenUrl = "";
   let seenBody = null;
   let seenHeaders = null;
@@ -51,14 +78,18 @@ test("password-login: 成功路径 —— 出站体是明文三字段，回来�
         // 造一个带 exp 的 JWT，验证 expires_at 由 token 推出来
         const payload = Buffer.from(JSON.stringify({ exp: 1893456000 })).toString("base64url");
         return jsonRes({
-          code: "OK",
+          code: 0,
           data: { access_token: `h.${payload}.s`, refresh_token: "rt", office_identity: "personal" },
         });
       },
     },
   );
-  assert.equal(seenUrl, "https://xiaohuanxiong.com/api/iam/v1/auth/login/password/phone");
-  assert.deepEqual(seenBody, { nation_code: "86", phone: "13800138000", password: "pw-secret" });
+  assert.equal(seenUrl, "https://xiaohuanxiong.com/api/web/auth/v1/login_with_password");
+  assert.equal(seenBody.nation_code, "86", "nation_code 是明文数字字符串");
+  assert.notEqual(seenBody.phone, "13800138000", "手机号必须加密出站（明文会被判格式错）");
+  assert.notEqual(seenBody.password, "pw-secret", "密码必须加密出站");
+  assert.equal(decField(seenBody.phone), "13800138000", "密文可还原成去空格后的手机号");
+  assert.equal(decField(seenBody.password), "pw-secret", "密文可还原成原密码");
   assert.equal(seenHeaders["Content-Type"], "application/json");
   assert.ok(!("Authorization" in seenHeaders), "登录端点匿名可达，不该带 Authorization");
   assert.equal(cred.access_token, `h.${Buffer.from(JSON.stringify({ exp: 1893456000 })).toString("base64url")}.s`);
@@ -67,7 +98,21 @@ test("password-login: 成功路径 —— 出站体是明文三字段，回来�
   assert.equal(cred.expires_at, String(1893456000 * 1000), "expires_at 由 JWT exp 推出（秒→毫秒）");
 });
 
-test("password-login: 旧 web 信封 code:0 也算成功（两代兼容）", async () => {
+test("password-login: web 端点数字码 200004 → 人话（真实端点即此，非字符串码）", async () => {
+  await assert.rejects(
+    () => loginRaccoonWithPassword(
+      { phone: "18943484172", password: "wrong" },
+      { env: {}, fetchImpl: async () => jsonRes({ code: 200004, message: "phone_or_password_verify_error", details: "phone or password is wrong" }, 400) },
+    ),
+    (err) => {
+      assert.match(err.message, /手机号或密码不正确/);
+      assert.ok(!err.message.includes("phone_or_password_verify_error"), "不得把英文码当人话透出");
+      return true;
+    },
+  );
+});
+
+test("password-login: 信封 code:0 判成功（web 通道口径）", async () => {
   const cred = await loginRaccoonWithPassword(
     { phone: "13800138000", password: "x" },
     { env: {}, fetchImpl: async () => jsonRes({ code: 0, data: { access_token: "tok" } }) },
@@ -140,21 +185,23 @@ test("CLI: `login --password` 转交密码链路，且不改动扫码路径的�
       skipReward: true,
       fetchImpl: async (url, init) => {
         calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
-        if (String(url).includes("login/password/phone")) {
-          return jsonRes({ code: "OK", data: { access_token: "tok-pw", refresh_token: "rt" } });
+        if (String(url).includes("login_with_password")) {
+          return jsonRes({ code: 0, data: { access_token: "tok-pw", refresh_token: "rt" } });
         }
-        if (String(url).includes("iam/confirm")) return jsonRes({ code: "OK" });
-        if (String(url).includes("user_info")) return jsonRes({ code: "OK", data: { id: "u-pw", name: "小明" } });
-        return jsonRes({ code: "OK", data: {} });
+        if (String(url).includes("iam/confirm")) return jsonRes({ code: 0 });
+        if (String(url).includes("user_info")) return jsonRes({ code: 0, data: { id: "u-pw", name: "小明" } });
+        return jsonRes({ code: 0, data: {} });
       },
       password: "pw-from-deps",
       log: (m) => logs.push(String(m)),
       exit: (code) => { throw new Error(`unexpected exit(${code})`); },
     });
     assert.equal(ok, true);
-    const pwCall = calls.find((c) => c.url.includes("login/password/phone"));
+    const pwCall = calls.find((c) => c.url.includes("login_with_password"));
     assert.ok(pwCall, "必须打过密码端点");
-    assert.deepEqual(pwCall.body, { nation_code: "86", phone: "13800138000", password: "pw-from-deps" });
+    assert.equal(pwCall.body.nation_code, "86");
+    assert.equal(decField(pwCall.body.phone), "13800138000", "手机号加密出站且可还原");
+    assert.equal(decField(pwCall.body.password), "pw-from-deps", "密码加密出站且可还原");
     assert.ok(calls.some((c) => c.url.includes("iam/confirm")), "登录后必须确认会话（否则业务端点全 400 200901）");
     const text = logs.join("\n");
     assert.match(text, /登录成功/);

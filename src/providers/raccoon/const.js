@@ -45,27 +45,42 @@ export const raccoonQrPollUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/au
 export const raccoonQrCancelUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/mp/qrcode`;
 
 /**
- * 密码登录（手机号 + 密码）。**同一 IAM 族的明文端点**。
- * ⚠ 官方前端（app.asar module 726xx → `loginWithPassword`）打的是旧 web 通道
- *   `POST /api/web/auth/v1/login_with_password`，但那条**要求手机号加密**：
- *   明文发送回 `400 100003 params_encryted_error: param phone encrypted error`。
- *   本机实测 IAM 同族端点收**明文**三字段并直通业务校验（错密码回
- *   `401 AUTH_ACCOUNT_OR_PASSWORD_INVALID`），故走这条 —— 不需要复刻官方加密公钥。
- * body 契约（实测逐条确认）：`{ nation_code: "86", phone, password }`
- *   · nation_code 必须是**字符串**（数字 86 与 `+86` 中的数字形式被判 body invalid；`"+86"` 字符串可用）
- *   · 缺 nation_code / 空 phone / 空 password → `400 COMMON_INVALID_ARGUMENT`
+ * 密码登录（手机号 + 密码）—— **走官方前端同款 web 端点，参数须 AES 加密**。
+ *
+ * 端点选择（2026-10-18 真实账号实测三选一）：
+ *   `POST /api/web/auth/v1/login_with_password`（官方前端 `loginWithPassword` 同款）
+ *     → 200 `{code:0, data:{access_token, refresh_token}}` ✅ 与 refresh/chat/credits 同族，且给 refresh_token
+ *   `POST /api/iam/v1/auth/login/password/phone`
+ *     → 200 `{code:"OK", data:{access_token, token_type, expires_at}}` —— **无 refresh_token**，
+ *       token 一过期就得重新输密码，对多号长期使用是硬伤，故弃用。
+ * 两处都要求 phone/password **加密**（算法与 key 见 `crypto.js`）；明文一律回
+ * `AUTH_ACCOUNT_OR_PASSWORD_INVALID`（用「密码错」的口径掩盖「格式错」，极难自查）。
+ *
+ * body 契约：`{ nation_code: "86", phone: <加密>, password: <加密> }`
+ *   · nation_code 是**明文数字字符串**（数字 86 被判 body invalid）
+ *   · phone / password 各自 Base64(IV ‖ AES-128-CFB 密文) —— 见 crypto.js
  * ⚠ 密码只在此处作为请求体出现，**绝不落盘、绝不进日志**。
  */
-export const raccoonPasswordLoginUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/login/password/phone`;
+export const raccoonPasswordLoginUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/login_with_password`;
+
+/**
+ * 登录参数加密 key（AES-128-CFB）。**上游公开常量**，打包在任意客户端里（app.asar 原文）。
+ * 照抄它只为对齐协议；传输保密性来自 HTTPS，不来自这个 key。
+ */
+export const RACCOON_PASSWORD_ENC_KEY = "senseraccoon2023";
 
 /**
  * 密码登录失败码 → 人话。命中即抛「可操作」的错误，未命中一律透出上游 message。
- * 表里只放**实测见过**的码，不臆造（上游加了新码就走 default 兜底）。
+ * 表里只放**本机实测见过**的码，不臆造（上游加了新码就走 default 兜底透出原文）。
+ *   200004                          —— web 通道（本项目所用）实测：错误密码回
+ *                                      `{code:200004,message:"phone_or_password_verify_error"}`；
+ *                                      该 message 是英文码不是人话，必须靠本表翻译。
+ *   AUTH_ACCOUNT_OR_PASSWORD_INVALID —— IAM 通道同义码（本项目已不用该端点，保留以防回退）。
+ *   COMMON_INVALID_ARGUMENT          —— 缺 nation_code/空字段实测（IAM 通道）。
  */
 export const RACCOON_PASSWORD_ERRORS = {
+  200004: "手机号或密码不正确",
   AUTH_ACCOUNT_OR_PASSWORD_INVALID: "手机号或密码不正确",
-  AUTH_ACCOUNT_NOT_FOUND: "该手机号未注册过小浣熊（先去官网注册，或改用扫码登录）",
-  AUTH_ACCOUNT_LOCKED: "账号已被锁定，请到官网处理后再试",
   COMMON_INVALID_ARGUMENT: "登录参数不完整（需要 国家码 + 手机号 + 密码）",
 };
 
