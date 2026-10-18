@@ -11,12 +11,16 @@ import {
 } from "./const.js";
 import { effortFromBody } from "../../thinking-effort.js";
 import { RACCOON_CHAT_ACCEPT, raccoonAuthHeaders } from "./headers.js";
+import { confirmRaccoonSession } from "./login.js";
 import {
   aggregateRaccoonSse,
   classifyRaccoonFailure,
   isRaccoonSseContentType,
   raccoonErrorResponse,
 } from "./sse.js";
+
+/** 上游「新会话未确认」闸门码（2026-10-18 取证）：先 POST /iam/confirm 再重试。 */
+const IAM_CONFIRM_REQUIRED = 200901;
 
 /** 首帧窥探上限：超过这个字节数还没形成完整 SSE 帧就不再等（避免慢首包把请求卡住）。 */
 const PEEK_MAX_BYTES = 8192;
@@ -144,21 +148,33 @@ export async function forwardRaccoonChat({
   const wireBody = buildRaccoonWireBody(body, { effort, env });
   const modelId = wireBody.model;
 
-  let res;
-  try {
-    res = await fetchImpl(raccoonChatUrl(), {
-      method: "POST",
-      headers: raccoonAuthHeaders(credential, { accept: RACCOON_CHAT_ACCEPT, env }),
-      body: JSON.stringify(wireBody),
-      signal: timeoutSignal(timeoutMs),
-    });
-  } catch (e) {
-    return raccoonErrorResponse({ kind: "server", message: String(e?.message || e).slice(0, 160) });
+  // ⚠ 新会话未确认闸门（2026-10-18 上游改版，与扫码签发同批）：新登录的 token 属于「未确认会话」，
+  //   任何业务端点都先回 `400 {code:200901 iam_confirm_required}`，必须先 POST /iam/confirm 确认一次才放行。
+  //   桌面端旧 token 早已确认故无感 —— 这正是「同一家、旧号能用、新登的号全 400、重登也没用」的根因。
+  //   官方前端做法是「撞 200901 → confirm → 重试原请求」，此处对齐：至多重试一次，防打旋。
+  let res = null;
+  let failPayload = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetchImpl(raccoonChatUrl(), {
+        method: "POST",
+        headers: raccoonAuthHeaders(credential, { accept: RACCOON_CHAT_ACCEPT, env }),
+        body: JSON.stringify(wireBody),
+        signal: timeoutSignal(timeoutMs),
+      });
+    } catch (e) {
+      return raccoonErrorResponse({ kind: "server", message: String(e?.message || e).slice(0, 160) });
+    }
+    if (res.ok) break;
+    failPayload = await res.json().catch(() => null);
+    if (attempt === 0 && res.status === 400 && Number(failPayload?.code) === IAM_CONFIRM_REQUIRED) {
+      if (await confirmRaccoonSession(credential, { fetchImpl, env })) continue; // 确认成功 → 重试一次
+    }
+    break;
   }
 
   if (!res.ok) {
-    const payload = await res.json().catch(() => null);
-    return raccoonErrorResponse({ ...classifyRaccoonFailure(res.status, payload), model: modelId });
+    return raccoonErrorResponse({ ...classifyRaccoonFailure(res.status, failPayload), model: modelId });
   }
 
   // 业务错误惯例：HTTP 200 + JSON 信封（code 非 0）→ 同样按错误分类，不谎报成功

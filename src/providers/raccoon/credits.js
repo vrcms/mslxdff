@@ -14,6 +14,7 @@ import {
   raccoonLoginGrantUrl,
 } from "./const.js";
 import { raccoonAuthHeaders } from "./headers.js";
+import { confirmRaccoonSession } from "./login.js";
 import { parseRaccoonEnvelope, raccoonEnvelopeText } from "./envelope.js";
 
 const num = (v) => {
@@ -22,20 +23,33 @@ const num = (v) => {
   return undefined;
 };
 
+/** 上游「新会话未确认」闸门码：先 POST /iam/confirm 再重试一次（与 chat.js 同款兜底）。 */
+const IAM_CONFIRM_REQUIRED = 200901;
+
 async function request(url, { credential, fetchImpl = fetch, env = process.env, method = "GET", body, timeoutMs = RACCOON_REQUEST_TIMEOUT_MS } = {}) {
-  const res = await fetchImpl(url, {
-    method,
-    headers: raccoonAuthHeaders(credential, { env }),
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  let parsed;
-  try {
-    parsed = await res.json();
-  } catch {
-    throw new Error(`raccoon: 响应不是 JSON（HTTP ${res.status}）`);
+  const once = async () => {
+    const res = await fetchImpl(url, {
+      method,
+      headers: raccoonAuthHeaders(credential, { env }),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    let parsed;
+    try {
+      parsed = await res.json();
+    } catch {
+      throw new Error(`raccoon: 响应不是 JSON（HTTP ${res.status}）`);
+    }
+    return { res, envelope: parseRaccoonEnvelope(parsed, res.status) };
+  };
+  let { res, envelope } = await once();
+  // 未确认会话闸门：确认一次后重试（老号 / CLI 直连都可能撞上，登录时已确认的号不会走到这）
+  if (res.status === 400 && Number(envelope.code) === IAM_CONFIRM_REQUIRED) {
+    if (await confirmRaccoonSession(credential, { fetchImpl, env })) {
+      ({ res, envelope } = await once());
+    }
   }
-  return parseRaccoonEnvelope(parsed, res.status);
+  return envelope;
 }
 
 /** 余额五分项（缺项即省略，合计优先取上游的 available_points）。 */

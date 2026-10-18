@@ -8,6 +8,7 @@ import {
   RACCOON_LOGIN_POLL_INTERVAL_MS,
   RACCOON_LOGIN_TIMEOUT_MS,
   RACCOON_REQUEST_TIMEOUT_MS,
+  raccoonIamConfirmUrl,
   raccoonQrCancelUrl,
   raccoonQrCreateUrl,
   raccoonQrPageUrl,
@@ -222,6 +223,35 @@ export async function refreshRaccoonCredential(credential, opts = {}) {
     refresh_token: nextRefresh,
     ...(expMs === undefined ? {} : { expires_at: String(expMs) }),
   };
+}
+
+/**
+ * IAM 会话确认（POST /api/web/auth/v1/iam/confirm，body `{}`，带 Bearer）。
+ *
+ * 2026-10-18 故障取证：上游新登录的会话未确认前，业务端点一律回
+ * `400 {"code":200901,"message":"iam_confirm_required"}`（桌面端旧会话早已确认，
+ * 所以官方 App 无感）。官方前端（c6.js）的处理是「撞 200901 → confirm → 重试原请求」，
+ * 我们对齐同款：chat.js 兜底重试 + 登录成功后主动确认一次。
+ * 返回是否确认成功；任何失败都吞掉返回 false（由调用方的懒重试兜底，绝不阻断主流程）。
+ */
+export async function confirmRaccoonSession(credential, { fetchImpl = fetch, env = process.env, timeoutMs = RACCOON_REQUEST_TIMEOUT_MS } = {}) {
+  try {
+    const res = await fetchImpl(raccoonIamConfirmUrl(), {
+      method: "POST",
+      headers: raccoonAuthHeaders(credential, { env }),
+      body: "{}",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    let parsed = null;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = null;
+    }
+    return res.ok && isRaccoonOk(parseRaccoonEnvelope(parsed, res.status));
+  } catch {
+    return false;
+  }
 }
 
 /** 取用户信息（uid/昵称/手机号/office_identity）；任何失败都返回空对象，不阻断登录。 */

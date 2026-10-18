@@ -23,6 +23,14 @@ export const RACCOON_IAM_PREFIX = "/api/iam/v1";
 export const raccoonModelCatalogUrl = () => `${RACCOON_ORIGIN}${RACCOON_LLM_PREFIX}/model_catalog`;
 export const raccoonChatUrl = () => `${RACCOON_ORIGIN}${RACCOON_LLM_PREFIX}/chat/completions`;
 export const raccoonRefreshUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/refresh`;
+/**
+ * IAM 会话确认端点（2026-10-18 故障取证 + 官方前端 c6.js 实证）。
+ * 上游把网页/IAM 登录的会话划入「先确认再放行」：新登录的 token 打业务端点回
+ * `400 {"code":200901,"message":"iam_confirm_required"}`，先带 Bearer POST 本端点
+ * （body `{}` 即可）确认会话后业务端点恢复 200。官方前端的处理同样是
+ * 「撞 200901 → confirm(true) → 重试原请求」。
+ */
+export const raccoonIamConfirmUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/iam/confirm`;
 export const raccoonUserInfoUrl = () => `${RACCOON_ORIGIN}${RACCOON_AUTH_PREFIX}/user_info`;
 export const raccoonBalanceUrl = () => `${RACCOON_ORIGIN}${RACCOON_POINTS_PREFIX}/balance`;
 export const raccoonBillsUrl = (limit = 50) =>

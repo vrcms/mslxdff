@@ -9,6 +9,7 @@ import { compatFetch } from "../../../compat.js";
 import {
   buildQrUrl,
   cancelQrSession,
+  confirmRaccoonSession,
   createQrSession,
   fetchRaccoonUserInfo,
   pollQrLogin,
@@ -93,6 +94,10 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   }
 
   const credential = out.credential;
+  // 新登录的会话是「未确认」状态：不先 POST /iam/confirm，此后所有业务端点（含下面的领奖励、
+  // 以及 daemon 的 chat）都会撞 `400 code 200901 iam_confirm_required`。登录时当场确认一次，
+  // 让落盘的凭据从一开始就是可用的；确认失败不阻断（chat.js 有懒重试兜底），只在末尾如实提示。
+  const confirmed = await confirmRaccoonSession(credential, { fetchImpl });
   const info = await fetchRaccoonUserInfo(credential, { fetchImpl });
   const uid = resolveRaccoonUid({
     userId: info.userId,
@@ -130,6 +135,7 @@ export async function handleRaccoonLogin(id, sub, rest = [], deps = {}) {
   log("");
   log(`✅ 登录成功！uid=${uid}  昵称=${info.name || "(空)"}  token=${raccoonTokenFingerprint(credential.access_token)}…`);
   log(`   凭据: ${saved.file}`);
+  if (!confirmed) log("   ⚠ 会话确认（iam/confirm）暂未成功 —— 不影响使用（调用时会自动重试确认），若持续报错请重跑 login");
   if (allow.added.length) log(`   allowlist 已补齐 ${allow.added.length} 个模型：${allow.added.join(", ")}`);
   if (reward) {
     const line = {

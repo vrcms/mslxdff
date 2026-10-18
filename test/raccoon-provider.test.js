@@ -46,6 +46,57 @@ const drain = async (stream) => {
   return out;
 };
 
+test("IAM 确认闸门: chat 首撞 200901 → 自动 iam/confirm → 重试成功（2026-10-18 上游改版）", async () => {
+  const calls = [];
+  const res = await forwardRaccoonChat({
+    body: { model: "sn-x", messages: [{ role: "user", content: "hi" }] },
+    credential: { access_token: "tok-new" },
+    fetchImpl: async (url, init) => {
+      calls.push(String(url));
+      if (url.includes("/iam/confirm")) return jsonRes({ code: 0, message: "success" });
+      // chat 端点：第一次判会话未确认，确认后的重试放通
+      if (calls.filter((u) => u.includes("chat/completions")).length === 1) {
+        return jsonRes({ code: 200901, message: "iam_confirm_required", details: "IAM confirmation required" }, 400);
+      }
+      return jsonRes({ choices: [{ message: { content: "ok-after-confirm" } }] });
+    },
+  });
+  assert.equal(res.status, 200, "确认重试后应成功，不得把 200901 透出给客户端");
+  assert.ok(calls.some((u) => u.includes("/iam/confirm")), "必须打过确认端点");
+  assert.equal(calls.filter((u) => u.includes("chat/completions")).length, 2, "chat 恰好重试一次");
+  const text = await res.text();
+  assert.ok(text.includes("ok-after-confirm"));
+});
+
+test("IAM 确认闸门: confirm 失败时不重试、如实透出 400（且不谎报成 401 登录失效）", async () => {
+  const res = await forwardRaccoonChat({
+    body: { model: "sn-x", messages: [{ role: "user", content: "hi" }] },
+    credential: { access_token: "tok-new" },
+    fetchImpl: async (url) => {
+      if (url.includes("/iam/confirm")) return jsonRes({ code: "SOMETHING_ELSE" }, 500);
+      return jsonRes({ code: 200901, message: "iam_confirm_required" }, 400);
+    },
+  });
+  assert.equal(res.status, 400);
+  assert.notEqual(res.headers.get("x-mslxdff-raccoon-kind"), "auth", "200901 不是登录态失效，不得标 auth（否则工厂会给号记冷却并指引重登，而重登治不了它）");
+});
+
+test("IAM 确认闸门: quota（credits.request）同样撞闸自动确认重试", async () => {
+  const { fetchRaccoonBalance } = await import("../src/providers/raccoon/credits.js");
+  let balanceHits = 0;
+  const envelope = await fetchRaccoonBalance({
+    credential: { access_token: "tok-new" },
+    fetchImpl: async (url) => {
+      if (String(url).includes("/iam/confirm")) return jsonRes({ code: 0 });
+      balanceHits += 1;
+      if (balanceHits === 1) return jsonRes({ code: 200901, message: "iam_confirm_required" }, 400);
+      return jsonRes({ code: 0, data: { available_points: 100, daily_points: 10 } });
+    },
+  });
+  assert.equal(envelope.total, 100);
+  assert.equal(balanceHits, 2, "确认余额恰好重试一次");
+});
+
 test("工厂: 单号被判积分不足 → 长冷却；随后请求落 all_cooling（不谎报成功）", async () => {
   const provider = createRaccoonProvider({
     apiKeys: ["tok-a"],
