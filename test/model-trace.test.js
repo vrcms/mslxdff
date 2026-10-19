@@ -193,3 +193,30 @@ test("model trace: 超限裁剪必须按字节留 3/4，不能断崖砍到 100 �
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("中继全流程日志：relay-received/queued/member-result 都带目标 + 内容", () => {
+  const recv = formatModelTrace({ type: "relay-received", reqId: "r1", model: "m", data: { target: "relay://0b295c55", group: "my@mslxd", via: "broadband", messages: 902, tools: 285, maxTokens: 64000 } });
+  assert.match(recv, /relay-received/);
+  assert.match(recv, /target=relay:\/\/0b295c55/, "必须带目标成员（否则认不出转给谁）");
+  assert.match(recv, /msgs=902/);
+  assert.match(recv, /tools=285/);
+
+  const q = formatModelTrace({ type: "relay-queued", reqId: "r1", model: "m", data: { target: "relay://0b295c55", reqId: "r1" } });
+  assert.match(q, /relay-queued/);
+  assert.match(q, /target=relay:\/\/0b295c55/);
+
+  const res = formatModelTrace({ type: "relay-member-result", reqId: "r1", model: "m", data: { target: "relay://0b295c55", ok: false, status: 502, ms: 1200, respChars: 40, respBody: '{"error":"context_length_exceeded"}' } });
+  assert.match(res, /relay-member-result/);
+  assert.match(res, /target=relay:\/\/0b295c55/);
+  assert.match(res, /FAIL/);
+  assert.match(res, /status=502/);
+  assert.match(res, /context_length_exceeded/, "必须带成员回的正文摘要（这就是「组员回了什么」）");
+});
+
+test("中继日志：relay-try/fail 带 target（回归：旧白名单会吞掉 target）", () => {
+  const try_ = formatModelTrace({ type: "relay-try", reqId: "r2", model: "m", data: { target: "relay://0b295c55", group: "my@mslxd", via: "via-leader" } });
+  assert.match(try_, /target=relay:\/\/0b295c55/, "relay-try 必须带 target");
+  const fail = formatModelTrace({ type: "relay-fail", reqId: "r2", model: "m", data: { target: "relay://0b295c55", status: 401, message: "Unauthorized" } });
+  assert.match(fail, /target=relay:\/\/0b295c55/, "relay-fail 必须带 target");
+  assert.match(fail, /status=401/);
+});

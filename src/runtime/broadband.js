@@ -24,6 +24,11 @@ export function createBroadbandExec({ token, upstream, logs, log = console.log, 
     const t0 = Date.now();
     const model = String(body?.model || "");
     const fl = withOutputFloor(body); // 首发输出额度托底：leader 转来的 body 不经 pipeline，成员侧自托（评审 P1）
+    // 成员「收到任务」：谁转来的、是什么规模、转给谁 —— 中继全流程在**成员这一跳**的入口日志。
+    // 没有它，组长侧只知道"入队了"，无从确认成员是否真收到、收到的是什么（用户实证要求「日志要全面」）。
+    const nMsgs = Array.isArray(body?.messages) ? body.messages.length : 0;
+    const nTools = Array.isArray(body?.tools) ? body.tools.length : 0;
+    log(`broadband task recv: group=${g.name} req=${reqId} from leader=${g.leaderUrl} model=${model} messages=${nMsgs} tools=${nTools}`);
     if (fl !== body) log(`output-floor(broadband): req=${reqId} ${(body?.max_tokens ?? body?.max_completion_tokens)}→${(fl.max_tokens ?? fl.max_completion_tokens)}`);
     try {
       const upRes = await upstream.chat(fl);

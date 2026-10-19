@@ -3,6 +3,20 @@ import { DEFAULT_MAX_HOPS } from "../peers.js";
 import { enqueueRelay, dequeueRelayForPoll, resolveRelay, subscribeStream, unsubscribeStream } from "./relay-queue.js";
 import { compatFetch } from "../compat.js";
 
+/** 请求规模摘要（给中继日志用）：消息数/角色分布/工具数/maxTokens/model —— 排障第一眼要看清"转了什么"。 */
+function relayReqSummary(b = {}) {
+  const msgs = Array.isArray(b?.messages) ? b.messages : [];
+  const roles = {};
+  for (const m of msgs) roles[String(m?.role || "?")] = (roles[String(m?.role || "?")] || 0) + 1;
+  return { model: b?.model || "-", stream: b?.stream === true, messages: msgs.length, roles, tools: Array.isArray(b?.tools) ? b.tools.length : 0, maxTokens: Number(b?.max_tokens ?? b?.max_completion_tokens) || null };
+}
+
+/** 响应正文摘要（供中继日志）：单行化 + 截断，只为让人看出上游回的是什么。 */
+function snippet(v, n = 300) {
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return String(s || "").replace(/\s+/g, " ").slice(0, n);
+}
+
 export async function heartbeatHandler({ req, res, groups, bus, logs }) {
   const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
   if (!auth) return json(res, 401, { error: "bearer token required" });
@@ -169,10 +183,15 @@ export async function forwardHandler({ req, res, groups, bus, logs, token }) {
   const targetMember = Object.values(members).find((m) => m.url === target) || Object.entries(members).find(([id]) => id === target)?.[1];
   if (!targetMember) return json(res, 404, { error: `target ${target} not found in group ${groupName}` });
   const isBb = targetMember.kind === "broadband" || String(targetMember.url).startsWith("relay://");
+  const reqSummary = relayReqSummary(body.body || body);
+  const fwdEvt = (type, extra) => { const e = { ts: Date.now(), type, group: groupName, target, hops, ...extra }; try { logs?.appendEvent?.(e); } catch {} try { bus?.emit?.(e); } catch {} };
+  // 组长「收到」：谁让我转给谁、转的是什么规模 —— 中继全流程的第一条日志
+  fwdEvt("relay-received", { via: isBb ? "broadband" : "direct", reqId: body.reqId || null, ...reqSummary });
   if (!isBb) {
     // 标记走直连：**在 fetch 之前**就设，这样直连失败（catch 里的 502）也带着它——
     // 那正是最需要区分的一跳（组长直连该成员不通 vs 宽带成员回报失败，两者的 body 可能一模一样）。
     res.setHeader("x-mslxdff-relay-via", "direct");
+    const t0 = Date.now();
     try {
       const fwdBody = body.body || body;
       const r = await compatFetch(`${targetMember.url}/v1/chat/completions`, {
@@ -180,41 +199,49 @@ export async function forwardHandler({ req, res, groups, bus, logs, token }) {
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${targetMember.token || ""}`, "x-mslxdff-hops": String(hops + 1), "x-mslxdff-model-lock": fwdBody.model || "", "Accept": "text/event-stream" },
         body: JSON.stringify(fwdBody),
       });
-      const evtData = { ts: Date.now(), type: "relay-forward", target, via: "direct", group: groupName, hops };
-      if (bus) bus.emit(evtData);
-      logs?.appendEvent?.(evtData);
-      res.statusCode = r.status;
-      if (r.headers.get("content-type")?.includes("text/event-stream")) {
+      const isSSE = r.headers.get("content-type")?.includes("text/event-stream");
+      if (isSSE) {
+        // 流式直连：没法先读全 body 再转发，就记「已建立」+ 状态码
+        fwdEvt("relay-forward", { via: "direct", ok: r.status < 400, status: r.status, ms: Date.now() - t0, detail: "stream 直连建立" });
+        res.statusCode = r.status;
         res.setHeader("Content-Type", "text/event-stream");
         if (r.body) for await (const c of r.body) res.write(c);
         res.end();
       } else {
         const txt = await r.text();
+        // 直连非流式：把上游回的正文摘要也记下（这就是「组员回了什么」）
+        fwdEvt("relay-forward", { via: "direct", ok: r.status < 400, status: r.status, ms: Date.now() - t0, respChars: txt.length, respBody: snippet(txt) });
+        res.statusCode = r.status;
         res.setHeader("Content-Type", r.headers.get("content-type") || "application/json");
         res.end(txt);
       }
       return;
     } catch (err) {
+      fwdEvt("relay-forward", { via: "direct", ok: false, status: 502, ms: Date.now() - t0, error: errMsg(err) });
       return json(res, 502, { error: errMsg(err) });
     }
   }
   const reqId = body.reqId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const fwdBody = body.body || { model: body.model, messages: body.messages, stream: body.stream };
-  const evtData = { ts: Date.now(), type: "relay-forward", target, via: "leader", group: groupName, hops, reqId, model: fwdBody.model };
-  if (bus) bus.emit(evtData);
-  logs?.appendEvent?.(evtData);
   const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
   if (typeof targetMember.lastSeen === "number" && Date.now() - targetMember.lastSeen > staleMs) {
     res.setHeader("x-mslxdff-relay-via", "broadband");
+    fwdEvt("relay-member-result", { reqId, ok: false, status: 502, error: "broadband member stale (no heartbeat)" });
     return json(res, 502, { error: "broadband member stale (no heartbeat)" });
   }
   // 标记走的是宽带中继：下游据此一眼分清「组长直连失败(502 fetch failed)」vs「宽带成员回报的失败」，
   // 两者响应体可能都是 {"error":"fetch failed"}，只有这个头能区分（成员侧已把真实原因写进 errors.log）。
   res.setHeader("x-mslxdff-relay-via", "broadband");
+  const tFwd = Date.now();
+  // 组长「已交给成员」：入队即记 —— 成员有没有真正收到，由成员侧那条 relay-task-recv 佐证
+  fwdEvt("relay-queued", { reqId, via: "broadband" });
   try {
     const resultPromise = enqueueRelay({ group: groupName, target: targetMember.url, reqId, body: fwdBody, hops });
     const result = await resultPromise;
     if (result && typeof result.status === "number") {
+      const rb = result.body == null ? "" : (typeof result.body === "string" ? result.body : JSON.stringify(result.body));
+      // 组长「收到成员回什么」：状态码 + 正文摘要 + 耗时 —— 中继全流程的收尾日志
+      fwdEvt("relay-member-result", { reqId, ok: result.status < 400, status: result.status, ms: Date.now() - tFwd, respChars: rb.length, respBody: snippet(rb) });
       res.statusCode = result.status;
       if (result.status >= 500) res.setHeader("x-mslxdff-relay-member-status", String(result.status));
       if (result.headers) for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
@@ -224,8 +251,10 @@ export async function forwardHandler({ req, res, groups, bus, logs, token }) {
       } else res.end();
       return;
     }
+    fwdEvt("relay-member-result", { reqId, ok: true, status: 200, ms: Date.now() - tFwd, respBody: snippet(result) });
     return json(res, 200, result);
   } catch (err) {
+    fwdEvt("relay-member-result", { reqId, ok: false, status: 504, ms: Date.now() - tFwd, error: errMsg(err) || "relay timeout" });
     return json(res, 504, { error: errMsg(err) || "relay timeout" });
   }
 }

@@ -76,6 +76,14 @@ export function fmtEvent(e) {
       return `${head} fallback!     客户端请求 ${m(e.requested)} 实际返回 ${m(e.actual)} 原因=${m(e.reason)} via=${m(e.via)} notice=${m(e.notice)}`;
     case "relay-try":
       return `${head} relay try     给宽带中继请求 target=${e.target} model=${m(e.model)} via=${e.via}`;
+    case "relay-miss":
+      return `${head} relay miss    宽带中继无候选（${e.reason || "-"}${e.candidates != null ? ` candidates=${e.candidates}` : ""}）`;
+    case "relay-received":
+      return `${head} relay recv    ${e.via === "broadband" ? "经中继" : "直连"}转给 target=${e.target} group=${e.group} model=${m(e.model)} msgs=${e.messages ?? "-"} tools=${e.tools ?? "-"} maxTok=${e.maxTokens ?? "-"}`;
+    case "relay-queued":
+      return `${head} relay queued  已入队交成员 target=${e.target} reqId=${e.reqId || "-"}`;
+    case "relay-member-result":
+      return `${head} relay result  成员回 target=${e.target} ${e.ok ? "ok" : "FAIL"} ${e.status ? `HTTP ${e.status}` : ""} ${e.ms ? `${e.ms}ms` : ""}${e.respChars ? ` resp=${e.respChars}B` : ""} ${m(e.error || e.respBody || "")}`;
     case "relay-fail":
       return `${head} relay fail    ${e.target} ${e.status ? `HTTP ${e.status}` : ""} ${m(e.message)}`;
     case "relay-ip-change":

@@ -140,7 +140,10 @@ export async function tryBroadbandRelay({ groups, token: myToken, model, body, h
         }
       } catch {}
     }
-    if (!allCandidates.length) return null;
+    if (!allCandidates.length) {
+      evt?.("relay-miss", { reqId, model, reason: "no-candidates", candidates: 0 });
+      return null;
+    }
     for (const cand of allCandidates) {
       try {
         evt?.("relay-try", { reqId, model, via: cand.via, target: cand.target, group: cand.group });

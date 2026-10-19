@@ -87,6 +87,10 @@ const DECISION_FIELDS = [
   "heldOpen", "terminalForm", "requestWaitedMs", "budgetMs", "budgetOut",
   // 终局判决（ADR-0058）：取证时第一眼要看的三件——判的哪种、命中哪条判据、是否因此没问组员
   "kind", "marker", "peersSkipped",
+  // 中继/组员目标（2026-10-19）：跨机链路排障第一眼要的是**这一跳打给了谁**——target= 目标成员
+  // （url 或 relay://id）、group= 组、leaderUrl= 经谁中继；缺了这几项，relay-try/fail 只剩状态码，
+  // 看日志根本认不出是哪个组员出的问题（用户实证要求「日志要全面」）。
+  "target", "group", "leaderUrl", "candidates", "tried",
 ];
 
 function decisionKv(data = {}) {
@@ -141,6 +145,22 @@ export function formatModelTrace({ type, reqId, model, data = {}, request = null
     detail = `upstream_response status=${data.status ?? "-"} finish=${d.sawFinishReason || "-"} chunks=${d.receivedChunks ?? "-"} bytes=${d.receivedBytes ?? "-"} tools=${d.toolCalls ?? 0} chars=${d.chars ?? 0} ${usageTxt} elapsed=${data.totalMs ?? "-"}ms${data.upstream ? ` upstream=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
   } else if (type === "result" || type === "client-response") {
     detail = `client status=${data.status ?? "-"} via=${data.via || "-"} actual=${data.actual || model || "-"} fallback=${data.fallback?.fallback ? 1 : 0} total=${totalMs ?? data.durationMs ?? "-"}ms${data.upstream ? ` upstream=${data.upstream}` : ""}${data.account ? ` account=${data.account}` : ""}${data.pick ? ` pick=${data.pick}` : ""}`;
+  } else if (type === "relay-try") {
+    detail = `指定宽带中继 target=${data.target || "?"} group=${data.group || "-"} via=${data.via || "-"}`;
+  } else if (type === "relay-received") {
+    detail = `中继收到 转给 target=${data.target || "?"} group=${data.group || "-"} via=${data.via || "-"} msgs=${data.messages ?? "-"} tools=${data.tools ?? "-"} maxTok=${data.maxTokens ?? "-"}`;
+  } else if (type === "relay-queued") {
+    detail = `已入队交成员 target=${data.target || "?"} reqId=${data.reqId || "-"}`;
+  } else if (type === "relay-member-result") {
+    detail = `成员回 target=${data.target || "?"} ${data.ok ? "ok" : "FAIL"}${data.status ? ` status=${data.status}` : ""}${data.ms ? ` ${data.ms}ms` : ""}${data.respChars ? ` resp=${data.respChars}B` : ""} ${safeText(data.error || data.respBody || "", 200)}`;
+  } else if (type === "relay-fail") {
+    detail = `中继失败 target=${data.target || "?"} group=${data.group || "-"} via=${data.via || "-"}${data.status ? ` status=${data.status}` : ""} ${safeText(data.message || "")}`;
+  } else if (type === "relay-miss") {
+    detail = `宽带中继无候选可试（全部候选未通/无存活成员，交回本地兜底）`;
+  } else if (type === "peer-race-start") {
+    detail = `组员竞速开始 peers=${data.peers ?? "-"}`;
+  } else if (type === "peer-budget-out") {
+    detail = `组员竞速预算用尽 reason=${safeText(data.reason || "", 80)} budgetMs=${data.budgetMs ?? "-"} remaining=${data.remaining ?? "-"}`;
   } else detail = safeText(`${decisionKv(data)} ${data.message || data.error || ""}`, 200);
   return `[${base.time}] [req=${base.req}] [model=${base.model}] [stage=${base.stage}] ${detail}`;
 }
