@@ -82,9 +82,48 @@ export function createCodeartsProvider({
   const onWait = (info) => {
     try { appendEvent({ type: "codearts-queue", ...info }); } catch {}
   };
+  // 流式请求必须在**流真正读完/取消后**才释放并发槽——否则 runChat 一返回（body 还没消费）
+  // 就 release，上游其实仍占着会话 ⇒ 第 4 路被上游拒（TM.00001041 并发会话数已达上限）。
+  // 非流式（JSON）在 runChat 内部已聚合完，可立即释放。返回的 Response 保持原 body 引用，
+  // 只包一层 tee 触发 release；出错也保证释放一次（releaseOnce 幂等）。
+  function holdUntilBodyDone(res, releaseOnce) {
+    const ct = res?.headers?.get?.("content-type") || "";
+    if (!ct.includes("text/event-stream") || !res.body) {
+      releaseOnce();
+      return res;
+    }
+    let done = false;
+    const fin = () => { if (!done) { done = true; releaseOnce(); } };
+    const onErr = () => fin();
+    try {
+      const reader = res.body.getReader();
+      const stream = new ReadableStream({
+        async pull(controller) {
+          try {
+            const { done: d, value } = await reader.read();
+            if (d) { fin(); controller.close(); return; }
+            controller.enqueue(value);
+          } catch (e) { onErr(); controller.error(e); }
+        },
+        cancel(reason) { fin(); try { return reader.cancel(reason); } catch { /* ignore */ } },
+      });
+      return new Response(stream, { status: res.status, statusText: res.statusText, headers: res.headers });
+    } catch {
+      fin();
+      return res;
+    }
+  }
   async function chat(body, opts = {}) {
     if (!ring.size) throw new Error("codearts: missing credential — run: mslxdff -provider codearts login");
-    return gate.run(() => chatSvc.runChat(body, ring, opts), onWait);
+    const rel = await gate.acquire(onWait);
+    let res;
+    try {
+      res = await chatSvc.runChat(body, ring, opts);
+    } catch (err) {
+      rel();
+      throw err;
+    }
+    return holdUntilBodyDone(res, rel);
   }
   async function chatWithKeys(body, keys, opts = {}) {
     const blobs = (keys || []).filter((k) => typeof k === "string" && k.trim().startsWith("{"));
@@ -92,7 +131,15 @@ export function createCodeartsProvider({
     const tmpRing = createKeyRing(blobs, { cooldownMs });
     const tmpPool = createAuthPool({ keys: blobs, fetchImpl, stsHost, clock }); // 借用凭据不写回本节点
     const tmpSvc = createChatService({ id, baseUrl: chatSvcBase, chatPath, fetchImpl, dispatcher: null, authPool: tmpPool, catalog, connectTimeoutMs, clock });
-    return gate.run(() => tmpSvc.runChat(body, tmpRing, opts), onWait);
+    const rel = await gate.acquire(onWait);
+    let res;
+    try {
+      res = await tmpSvc.runChat(body, tmpRing, opts);
+    } catch (err) {
+      rel();
+      throw err;
+    }
+    return holdUntilBodyDone(res, rel);
   }
 
   // 三路发现（主账号）；结果写目录（benefit 判定按账号隔离）
