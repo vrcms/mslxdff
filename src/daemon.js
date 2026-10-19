@@ -102,12 +102,26 @@ export function isPidAlive(pid) {
   }
 }
 
-export function stopDaemon({ reason = "stop", kill = process.kill, taskkill = spawnSync } = {}) {
+export function stopDaemon({ reason = "stop", kill = process.kill, taskkill = spawnSync, isAlive = isPidAlive } = {}) {
   const pid = readPid();
   if (!pid) return { stopped: false, reason: "no pid file" };
+  // 自杀护栏（最高优先级）：pid 文件里写着**本进程**时，杀它就是杀自己。
+  // 这不是假想情形 —— daemon 自己 `writePid(process.pid)`（server-lifecycle.js），而 `enableAutostart()`
+  // 会在 systemd 托管下被 daemon 自己调起（server-lifecycle 的 autostart 自检块）：systemd **系统** unit
+  // 的 daemon 去查 **user** unit 必然判「未启用」⇒ 走进 enableAutostart ⇒ stopDaemon ⇒ SIGTERM 自己
+  // ⇒ 优雅关停 exit 0 ⇒ systemd Restart=always 拉起 ⇒ 每 2.5 秒一轮的无限重启
+  //（真机 2026-10-19：0.1.209 + 系统 unit，每进程活 2~3s 被 SIGTERM；0.1.160 不炸只因当时
+  //  `enableAutostart` 里 import 路径写错、这段从未执行过，2026-10-17 c7bf8af 修正路径后暴露）。
+  if (pid === process.pid) {
+    try {
+      appendFileSync(logFile(), `[lifecycle] stopDaemon refused: pid file points at self (pid=${pid}, reason=${reason})\n`);
+    } catch {}
+    return { stopped: false, pid, reason: "self — pid 文件写的就是本进程，拒绝自杀" };
+  }
+
   // 杀者牌（验尸官的另一半证据）：动手前写、自带死者身份。只给在世者留牌——给尸体留牌
   // 会让下次验尸把"早已静默死亡"误判成"被本次杀死"。
-  const victimAlive = isPidAlive(pid);
+  const victimAlive = isAlive(pid);
   // 杀者留痕（写 daemon.log）：Windows 的 SIGTERM 是 TerminateProcess 强杀，被杀的 daemon
   // 在 JS 层收不到任何事件（无法自记），故由"杀者"记录调用方 pid——
   // 没有这行 = 非我方所杀（外部 taskkill/任务管理器/崩溃），配合最后一条 heartbeat 定位死亡时刻。

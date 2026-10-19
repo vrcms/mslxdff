@@ -3,7 +3,7 @@
 // 互相把对方的活隧道当「上一代残留」杀掉 ⇒ 无限互杀。这三件事必须可测，否则下次还得靠人肉 ps 才发现。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aliveSec, findDaemons, fmtAlive, isDaemonArgv, isZombie, otherDaemonParent, parseCmdline, parseStat } from "../src/runtime/proc-info.js";
+import { aliveSec, findDaemons, fmtAlive, isDaemonArgv, isZombie, otherDaemonParent, parseCmdline, parseStat, underSystemd } from "../src/runtime/proc-info.js";
 import { reapGhostDaemons, takeoverOlderDaemons, waitPidGone } from "../src/daemon.js";
 
 test("proc：parseStat 从最后一个 ')' 之后切（comm 带空格/括号也不许错位）", () => {
@@ -49,6 +49,14 @@ test("proc：isDaemonArgv 只认「我们的入口 + --daemon」，grep 与别�
   assert.equal(isDaemonArgv(["grep", "--color=auto", "mslxdff"]), false, "ps 里那条 grep 不许被当成 daemon");
   assert.equal(isDaemonArgv(["/usr/bin/node", "/x/other.js", "--daemon"]), false);
   assert.equal(isDaemonArgv(null), false);
+});
+
+test("proc：underSystemd 只认 systemd 注入的 INVOCATION_ID / JOURNAL_STREAM", () => {
+  assert.equal(underSystemd({ INVOCATION_ID: "abc123" }), true, "systemd 系统/用户 unit 都会注入 INVOCATION_ID");
+  assert.equal(underSystemd({ JOURNAL_STREAM: "9:12345" }), true, "JOURNAL_STREAM 也是判据（stdout 接 journal 时）");
+  assert.equal(underSystemd({ INVOCATION_ID: "", JOURNAL_STREAM: "" }), false, "空串不算");
+  assert.equal(underSystemd({}), false, "裸跑/手动启动没有这些变量");
+  assert.equal(underSystemd({ PATH: "/usr/bin" }), false);
 });
 
 test("proc：findDaemons 列出同机其它 daemon 并排除 self（-restart 的结构性盲区就在这）", () => {

@@ -57,17 +57,19 @@ test("stopDaemon 杀失败时必须保留 pid 文件、并撤掉杀者牌", () =
   const prevDir = process.env.MSLXDFF_DAEMON_DIR;
   process.env.MSLXDFF_DAEMON_DIR = dir;
   try {
-    writePid(process.pid); // 用一个确实活着的 pid，victimAlive 才为真、才会写牌
+    // 用一个「非本进程」的 pid（否则会先撞上自杀护栏，测不到这一支）
+    writePid(999_999);
     const eperm = () => { const e = new Error("EPERM"); e.code = "EPERM"; throw e; };
     const r = stopDaemon({
       reason: "test",
       kill: eperm,
+      isAlive: () => true, // 目标活着 ⇒ victimAlive 为真、才会写牌
       taskkill: () => ({ error: null, status: 1 }), // taskkill 也失败
     });
     assert.equal(r.stopped, false);
-    assert.equal(r.pid, process.pid);
+    assert.equal(r.pid, 999_999);
     assert.equal(existsSync(pidFile()), true, "进程还活着，pid 文件不得删除（否则变成 -restart 盲区）");
-    assert.equal(readPid(), process.pid, "台账必须还认得它");
+    assert.equal(readPid(), 999_999, "台账必须还认得它");
     assert.equal(existsSync(markerFile(dir)), false, "没杀成就不能留杀者牌（会开出假死亡证明）");
   } finally {
     process.env.MSLXDFF_DAEMON_DIR = prevDir;
@@ -79,11 +81,33 @@ test("stopDaemon taskkill 兜底成功时仍按杀成功处理：删 pid 文件"
   const prevDir = process.env.MSLXDFF_DAEMON_DIR;
   process.env.MSLXDFF_DAEMON_DIR = dir;
   try {
-    writePid(process.pid);
+    writePid(999_999); // 同样避开自杀护栏
     const eperm = () => { const e = new Error("EPERM"); e.code = "EPERM"; throw e; };
-    const r = stopDaemon({ reason: "test", kill: eperm, taskkill: () => ({ error: null, status: 0 }) });
+    const r = stopDaemon({ reason: "test", kill: eperm, isAlive: () => true, taskkill: () => ({ error: null, status: 0 }) });
     assert.equal(r.stopped, true);
     assert.equal(existsSync(pidFile()), false, "杀成功才删 pid 文件");
+  } finally {
+    process.env.MSLXDFF_DAEMON_DIR = prevDir;
+  }
+});
+
+// 2026-10-19 真机：0.1.209 + systemd **系统** unit 下每 2.5s 自杀一轮无限重启。
+// 链条＝daemon 自己 writePid(process.pid)，server-lifecycle 的 autostart 自检在系统 unit 下查 user unit
+// 必判「未启用」⇒ linuxEnable() ⇒ stopDaemon() ⇒ 读到的 pid 就是自己 ⇒ SIGTERM 自己 ⇒ exit 0 ⇒ systemd 拉起。
+// 护栏：pid 文件指向本进程时一律拒绝，绝不自杀。
+test("stopDaemon 自杀护栏：pid 文件写的是本进程时拒绝，一个信号都不发（治 systemd 无限重启）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mslxdff-stopself-"));
+  const prevDir = process.env.MSLXDFF_DAEMON_DIR;
+  process.env.MSLXDFF_DAEMON_DIR = dir;
+  try {
+    writePid(process.pid);
+    const sigs = [];
+    const r = stopDaemon({ reason: "test", kill: (pid, sig) => sigs.push([pid, sig]) });
+    assert.equal(r.stopped, false);
+    assert.equal(r.pid, process.pid);
+    assert.equal(sigs.length, 0, "不许对自己发任何信号（发 SIGTERM 就是优雅关停 → 无限重启）");
+    assert.match(String(r.reason), /self/, "理由须说明是自指");
+    assert.equal(existsSync(pidFile()), true, "pid 文件必须留着（我们没停任何人）");
   } finally {
     process.env.MSLXDFF_DAEMON_DIR = prevDir;
   }

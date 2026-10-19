@@ -92,6 +92,17 @@ export function isDaemonArgv(argv) {
   return list.includes("--daemon") && list.some((a) => /(^|[\\/])mslxdff(\.js)?$/i.test(String(a)));
 }
 
+/**
+ * 是否跑在 systemd 托管下（system 或 user unit 都算）。
+ * 判据：systemd 给被管服务注入 `INVOCATION_ID`（每个 invocation 唯一）与 `JOURNAL_STREAM`（stdout 连接信息）。
+ * 为什么要问：托管时 supervisor 已保证单实例与重启策略，daemon 再自己「杀旧进程/杀端口占用者」是职责重叠，
+ * 会与 systemd 的拉起时序打架成死循环（真机 2026-10-19：0.1.209 + 系统 unit 每 2.5s 自杀一轮）。
+ * @returns {boolean}
+ */
+export function underSystemd(env = process.env) {
+  return Boolean(env.INVOCATION_ID || env.JOURNAL_STREAM);
+}
+
 /** 「已运行 6h12m」这种人话时长（取证日志用）。 */
 export function fmtAlive(sec) {
   if (!Number.isFinite(sec)) return "运行时长未知";

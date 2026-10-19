@@ -5,6 +5,7 @@ import { runHook } from "../plugins.js";
 import { effectiveHost, maxHopsValue } from "../cli/policy.js";
 import { fmtEvent } from "../cli/format.js";
 import { writePid } from "../daemon.js";
+import { underSystemd } from "./proc-info.js";
 
 /**
  * 服务生命周期 — router 装配 → server 创建/ready-EADDRINUSE 自愈 →
@@ -66,6 +67,13 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
     const msg = String(err?.message || err);
     const code = err?.code || "";
     if (code === "EADDRINUSE" || msg.includes("EADDRINUSE")) {
+      // systemd 托管下不许杀端口占用者：supervisor 保证单实例，去杀「占用者」是越权，且会与
+      // systemd 的拉起时序互杀成循环（报告的另一半）。非零退出，让 systemd 按 Restart/RestartSec
+      // 退避重试——这才是托管语义下正确的收口。
+      if (underSystemd()) {
+        console.error(`[lifecycle] EADDRINUSE on port ${resolvePort()} under systemd — exit(1), let systemd backoff-retry（不杀任何进程）`);
+        process.exit(1);
+      }
       console.log(`[lifecycle] EADDRINUSE on port ${resolvePort()} — freeing stale holder and retrying...`);
       try {
         const { execFile } = await import("node:child_process");
@@ -166,7 +174,13 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
   } catch {}
 
   // best-effort: ensure autostart on Linux (so daemon survives reboot/SSH disconnect without manual cmd)
-  if (process.platform === "linux" && !process.env.MSLXDFF_NO_AUTOSTART) {
+  // **systemd 托管下必须跳过**（2026-10-19 真机无限重启的根因）：
+  //  - 托管时 supervisor 已经保证单实例+开机自启，这里再 enable 一次多余；
+  //  - 本块查的是 **user** unit（`~/.config/systemd/user/mslxdff.service`），而 systemd **系统**
+  //    unit 托管的 daemon 查它必然得 enabled=false ⇒ 走 enableAutostart() ⇒ linuxEnable() ⇒ stopDaemon()。
+  //    那条路径里 pid 文件写的就是**本进程**，过去等于每 2.5s 自杀一次（见 daemon.js 的自杀护栏）。
+  // systemd 会给被管进程注入 INVOCATION_ID / JOURNAL_STREAM，判据可靠、无需用户配置。
+  if (process.platform === "linux" && !process.env.MSLXDFF_NO_AUTOSTART && !underSystemd()) {
     setTimeout(async () => {
       try {
         const { getAutostartStatus, enableAutostart } = await import("../autostart.js");
