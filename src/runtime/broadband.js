@@ -1,26 +1,30 @@
 import { loadGroupsJoined } from "../state.js";
 import { errMsg } from "../cli/util.js";
+import { describeErrorText } from "../net-diag.js";
 import { withOutputFloor } from "../chat-pipeline/empty-turn.js";
 import { startBroadbandStream } from "./broadband-stream.js";
 import { compatFetch, timeoutSignal } from "../compat.js";
 
 /**
- * 宽带中继 — poll 模式（heartbeat + poll）与 stream 模式分发。
- * stream 长连下沉 broadband-stream.js，本文件保留任务执行与降级分支。
- * 空组不再早退：加组后由 ensure（stream 10s / poll 每次读组）自动接上，无需重启 daemon。
- * // Note: 空组不早退与向导默认 broadband 的取舍 — 见 .agents/notes/implemented/feature/2026-09-16-mobile-broadband-join-wizard.md
+ * 造一个「成员侧执行 + 回传结果」的执行器（可注入依赖，便于单测）。
+ *
+ * 为什么要单独抽出来并**带日志**：成员 B 用 upstream.chat 打自己的上游失败时，原实现只造了个
+ * `{status:502, body:{"error":"fetch failed"}}` 回传组长，**本机一行日志都没留** —— 于是组长侧
+ * 看到 `502 fetch failed`、成员侧看到空日志，全链路都没人能说出 B 为什么打不到上游。
+ * 现在：执行抛错记 errors.log（带 cause 链诊断），上游返回 4xx/5xx 也记，回传失败同样记。
+ *
+ * @param {{ token: string, upstream: {chat: Function}, logs?: {appendError?: Function, appendEvent?: Function}, log?: Function, fetchImpl?: Function }} opts
+ * @returns {(g: {name: string, leaderUrl: string}, reqId: string, body: object) => Promise<void>}
  */
-export function startBroadband({ token, upstream }) {
-  const broadbandGroups = () => loadGroupsJoined().filter((g) => g.kind === "broadband" && g.leaderUrl);
-  const streamEnabled = (() => {
-    const v = process.env.MSLXDFF_BROADBAND_STREAM;
-    if (v === "0" || v === "false" || v === "off") return false;
-    return true;
-  })();
-  const execAndPost = async (g, reqId, body) => {
+export function createBroadbandExec({ token, upstream, logs, log = console.log, fetchImpl = compatFetch } = {}) {
+  const appendError = (entry) => { try { logs?.appendError?.(entry); } catch { /* 日志失败不拖垮执行 */ } };
+  const appendEvent = (entry) => { try { logs?.appendEvent?.(entry); } catch {} };
+  return async function execAndPost(g, reqId, body) {
     let result;
+    const t0 = Date.now();
+    const model = String(body?.model || "");
     const fl = withOutputFloor(body); // 首发输出额度托底：leader 转来的 body 不经 pipeline，成员侧自托（评审 P1）
-    if (fl !== body) console.log(`output-floor(broadband): req=${reqId} ${(body?.max_tokens ?? body?.max_completion_tokens)}→${(fl.max_tokens ?? fl.max_completion_tokens)}`);
+    if (fl !== body) log(`output-floor(broadband): req=${reqId} ${(body?.max_tokens ?? body?.max_completion_tokens)}→${(fl.max_tokens ?? fl.max_completion_tokens)}`);
     try {
       const upRes = await upstream.chat(fl);
       const ct = upRes.headers.get("content-type") || "";
@@ -40,33 +44,69 @@ export function startBroadband({ token, upstream }) {
         try { parsed = JSON.parse(txt); } catch { parsed = txt; }
         result = { status: upRes.status, headers: { "Content-Type": upRes.headers.get("content-type") || "application/json" }, body: typeof parsed === "string" ? parsed : JSON.stringify(parsed) };
       }
+      appendEvent({ ts: Date.now(), type: "broadband-task", reqId, group: g.name, model, status: result.status, ms: Date.now() - t0, chars: String(result.body || "").length });
+      if (result.status >= 400) {
+        // 成员成功连上上游、但上游回错 —— 也要留痕，否则组长只见状态码不知原因
+        const snippet = String(result.body || "").slice(0, 300);
+        log(`broadband task: ${g.name} req=${reqId} 成员上游返回 HTTP ${result.status} — ${snippet}`);
+        appendError({ api: "broadband", reqId, group: g.name, model, status: result.status, message: `组员执行上游返回 HTTP ${result.status}：${snippet}` });
+      }
     } catch (err) {
-      result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: errMsg(err) }) };
+      // 成员打自己上游**抛错**（连不上/DNS/超时/TLS）—— 这是 `502 fetch failed` 的真正来源，展开 cause 链
+      const diag = describeErrorText(err);
+      result = { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: diag }) };
+      log(`broadband task: ${g.name} req=${reqId} 成员打上游失败 — ${diag}`);
+      appendError({ api: "broadband", reqId, group: g.name, model, status: 502, message: `组员打上游请求抛错（成员侧失败，非组长）：${diag}` });
     }
     try {
-      await compatFetch(`${g.leaderUrl}/v1/groups/relay/result`, {
+      const r = await fetchImpl(`${g.leaderUrl}/v1/groups/relay/result`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name: g.name, group: g.name, reqId, result }),
         signal: timeoutSignal(5000),
       });
-    } catch {}
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        log(`broadband result post: ${g.name} req=${reqId} HTTP ${r.status} ${txt.slice(0, 120)}`);
+        appendError({ api: "broadband", reqId, group: g.name, status: r.status, message: `结果回传组长失败 HTTP ${r.status}：${txt.slice(0, 200)}` });
+      }
+    } catch (err) {
+      const diag = describeErrorText(err);
+      log(`broadband result post: ${g.name} req=${reqId} failed — ${diag}`);
+      appendError({ api: "broadband", reqId, group: g.name, status: 0, message: `结果回传组长请求抛错：${diag}` });
+    }
   };
+}
+
+/**
+ * 宽带中继 — poll 模式（heartbeat + poll）与 stream 模式分发。
+ * stream 长连下沉 broadband-stream.js，本文件保留任务执行与降级分支。
+ * 空组不再早退：加组后由 ensure（stream 10s / poll 每次读组）自动接上，无需重启 daemon。
+ * // Note: 空组不早退与向导默认 broadband 的取舍 — 见 .agents/notes/implemented/feature/2026-09-16-mobile-broadband-join-wizard.md
+ */
+export function startBroadband({ token, upstream, logs, log = console.log }) {
+  const broadbandGroups = () => loadGroupsJoined().filter((g) => g.kind === "broadband" && g.leaderUrl);
+  const streamEnabled = (() => {
+    const v = process.env.MSLXDFF_BROADBAND_STREAM;
+    if (v === "0" || v === "false" || v === "off") return false;
+    return true;
+  })();
+  const execAndPost = createBroadbandExec({ token, upstream, logs, log });
   const doHeartbeat = async () => {
     for (const g of broadbandGroups()) {
       try {
         const res = await compatFetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify({ name: g.name, group: g.name }),
           signal: timeoutSignal(5000),
         });
         if (!res.ok) {
           const txt = await res.text().catch(() => "");
-          console.log(`broadband heartbeat ${g.name}: ${res.status} ${txt.slice(0, 100)}`);
+          log(`broadband heartbeat ${g.name}: ${res.status} ${txt.slice(0, 100)}`);
         }
       } catch (err) {
-        console.log(`broadband heartbeat ${g.name}: failed — ${errMsg(err)}`);
+        log(`broadband heartbeat ${g.name}: failed — ${errMsg(err)}`);
       }
     }
   };
@@ -86,7 +126,9 @@ export function startBroadband({ token, upstream }) {
           const { reqId, body } = item;
           await execAndPost(g, reqId, body);
         }
-      } catch {}
+      } catch (err) {
+        log(`broadband poll ${g.name}: failed — ${describeErrorText(err)}`);
+      }
     }
   };
   if (!streamEnabled) {
@@ -96,8 +138,8 @@ export function startBroadband({ token, upstream }) {
     const pollTimer = setInterval(doPoll, 1000);
     pollTimer.unref();
     const n = broadbandGroups().length;
-    console.log(n ? `broadband relay: heartbeat 30s + poll 1s for ${n} group(s) [poll mode]` : "broadband relay: idle (0 group) — waiting for a group join [poll mode]");
+    log(n ? `broadband relay: heartbeat 30s + poll 1s for ${n} group(s) [poll mode]` : "broadband relay: idle (0 group) — waiting for a group join [poll mode]");
     return;
   }
-  startBroadbandStream({ token, upstream, execAndPost, broadbandGroups });
+  startBroadbandStream({ token, upstream, execAndPost, broadbandGroups, log });
 }

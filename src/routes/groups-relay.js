@@ -161,6 +161,9 @@ export async function forwardHandler({ req, res, groups, bus, logs }) {
   if (!targetMember) return json(res, 404, { error: `target ${target} not found in group ${groupName}` });
   const isBb = targetMember.kind === "broadband" || String(targetMember.url).startsWith("relay://");
   if (!isBb) {
+    // 标记走直连：**在 fetch 之前**就设，这样直连失败（catch 里的 502）也带着它——
+    // 那正是最需要区分的一跳（组长直连该成员不通 vs 宽带成员回报失败，两者的 body 可能一模一样）。
+    res.setHeader("x-mslxdff-relay-via", "direct");
     try {
       const fwdBody = body.body || body;
       const r = await compatFetch(`${targetMember.url}/v1/chat/completions`, {
@@ -193,13 +196,18 @@ export async function forwardHandler({ req, res, groups, bus, logs }) {
   logs?.appendEvent?.(evtData);
   const staleMs = Number(process.env.MSLXDFF_BROADBAND_STALE_MS) > 0 ? Number(process.env.MSLXDFF_BROADBAND_STALE_MS) : 90_000;
   if (typeof targetMember.lastSeen === "number" && Date.now() - targetMember.lastSeen > staleMs) {
+    res.setHeader("x-mslxdff-relay-via", "broadband");
     return json(res, 502, { error: "broadband member stale (no heartbeat)" });
   }
+  // 标记走的是宽带中继：下游据此一眼分清「组长直连失败(502 fetch failed)」vs「宽带成员回报的失败」，
+  // 两者响应体可能都是 {"error":"fetch failed"}，只有这个头能区分（成员侧已把真实原因写进 errors.log）。
+  res.setHeader("x-mslxdff-relay-via", "broadband");
   try {
     const resultPromise = enqueueRelay({ group: groupName, target: targetMember.url, reqId, body: fwdBody, hops });
     const result = await resultPromise;
     if (result && typeof result.status === "number") {
       res.statusCode = result.status;
+      if (result.status >= 500) res.setHeader("x-mslxdff-relay-member-status", String(result.status));
       if (result.headers) for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
       if (result.body) {
         if (typeof result.body === "string") res.end(result.body);

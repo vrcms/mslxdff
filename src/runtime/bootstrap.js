@@ -35,7 +35,7 @@ export async function startDaemonMain(VERSION) {
   const { srv, bus } = await startServerLifecycle({ VERSION, ...ctx, logs });
   void srv;
   startGroupSync({ peers: ctx.peers, groups: ctx.groups, logs });
-  startBroadband({ token: ctx.token, upstream: ctx.upstream });
+  startBroadband({ token: ctx.token, upstream: ctx.upstream, logs });
 
   // 保热心跳：每 ≤120s 经 **chat 同池**访问每个组员(/health) + 每个 picks 供应商(preheat)，
   // 防「久未使用 → 首发 fetch failed / 上游冷启动」（现网 2026-10-18 16:16 三组员同时 fetch failed）。

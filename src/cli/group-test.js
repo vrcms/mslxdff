@@ -102,10 +102,21 @@ export async function runGroupLinkTest({
   if (res.status !== 200) {
     const isFetchFail = /fetch failed/i.test(txt);
     const isRelay = String(target).startsWith("relay://");
-    return { status: "error", stage: "forward-failed", httpStatus: res.status, target, leaderUrl: lead.leaderUrl, group: groupName, ms, error: txt.slice(0, 300),
-      hint: isFetchFail && isRelay
-        ? "对 relay 成员，502 fetch failed 通常是**该成员自己的上游**打不通（组长只负责转发，不碰上游）。判据：同组其他 relay 成员若正常，即证是这一台的网络/上游问题，不是组长。也可能是该成员离线。"
-        : isFetchFail ? "组长直连该静态成员失败（它离线或端口不通）" : "" };
+    // 归因头（0.1.211+ 组长才有）：把「组长直连失败」与「宽带成员回报的失败」分开——
+    // 两者响应体可能都长成 {"error":"fetch failed"}，只有这个头能区分断在哪一跳。
+    const relayVia = res.headers?.get?.("x-mslxdff-relay-via") || "";
+    const memberStatus = res.headers?.get?.("x-mslxdff-relay-member-status") || "";
+    let hint;
+    if (relayVia === "broadband") {
+      hint = `组长已把请求转给该成员（宽带中继正常），失败发生在**成员那一跳**：成员执行自己的上游时抛错并把错原样回报（该成员侧 errors.log 有真正原因：连不上/DNS/超时）。判据：同组其他 relay 成员若正常，即证是这一台的网络/上游问题。`;
+    } else if (relayVia === "direct") {
+      hint = `组长是**直连**该成员失败的（它离线或端口不通）—— 不是中继链路问题。`;
+    } else if (isFetchFail && isRelay) {
+      hint = `对 relay 成员，502 fetch failed 通常是**该成员自己**打上游失败（组长只转发，不碰上游）。判据：同组其他 relay 成员若正常，即证是这一台的网络/上游问题。组长版本 <0.1.211 时无归因头，升级后可直接判「直连 or 中继」。`;
+    } else if (isFetchFail) {
+      hint = `组长直连该静态成员失败（它离线或端口不通）。`;
+    }
+    return { status: "error", stage: "forward-failed", httpStatus: res.status, target, leaderUrl: lead.leaderUrl, group: groupName, ms, error: txt.slice(0, 300), relayVia, memberStatus, hint };
   }
 
   let reply = null;

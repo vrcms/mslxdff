@@ -60,6 +60,7 @@ export function renderGroupTest(r, { json = false } = {}) {
     upstream: "成员打上游失败",
   }[r.stage] || r.stage;
   console.log(`  ❌ 没通 — 断在：**${stageZh}**${r.httpStatus ? `（HTTP ${r.httpStatus}）` : ""}`);
+  if (r.relayVia) console.log(`     路径：组长 ${r.relayVia === "broadband" ? "经中继转发给成员" : "直连成员"}${r.memberStatus ? `（成员回报 HTTP ${r.memberStatus}）` : ""}`);
   if (r.error) console.log(`     原因：${String(r.error).slice(0, 300)}`);
   if (r.hint) console.log(`     下一步：${r.hint}`);
   process.exitCode = 1;

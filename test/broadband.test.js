@@ -220,3 +220,50 @@ test("05 broadband join via POST /v1/groups/join with --broadband", async () => 
     srv.server.closeAllConnections?.();
   }
 });
+
+test("06 forward 回包带 x-mslxdff-relay-via=broadband（成员回报 502 也能一眼断在成员那一跳）", async () => {
+  const { createGroupsService } = await import("../src/groups.js");
+  const { createRouter } = await import("../src/routes.js");
+  const { createUpstreamClient } = await import("../src/upstream.js");
+  const { startServer } = await import("../src/server.js");
+  const token = "a".repeat(64);
+  const file = tmpStateFile();
+  const groups = createGroupsService({ file });
+  groups.create("wg");
+  const homeToken = "home-token-via";
+  groups.addMember("wg", { key: "wg", memberName: "home-D", url: "relay://home-D", token: homeToken, kind: "broadband", publicIp: "2.2.2.2", lastSeen: Date.now() });
+  const upstream = createUpstreamClient({ baseUrl: "http://127.0.0.1:1", retry: {} });
+  const srv = startServer({ router: createRouter({ token, upstream, groups }) }, 0);
+  await srv.ready();
+  const port = srv.server.address().port;
+  const leaderUrl = `http://127.0.0.1:${port}`;
+  try {
+    const fwdBody = { model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] };
+    const forwardPromise = fetch(`${leaderUrl}/v1/groups/relay/forward`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ group: "wg", target: "relay://home-D", body: fwdBody, reqId: "via-req-1" }),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    // 成员拉任务后回一个 502（模拟它自己打上游失败）
+    const poll = await fetch(`${leaderUrl}/v1/groups/relay/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${homeToken}` },
+      body: JSON.stringify({ name: "wg" }),
+    });
+    const pj = await poll.json();
+    assert.equal(pj.data[0].reqId, "via-req-1");
+    await fetch(`${leaderUrl}/v1/groups/relay/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${homeToken}` },
+      body: JSON.stringify({ name: "wg", reqId: "via-req-1", result: { status: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "fetch failed" }) } }),
+    });
+    const fwdRes = await forwardPromise;
+    assert.equal(fwdRes.status, 502);
+    assert.equal(fwdRes.headers.get("x-mslxdff-relay-via"), "broadband", "必须标出是宽带中继路径（非组长直连）");
+    assert.equal(fwdRes.headers.get("x-mslxdff-relay-member-status"), "502", "透出成员回报的状态码");
+  } finally {
+    await srv.close();
+    srv.server.closeAllConnections?.();
+  }
+});

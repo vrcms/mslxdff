@@ -72,8 +72,32 @@ test("runGroupLinkTest: 504 → stage=relay-timeout（成员没回）", async ()
 test("runGroupLinkTest: 502 fetch failed 对 relay 成员 → 归因「该成员自己打不通上游」，不甩锅组长", async () => {
   const r = await runGroupLinkTest({ target: "relay://0b295c55", deps: baseDeps({ fetchImpl: async () => okRes({ error: "fetch failed" }, 502) }) });
   assert.equal(r.stage, "forward-failed");
-  assert.match(r.hint, /该成员自己的上游|成员离线/);
+  assert.match(r.hint, /该成员自己的上游|成员离线|该成员自己/);
   assert.ok(!/把它当静态/.test(r.hint), "不能把 relay 成员失败误判成组长分类错（同组其他 relay 成员可用即证）");
+});
+
+test("runGroupLinkTest: 502 + x-mslxdff-relay-via=broadband → 归因「组长中继正常，断在成员那一跳」", async () => {
+  const res = {
+    status: 502, ok: false,
+    text: async () => JSON.stringify({ error: "fetch failed" }),
+    headers: { get: (k) => ({ "x-mslxdff-relay-via": "broadband", "x-mslxdff-relay-member-status": "502" }[k] || null) },
+  };
+  const r = await runGroupLinkTest({ target: "relay://0b295c55", deps: baseDeps({ fetchImpl: async () => res }) });
+  assert.equal(r.stage, "forward-failed");
+  assert.equal(r.relayVia, "broadband");
+  assert.equal(r.memberStatus, "502");
+  assert.match(r.hint, /宽带中继正常|成员那一跳/);
+});
+
+test("runGroupLinkTest: 502 + x-mslxdff-relay-via=direct → 归因「组长直连成员失败」", async () => {
+  const res = {
+    status: 502, ok: false,
+    text: async () => JSON.stringify({ error: "fetch failed" }),
+    headers: { get: (k) => (k === "x-mslxdff-relay-via" ? "direct" : null) },
+  };
+  const r = await runGroupLinkTest({ target: "http://peer-b:8989", deps: baseDeps({ fetchImpl: async () => res }) });
+  assert.equal(r.relayVia, "direct");
+  assert.match(r.hint, /直连/);
 });
 
 test("runGroupLinkTest: 200 但 body 是 error 对象 → stage=upstream（成员打上游失败）", async () => {

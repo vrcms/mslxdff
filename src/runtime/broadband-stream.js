@@ -5,7 +5,7 @@ import { compatFetch } from "../compat.js";
  * 宽带 SSE 长连 — 单组成员订阅 + 指数退避重连 + ensure 定时器。
  * execAndPost / broadbandGroups 由 broadband.js 注入。
  */
-export function startBroadbandStream({ token, upstream, execAndPost, broadbandGroups }) {
+export function startBroadbandStream({ token, upstream, execAndPost, broadbandGroups, log = console.log }) {
   const streamManagers = new Map();
   const startStreamForGroup = (g) => {
     if (streamManagers.has(g.name)) return;
@@ -25,7 +25,7 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
         if (!res.ok) throw new Error(`stream ${res.status}`);
         if (!res.body) throw new Error("no body");
         attempts = 0;
-        console.log(`broadband relay: connected ${g.name} via ${g.leaderUrl} (SSE)`);
+        log(`broadband relay: connected ${g.name} via ${g.leaderUrl} (SSE)`);
         let buf = "";
         const decodeChunk = (c) => {
           if (typeof c === "string") return c;
@@ -50,8 +50,14 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
               try {
                 const parsed = JSON.parse(data);
                 const { reqId, body } = parsed;
-                if (reqId && body) execAndPost(g, reqId, body).catch(() => {});
-              } catch {}
+                // 不再 `.catch(()=>{})` 静默吞：execAndPost 内部已把执行/回传失败写 errors.log，
+                // 这里只兜底一句，防它真抛出（如 body 畸变）时整条 SSE 循环被吞掉无痕。
+                if (reqId && body) {
+                  execAndPost(g, reqId, body).catch((e) => log(`broadband exec ${g.name} req=${reqId}: failed — ${errMsg(e)}`));
+                }
+              } catch (e) {
+                log(`broadband stream ${g.name}: bad relay frame — ${errMsg(e)}`);
+              }
             }
           }
         }
@@ -59,7 +65,7 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
       } catch (err) {
         if (stopped) return;
         const msg = errMsg(err);
-        if (!String(msg).includes("abort") && !String(msg).includes("Abort")) console.log(`broadband stream ${g.name}: ${msg} — reconnecting`);
+        if (!String(msg).includes("abort") && !String(msg).includes("Abort")) log(`broadband stream ${g.name}: ${msg} — reconnecting`);
         attempts++;
         const delay = Math.min(30_000, 1000 * Math.pow(2, attempts - 1) + Math.random() * 500);
         await new Promise((r) => setTimeout(r, delay));
@@ -75,5 +81,5 @@ export function startBroadbandStream({ token, upstream, execAndPost, broadbandGr
   }, 10_000);
   ensureTimer.unref();
   const n = broadbandGroups().length;
-  console.log(n ? `broadband relay: stream (SSE) + ping 25s for ${n} group(s)` : "broadband relay: idle (0 group) — waiting for a group join, checked every 10s");
+  log(n ? `broadband relay: stream (SSE) + ping 25s for ${n} group(s)` : "broadband relay: idle (0 group) — waiting for a group join, checked every 10s");
 }
