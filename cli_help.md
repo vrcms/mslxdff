@@ -115,6 +115,7 @@
 | `mslxdff -group sync` | `--group sync` | 刷新所有已加入群组的成员列表到本地 failover peers | 否 | 否 |
 | `mslxdff -group leave <name>` | — | 成员侧离开单群组（本地移除） | 是 | — |
 | `mslxdff -group list` | — | 列出本节点群组与成员（带健康探测与序号，宽带显示 via leader） | 否 | — |
+| `mslxdff -group test <target\|seq> [--group <名>] [--model <id>] [--say <词>] [--json]` | — | **组员链路测试**：验「本机 → 组长 → 某组员（含 relay 宽带成员）→ 上游 → 回数据」整条路，并**按阶段指出断在哪一跳**（① 连不上组长 ② 鉴权被拒 ③ 目标不在组内 ④ 组长入队超时 ⑤ 组长转发失败 ⑥ 成员打上游失败）。`target` 可填 url、`relay://id`、或 `-group list` 的序号；默认模型 `deepseek-v4.1-flash-free`、prompt `hi`；`--json` 吐结构化结果。⚠ 调组长 `/v1/groups/relay/forward` 要**组长的** token（本机 state 的 leader 记录里有） | 否 | — |
 | `mslxdff -group remove <seq>` | — | 仅 leader：按 `list` 序号踢出成员（1-based，排除 leader） | 是（`groups`） | 需 leader |
 | `mslxdff -leavegroup` | `--leavegroup`, `-leave-groups` | 成员侧离开所有已加入群组（跳过 leader 组并提示用 `-delgroup`） | 是 | — |
 | `mslxdff -delgroup <name>` | `--delgroup` | 仅 leader：解散本节点领导的群组 | 是 | 需 leader |

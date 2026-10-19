@@ -110,6 +110,23 @@ export async function handleGroupCommand(args) {
     }
     console.log(`\njoined groups (${joinedList.length}):`);
     for (const g of joinedList) console.log(`  ${g.name}  ${g.leaderUrl || "(this node is the leader)"}`);
+  } else if (action === "test") {
+    // -group test <target> [--group <名>] [--model <id>] [--say <词>] [--json]
+    // target 可以是 url / relay://id / 或 -group list 里的序号（数字）。
+    const { resolveTargetArg, renderGroupTest } = await import("../group-test-cli.js");
+    const target = await resolveTargetArg(a, rest);
+    if (!target) {
+      console.error("usage: mslxdff -group test <target|seq> [--group <name>] [--model <id>] [--say <text>]");
+      process.exit(1);
+    }
+    const model = argValue(args, "--model", "-m") || undefined;
+    const say = argValue(args, "--say", "-s") || undefined;
+    const groupArg = argValue(args, "--group", "-g") || undefined;
+    const asJson = args.includes("--json");
+    const { runGroupLinkTest } = await import("../group-test.js");
+    const r = await runGroupLinkTest({ group: groupArg || "", target, ...(model ? { model } : {}), ...(say ? { prompt: say } : {}) });
+    renderGroupTest(r, { json: asJson });
+    process.exit(r.status === "ok" ? 0 : 1);
   } else if (action === "remove" && a) {
     const seq = Number(a);
     if (!Number.isInteger(seq) || seq < 1) {
@@ -138,7 +155,7 @@ export async function handleGroupCommand(args) {
       process.exit(1);
     }
   } else {
-    console.error("usage: mslxdff -group sync | -group leave <name> | -group list | -group remove <seq> | -creategroup <name>");
+    console.error("usage: mslxdff -group sync | -group leave <name> | -group list | -group test <target|seq> | -group remove <seq> | -creategroup <name>");
   }
   process.exit(0);
 }

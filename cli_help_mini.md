@@ -104,6 +104,7 @@
 | 组同步 | `-group sync` | 刷新全组成员 |
 | 组离开单 | `-group leave <name>` | 离开单组 |
 | 组列表 | `-group list` | 列组+成员+健康/序号 |
+| 组员链路测试 | `-group test <target\|seq> [--group <名>] [--model <id>] [--say <词>] [--json]` | 验「本机 → 组长 → 某组员（含 relay）→ 上游」整条路，**按阶段指出断在哪一跳**；target 可填 url / `relay://id` / `-group list` 序号 |
 | 组踢人 | `-group remove <seq>` | 仅 leader 按序号踢人 |
 | 全部离开 | `-leavegroup` / `--leavegroup` | 离开所有成员组 |
 | 解散组 | `-delgroup <name>` / `--delgroup` | 仅 leader 解散 |
