@@ -75,7 +75,7 @@ export async function handleV6Pool(args = []) {
   console.log("");
   console.log("-".repeat(66));
   console.log(`  基线（IPv4/直连）：${line(r.baseline)}`);
-  console.log(`  v6 采样：有额度 ${r.v6OkCount}｜429 ${r.v6LimitedCount}｜不可达 ${r.v6NetCount}（共 ${r.requested}）`);
+  console.log(`  v6 采样：有额度 ${r.v6OkCount}｜受限 ${r.v6LimitedCount}｜不可达 ${r.v6NetCount}（共 ${r.requested}）`);
   console.log("");
   const verdicts = {
     "v6-works": {
@@ -85,7 +85,7 @@ export async function handleV6Pool(args = []) {
     },
     "v6-also-limited": {
       mark: "⛔",
-      text: `IPv6 **也全 429**：换 IP 没换到新额度`,
+      text: `IPv6 **也全受限**（换 IP 没换到新额度）`,
       next: `   结论：v6 池对这台机器**无意义**（要么上游不按出口 IP 计额，要么该段没真路由出去）。建议 MSLXDFF_V6_POOL=0。`,
     },
     "v6-unreachable": {

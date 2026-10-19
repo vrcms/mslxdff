@@ -4,14 +4,15 @@
 // （打上游回 429 FreeUsageLimitError），而某个 IPv6 出口还能 200 ⇒ 池有用（换 IP 换到新额度）；
 // 若 IPv6 出口也 429 ⇒ 要么上游按别的东西计额（账号/session），要么该段没真路由出去。
 //
-// 对照纪律：**除"源地址"外一切相同** —— 同 URL、同 UA、同模型、同 `stream:true`+五核心工具
-// （否则会 403 FreeTierError 而非 429，测出来的不是额度）；差异只允许来自"哪个源地址出网"。
+// 对照纪律：**除"源地址"外一切相同** —— 同 URL、同 UA、同**身份四件套 header**、同模型、同 `stream:true`+五核心工具
+// （免费层要流式+五核心工具+身份头，缺任一项都会 403 FreeTierError 而非 429，测出来的不是额度）；
+// 整轮基线+v6 共用同一个 session。差异只允许来自"哪个源地址出网"。
 // 判定复用 `warp-pool/verdict.js` 的 classifyWarpSignal（与生产换址判决同源，不自造一套）。
 //
 // IO 全部注入（agentFactory/fetch/detect/claimer），零真机依赖，可单测。
 import { getUndici, timeoutSignal } from "../compat.js";
 import { classifyWarpSignal } from "../warp-pool/verdict.js";
-import { opencodeUa } from "../opencode-identity.js";
+import { opencodeUa, genId } from "../opencode-identity.js";
 import { CORE_AGENT_TOOL_NAMES } from "../free-lane.js";
 import { detectPool } from "./detect.js";
 import { resolveV6Config } from "./config.js";
@@ -49,12 +50,29 @@ async function readBody(res, max = 2048) {
   }
 }
 
+/** 免费层身份头（与生产 buildHeaders 同源，见 src/upstream.js）：**缺了必 403 FreeTierError**。
+ * 实测 2026-10-19：只发 User-Agent → 403；补上 x-opencode-* 四件套 → 200。
+ * session 用随机 genId（对照测试测的是"出口 IP"不是"会话亲和"，每个探针独立即可）。 */
+export function freeLaneHeaders({ session = genId("ses_") } = {}) {
+  return {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+    "User-Agent": opencodeUa(),
+    "x-opencode-client": "desktop",
+    "x-opencode-session": session,
+    "x-opencode-request": genId("msg_"),
+    "x-opencode-project": "global",
+    "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+    "X-Title": "Hermes Agent",
+  };
+}
+
 /**
  * 从某个源地址打一次免费层 chat，返回判决。
  * `addr=""` 表示**直连**（走本机默认路由 = IPv4 出口，或双栈默认）。
  * @returns {Promise<{addr, ok, status, kind, rotate, ms, body, error}>}
  */
-export async function probeUpstreamFrom({ addr = "", model, baseUrl = "https://opencode.ai", agentFactory, fetchImpl, timeoutMs = 20_000, prompt } = {}) {
+export async function probeUpstreamFrom({ addr = "", model, baseUrl = "https://opencode.ai", agentFactory, fetchImpl, timeoutMs = 20_000, prompt, session } = {}) {
   const t0 = Date.now();
   let agent = null;
   try {
@@ -62,7 +80,7 @@ export async function probeUpstreamFrom({ addr = "", model, baseUrl = "https://o
     const f = fetchImpl || getUndici().fetch;
     const res = await f(`${baseUrl}/zen/v1/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": opencodeUa(), Accept: "text/event-stream" },
+      headers: freeLaneHeaders({ session }),
       body: JSON.stringify(freeLaneBody(model, prompt)),
       ...(agent ? { dispatcher: agent } : {}),
       signal: timeoutSignal(timeoutMs),
@@ -105,10 +123,13 @@ export async function runV6PoolCompare({
   const agentFactory = deps.agentFactory || ((addr) => new Agent({ connect: { localAddress: addr }, connections: 1, keepAliveTimeout: 5_000 }));
   const probe = deps.probe || probeUpstreamFrom;
   const pick = deps.randomAddress || ((p) => randomAddress(p));
+  // 整轮共用一个 session：对照纪律「除源地址外一切相同」——让差异只可能来自出口 IP，
+  // 而不是会话随机性（免费层按出口 IP 计额，但共用 session 才能把这一点测干净）。
+  const session = deps.session || genId("ses_");
 
   // ① 基准：直连（IPv4 / 系统默认出口），记下它的额度状态作为对照基线
   tick({ phase: "baseline-start", prefix: d.prefix, model });
-  const baseline = await probe({ addr: "", model, baseUrl, agentFactory, fetchImpl: deps.fetchImpl });
+  const baseline = await probe({ addr: "", model, baseUrl, agentFactory, fetchImpl: deps.fetchImpl, session });
   tick({ phase: "baseline-done", ...baseline });
 
   // ② IPv6 池采样：每个随机源地址打同一条请求
@@ -122,7 +143,7 @@ export async function runV6PoolCompare({
       for (let k = 0; k < 16 && mineSet.has(addr); k++) addr = pick(prefix);
       await claimer.ensure(addr);
       tick({ phase: "v6-start", i: i + 1, n, addr });
-      const r = await probe({ addr, model, baseUrl, agentFactory, fetchImpl: deps.fetchImpl });
+      const r = await probe({ addr, model, baseUrl, agentFactory, fetchImpl: deps.fetchImpl, session });
       v6.push(r);
       tick({ phase: "v6-done", i: i + 1, n, ...r });
     }
@@ -133,13 +154,16 @@ export async function runV6PoolCompare({
   // ③ 判语：对照基线
   const baseLimited = baseline.status === 429 || baseline.kind === "free-quota" || baseline.kind === "free-tier" || baseline.kind === "ip-limit";
   const v6Ok = v6.filter((r) => r.ok);
-  const v6Limited = v6.filter((r) => r.status === 429);
+  // 受限 = 有 HTTP 响应但拿不到额度（403 FreeTierError / 429 额度 / 其余 4xx-5xx）；
+  // 只有网络层失败（status=0）才算"够不着"。旧实现只认 429，403 全 0/4 时会掉进兜底 "mixed"
+  // 误判成「部分可用」（真机 2026-10-19 实测：4 个 v6 全 403 → 却报 0/4 部分可用）。
+  const v6Limited = v6.filter((r) => !r.ok && r.status);
   const v6Net = v6.filter((r) => !r.status);
 
   let verdict;
   const allOk = v6Ok.length === v6.length && v6.length > 0;
   if (allOk) verdict = "v6-works";                                  // 全部 v6 出口都有额度
-  else if (v6Limited.length === v6.length) verdict = "v6-also-limited"; // 全部 429 ⇒ 没换到新额度
+  else if (v6Limited.length === v6.length) verdict = "v6-also-limited"; // 全部受限 ⇒ 没换到新额度
   else if (v6Net.length === v6.length) verdict = "v6-unreachable";  // 全部够不着 ⇒ 段没路由过来
   else verdict = "mixed";                                           // 有的成有的不成
 

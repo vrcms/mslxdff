@@ -6,6 +6,7 @@ import {
   runV6PoolCompare,
   probeUpstreamFrom,
   freeLaneBody,
+  freeLaneHeaders,
   V6TEST_DEFAULT,
 } from "../src/v6pool/selftest.js";
 import { CORE_AGENT_TOOL_NAMES } from "../src/free-lane.js";
@@ -150,4 +151,56 @@ test("compare: 默认采样数是 6，且非 Linux 时不发任何请求", async
   const r = await runV6PoolCompare({ env: {}, deps: { detect: skipDetect, probe: async () => { called += 1; return {}; } } });
   assert.equal(r.status, "skip");
   assert.equal(called, 0, "检测不过就不该发任何探测请求");
+});
+
+test("freeLaneHeaders: 必带免费层身份四件套（缺了必 403 FreeTierError，测不出额度）", () => {
+  const h = freeLaneHeaders();
+  assert.equal(h["x-opencode-client"], "desktop");
+  assert.match(h["x-opencode-session"], /^ses_/, "缺 session → 403");
+  assert.match(h["x-opencode-request"], /^msg_/, "缺 request → 403");
+  assert.equal(h["x-opencode-project"], "global");
+  assert.ok(h["User-Agent"].startsWith("opencode/"), "UA 非 opencode/ 会被挡");
+  // 传入 session 时用它（保证整轮对照共用同一个）
+  assert.equal(freeLaneHeaders({ session: "ses_fixed" })["x-opencode-session"], "ses_fixed");
+});
+
+test("probeUpstreamFrom: 请求**真的带上**身份四件套（回归：只发 UA 会 403）", async () => {
+  let sent = null;
+  await probeUpstreamFrom({
+    addr: "", model: "m-free", session: "ses_shared",
+    fetchImpl: async (url, init) => { sent = init.headers; return { status: 200, text: async () => "data: ok" }; },
+  });
+  assert.equal(sent["x-opencode-client"], "desktop");
+  assert.equal(sent["x-opencode-session"], "ses_shared", "整轮对照应共用传入的 session");
+  assert.ok(sent["x-opencode-request"], "必须带 x-opencode-request");
+  assert.equal(sent["x-opencode-project"], "global");
+});
+
+test("compare: 全 403 FreeTierError → verdict=v6-also-limited（回归：旧实现会误判 mixed「部分可用」）", async () => {
+  const r = await runV6PoolCompare({
+    env: {}, count: 3,
+    deps: {
+      detect: okDetect, claimer: () => fakeClaimer(), agentFactory: fakeAgentFactory,
+      randomAddress: seqAddrs(["2001:db8::a", "2001:db8::b", "2001:db8::c"]),
+      // 403（免费层资格）——旧实现只认 429，会让 0/3 掉进兜底 mixed
+      probe: async ({ addr }) => ({ addr, ok: false, status: 403, kind: "free-tier", rotate: true, ms: 10, body: "FreeTierError" }),
+    },
+  });
+  assert.equal(r.verdict, "v6-also-limited", "有 HTTP 响应但 0 额度必须判受限，不能报「部分可用」");
+  assert.equal(r.v6LimitedCount, 3);
+  assert.equal(r.v6NetCount, 0);
+});
+
+test("compare: 整轮基线+v6 共用同一个 session（差异只来自源地址）", async () => {
+  const sessions = [];
+  await runV6PoolCompare({
+    env: {}, count: 2,
+    deps: {
+      detect: okDetect, claimer: () => fakeClaimer(), agentFactory: fakeAgentFactory,
+      randomAddress: seqAddrs(["2001:db8::a", "2001:db8::b"]),
+      probe: async ({ addr, session }) => { sessions.push(session); return { addr, ok: true, status: 200, kind: "none", rotate: false, ms: 1, body: "" }; },
+    },
+  });
+  assert.ok(sessions.length >= 3, "基线 + 2 个 v6 样本");
+  assert.equal(new Set(sessions).size, 1, "整轮必须共用同一个 session");
 });
