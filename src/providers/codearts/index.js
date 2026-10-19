@@ -32,6 +32,7 @@ export function createCodeartsProvider({
   connectTimeoutMs = envInt("MSLXDFF_CODEARTS_TIMEOUT_MS", 30_000),
   cooldownMs = envInt("MSLXDFF_CODEARTS_COOLDOWN_MS", 30_000),
   maxConcurrent = Number.parseInt(process.env.MSLXDFF_CODEARTS_MAX_CONCURRENT ?? "", 10) || 3,
+  sessionWindowMs = Number.parseInt(process.env.MSLXDFF_CODEARTS_SESSION_WINDOW_MS ?? "", 10) || 90_000,
   autoClaim = process.env.MSLXDFF_CODEARTS_AUTO_CLAIM !== "0",
   fetchImpl,
   file,
@@ -61,8 +62,11 @@ export function createCodeartsProvider({
   };
   const pool = createAuthPool({ keys: allKeys, fetchImpl, stsHost, clock, saveFn });
   const catalog = createCatalog();
-  // 该上游对并发极敏感（实测 >3 即坏号/限流）；超限请求 FIFO 排队，不拒绝。
-  const gate = createGate({ limit: maxConcurrent });
+  // 该上游对并发极敏感（实测 >3 即坏号/限流）；且上游按「账号最近约 90s 内打开过的会话数」判限，
+  // 请求结束**不立即释放**槽（实测 ~80s 才回收）——故闸要同时压「在途」与「窗口内已开会话」。
+  // 上限随账号数放大：上游按「账号」限 3 个，N 个号即 3N 个额度，写死 3 会白白浪费后续号。
+  const accountCount = Math.max(1, ring.size || 1);
+  const gate = createGate({ limit: maxConcurrent * accountCount, sessionWindowMs });
 
   let agent = null; let dispatcher = null;
   try {

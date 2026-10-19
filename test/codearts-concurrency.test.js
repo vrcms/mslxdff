@@ -104,7 +104,7 @@ describe("codearts 并发闸", () => {
     saveProviderConfig("codearts", { baseUrl: srv.url, keys: [blob] }, { file: stateFile });
     return createCodeartsProvider({
       baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url,
-      apiKeys: [blob], file: stateFile, ...overrides,
+      apiKeys: [blob], file: stateFile, sessionWindowMs: 0, ...overrides,
     });
   }
 
@@ -150,7 +150,7 @@ describe("codearts 并发闸 · 流式（回归：旧闸在 runChat 返回即放
   function makeProvider(overrides = {}) {
     const blob = makeBlob();
     saveProviderConfig("codearts", { baseUrl: srv.url, keys: [blob] }, { file: stateFile });
-    return createCodeartsProvider({ baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url, apiKeys: [blob], file: stateFile, ...overrides });
+    return createCodeartsProvider({ baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url, apiKeys: [blob], file: stateFile, sessionWindowMs: 0, ...overrides });
   }
   const drain = async (res) => { try { await res.text(); } catch {} };
 
@@ -289,6 +289,83 @@ describe("codearts 全号饱和", () => {
     assert.equal(res.status, 400);
     assert.ok(/TM\.00001041/.test(txt), `正文应含 TM.00001041，实测：${txt.slice(0, 160)}`);
     assert.ok(srv.calls() >= 2, `两个号各应打一次上游，实测 ${srv.calls()}`);
+    await p.close();
+  });
+});
+
+// 模拟上游「账号窗口内会话槽」：最近 windowMs 内每开一次会话占一槽、200 也不清槽，
+// 槽满 3 就回 400 TM.00001041——复刻 2026-10-19 现网实测（串行间隔 1s 连发第 4 个即被拒）。
+function windowStub({ windowMs = 400 } = {}) {
+  const opens = [];
+  const srv = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/v2/chat/completions") {
+        const now = Date.now();
+        while (opens.length && opens[0] <= now - windowMs) opens.shift();
+        if (opens.length >= 3) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error_code: "TM.00001041", error_msg: "并发会话数已达上限(3个)，请关闭部分会话后重试。" }));
+          return;
+        }
+        opens.push(now);
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(CHAT_SSE.map((f) => `data: ${f}\n\n`).join(""));
+        return;
+      }
+      res.writeHead(404); res.end("{}");
+    });
+  });
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve({
+    url: `http://127.0.0.1:${srv.address().port}`, opens: () => opens.length,
+    close: () => new Promise((r) => srv.close(r)),
+  })));
+}
+
+describe("codearts 会话窗口闸（复刻上游按窗口计会话）", () => {
+  let srv, dir, stateFile, savedEnv;
+  beforeEach(async () => {
+    srv = await windowStub({ windowMs: 400 });
+    dir = mkdtempSync(join(tmpdir(), "codearts-win-"));
+    stateFile = join(dir, "state.json");
+    savedEnv = process.env.MSLXDFF_STATE_FILE;
+    process.env.MSLXDFF_STATE_FILE = stateFile;
+  });
+  afterEach(async () => {
+    process.env.MSLXDFF_STATE_FILE = savedEnv;
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    await srv.close();
+  });
+  function mk(sessionWindowMs) {
+    const blob = makeBlob();
+    saveProviderConfig("codearts", { baseUrl: srv.url, keys: [blob] }, { file: stateFile });
+    return createCodeartsProvider({ baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url, apiKeys: [blob], file: stateFile, sessionWindowMs });
+  }
+
+  test("窗口闸 ON：4 个间隔 50ms 的请求全 200（第 4 个被挡到窗口过期，不打上游）", async () => {
+    const p = mk(400);
+    const t0 = Date.now();
+    const st = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await p.chat({ model: "GLM-5.2", messages: [{ role: "user", content: "hi" }], stream: false });
+      st.push(r.status);
+      await new Promise((s) => setTimeout(s, 50));
+    }
+    assert.deepEqual(st, [200, 200, 200, 200], `窗口闸应保证全成功，实测 ${st}`);
+    assert.ok(Date.now() - t0 >= 400, `第 4 个应等到窗口过期后才发，总耗时应 ≥400ms，实测 ${Date.now() - t0}ms`);
+    await p.close();
+  });
+
+  test("窗口闸 OFF（sessionWindowMs:0）对照组：第 4 个被上游拒 400（证明窗口闸真在防这件事）", async () => {
+    const p = mk(0);
+    const st = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await p.chat({ model: "GLM-5.2", messages: [{ role: "user", content: "hi" }], stream: false });
+      await r.text().catch(() => {});
+      st.push(r.status);
+      await new Promise((s) => setTimeout(s, 50));
+    }
+    assert.equal(st[3], 400, `关窗时应复现上游 TM.00001041 400，实测 ${st}`);
     await p.close();
   });
 });
