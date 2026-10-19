@@ -46,10 +46,22 @@ export function createUpstreamEngine(opts = {}) {
         const via = useResponses ? "@ai-sdk/openai · responses" : "@ai-sdk/openai-compatible · chat";
         try { console.error(`[upstream-engine] sdk 引擎生效（${via}）`); } catch {}
       }
-      // 保留 legacy 的匿名重试语义（仅 !anonFirst 配置下存在）；G1a 起 free-429 的**请求内 v6 换出口**
-      // 也走这条委派——重试环在 legacy.chat 里，SDK 通道撞 429 不委派就等于把换出口的额度白白留给下一发。
-      // 无 rotateFor 的 dispatcher（直连/WARP）且 anonFirst 时维持旧行为（不重复打流量）。
-      if (res.status === 429 && isFreeModel(body?.model) && (!anonFirst || typeof dispatcher?.rotateFor === "function")) return legacy.chat(body);
+      // 保留 legacy 的匿名重试语义（仅 !anonFirst 配置下存在）；free-429 的**请求内 v6 换出口**
+      // 也走这条委派——重试环在 legacy.chat 里。
+      // ⚠ 顺序契约（用户 2026-10-19）：先借人（组员/组长，用对方 IPv4 出口），全都用完才换出口。
+      //   故 v6 换出口**默认关**，只有显式 MSLXDFF_V6_INREQUEST_ROTATE=1 才委派；
+      //   默认把 429 原样返回，交给 chat-pipeline 去试组员/组长。
+      const v6RotateOn = (() => {
+        const raw = process.env.MSLXDFF_V6_INREQUEST_ROTATE;
+        if (raw === undefined || raw === null || raw === "") return false;
+        const s = String(raw).trim().toLowerCase();
+        return !(s === "0" || s === "false" || s === "off" || s === "no");
+      })();
+      const canRotate = v6RotateOn && typeof dispatcher?.rotateFor === "function";
+      // 原语义：撞 429 且是 free 模型，且（非匿名首试 或 有 v6 池可换址）⇒ 委派 legacy 重试环。
+      // 新语义：**只有显式开启 v6 请求内换址时才委派**；默认 429 原样返回，交给上层去借人
+      // （组员/组长，用对方 IPv4 出口），符合用户 2026-10-19 的「先借人再换出口」顺序。
+      if (res.status === 429 && isFreeModel(body?.model) && (anonFirst ? canRotate : v6RotateOn)) return legacy.chat(body);
       return res;
     } catch (e) {
       if (e && e._sdkLoadFailed) {

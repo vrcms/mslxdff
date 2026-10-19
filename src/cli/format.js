@@ -70,6 +70,8 @@ export function fmtEvent(e) {
       return `${head} peer win      选中 peer=${e.winPeer} model=${m(e.winTarget)} latency=${e.latencyMs}ms`;
     case "peer-race-lose":
       return `${head} peer lose     组员全部失败 model=${m(e.model)}`;
+    case "peer-skip-slow":
+      return `${head} peer skip     跳过过慢组员 peer=${e.peer} 历史延迟=${e.latencyMs ?? "-"}ms > ${e.capMs ?? "-"}ms`;
     case "fallback":
       return `${head} fallback      ${m(e.from)} -> ${m(e.to)} reason=${m(e.reason)}`;
     case "fallback-notice":

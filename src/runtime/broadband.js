@@ -97,20 +97,30 @@ export function startBroadband({ token, upstream, logs, log = console.log }) {
     return true;
   })();
   const execAndPost = createBroadbandExec({ token, upstream, logs, log });
+  // 心跳往返延迟：成员侧自己量「上一轮 heartbeat 的 RTT」，随下一次心跳上报给组长。
+  // 组长侧据此排序「谁的延迟更低」（选路=延迟最小优先，见 routes/peers.js 的 ordered）。
+  // 用上一轮而不是本轮的原因：本轮 RTT 要等响应回来才知道，来不及带在这次请求里。
+  const hbRtt = new Map(); // group name -> ms
   const doHeartbeat = async () => {
     for (const g of broadbandGroups()) {
       try {
+        const t0 = Date.now();
         const res = await compatFetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ name: g.name, group: g.name }),
+          body: JSON.stringify({ name: g.name, group: g.name, rttMs: hbRtt.get(g.name) ?? null }),
           signal: timeoutSignal(5000),
         });
+        const rtt = Date.now() - t0;
+        hbRtt.set(g.name, rtt);
         if (!res.ok) {
           const txt = await res.text().catch(() => "");
           log(`broadband heartbeat ${g.name}: ${res.status} ${txt.slice(0, 100)}`);
+        } else {
+          log(`broadband heartbeat ${g.name}: ok rtt=${rtt}ms`);
         }
       } catch (err) {
+        hbRtt.delete(g.name);
         log(`broadband heartbeat ${g.name}: failed — ${errMsg(err)}`);
       }
     }

@@ -138,22 +138,32 @@ export function createPeersService({
     return hot * 1_000_000_000 + latency * 1_000 + fails;
   }
 
-  // Available peers ordered for failover: hot peers (recent success) first —
-  // the winner of the last race is reused next. Everyone else is ordered by
-  // when they last failed, earliest first: a peer that failed longer ago has
-  // had more time to recover, so it is tried before a more recent failure.
-  // Peers with no recorded error go after any that failed.
+  // 可用组员排序（用户 2026-10-19 决定）：**延迟最小优先**，不再「热优先」。
+  // 语义 = 「组员的额度用完后，用跟组长延迟最小的组员」——延迟是首要判据。
+  // 延迟来源（优先级从高到低）：
+  //   ① stats 里的真实请求 EMA（recordResult 记的 latencyMs）——最可信；
+  //   ② peer.heartbeatLatencyMs —— 组员**定时心跳**上报的 rtt（没跑过真实请求时也能排序）；
+  // 未测过延迟的排在有数据之后；同延迟按「最早失败优先」；都没失败过的排最后。
+  function peerLatency(p) {
+    const s = stats[p.url]?.latencyMs;
+    if (s != null) return s;
+    const hb = list.find((x) => x.url === p.url)?.heartbeatLatencyMs;
+    return Number.isFinite(Number(hb)) ? Number(hb) : null;
+  }
+
   function ordered(t = now()) {
     return available().sort((a, b) => {
-      const hotA = stats[a.url]?.okAt && t - stats[a.url].okAt < heatMs ? 0 : 1;
-      const hotB = stats[b.url]?.okAt && t - stats[b.url].okAt < heatMs ? 0 : 1;
-      if (hotA !== hotB) return hotA - hotB;
+      const la = peerLatency(a);
+      const lb = peerLatency(b);
+      const ha = la != null, hb = lb != null;
+      if (ha !== hb) return ha ? -1 : 1;          // 有延迟数据的优先
+      if (ha && hb && la !== lb) return la - lb;  // 延迟小的先上
       const ea = lastErrorAt[a.url];
       const eb = lastErrorAt[b.url];
       if (ea == null && eb == null) return 0;
-      if (ea == null) return 1; // never-failed peers go after any that failed
+      if (ea == null) return 1;
       if (eb == null) return -1;
-      return ea - eb; // earliest failure first
+      return ea - eb;
     });
   }
 

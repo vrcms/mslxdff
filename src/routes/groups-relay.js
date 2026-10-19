@@ -18,6 +18,7 @@ function snippet(v, n = 300) {
 }
 
 export async function heartbeatHandler({ req, res, groups, bus, logs }) {
+  const tRecv = Date.now();
   const auth = /^Bearer (.+)$/.exec(req.headers["authorization"] || "");
   if (!auth) return json(res, 401, { error: "bearer token required" });
   let body;
@@ -36,9 +37,19 @@ export async function heartbeatHandler({ req, res, groups, bus, logs }) {
       if (m) {
         m.publicIp = ip;
         m.lastSeen = Date.now();
-        try { groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen }); } catch {}
+        // 延迟采样（心跳即可得，无需真实请求）：
+        //   rttMs  = 成员自己量的「上一轮心跳往返」（它到组长的网络路径）
+        //   serverMs = 组长这一侧从收到到处理完的耗时
+        // 两者取有值的那个写进成员记录，供选路按「延迟最小优先」排序（routes/peers.js ordered）。
+        const reportedRtt = Number(body?.rttMs);
+        const memberRtt = Number.isFinite(reportedRtt) && reportedRtt >= 0 ? Math.round(reportedRtt) : null;
+        if (memberRtt != null) m.latencyMs = memberRtt;
+        try {
+          groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen, ...(memberRtt != null ? { latencyMs: memberRtt } : {}) });
+        } catch {}
       }
-      const evtData = { ts: Date.now(), type: "relay-heartbeat", member: targetId, ip, lastSeen: m?.lastSeen, group: groupName };
+      const serverMs = Date.now() - tRecv;
+      const evtData = { ts: Date.now(), type: "relay-heartbeat", member: targetId, ip, lastSeen: m?.lastSeen, rttMs: Number.isFinite(Number(body?.rttMs)) ? Number(body.rttMs) : null, serverMs, group: groupName };
       if (bus) bus.emit(evtData);
       logs?.appendEvent?.(evtData);
     }

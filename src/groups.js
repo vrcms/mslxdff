@@ -202,7 +202,10 @@ export function syncPeersFromMembers({ peers, members, myUrl, group, skipIds = [
     if (kind === "broadband" || String(m?.url || "").startsWith("relay://")) continue;
     const url = normalizePeerUrl(m?.url);
     if (!url || url === self) continue;
-    if (peers.add({ name: id, url, token: m?.token || "", group })) added++;
+    // heartbeatLatencyMs：组长在**心跳**里量的成员延迟（成员上报 rttMs）。选路 `ordered()` 在没有
+    // 真实请求 EMA 时回落到它——这就是「组员定时上报的过程中就知道谁延迟更低」。
+    const hbLat = Number.isFinite(Number(m?.latencyMs)) && Number(m.latencyMs) >= 0 ? Number(m.latencyMs) : null;
+    if (peers.add({ name: id, url, token: m?.token || "", group, ...(hbLat != null ? { heartbeatLatencyMs: hbLat } : {}) })) added++;
   }
   return { removed, added, total: Object.keys(members || {}).length };
 }

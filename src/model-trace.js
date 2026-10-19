@@ -161,6 +161,8 @@ export function formatModelTrace({ type, reqId, model, data = {}, request = null
     detail = `组员竞速开始 peers=${data.peers ?? "-"}`;
   } else if (type === "peer-budget-out") {
     detail = `组员竞速预算用尽 reason=${safeText(data.reason || "", 80)} budgetMs=${data.budgetMs ?? "-"} remaining=${data.remaining ?? "-"}`;
+  } else if (type === "peer-skip-slow") {
+    detail = `跳过过慢组员 peer=${data.peer || "?"} 历史延迟=${data.latencyMs ?? "-"}ms > 上限=${data.capMs ?? "-"}ms`;
   } else detail = safeText(`${decisionKv(data)} ${data.message || data.error || ""}`, 200);
   return `[${base.time}] [req=${base.req}] [model=${base.model}] [stage=${base.stage}] ${detail}`;
 }

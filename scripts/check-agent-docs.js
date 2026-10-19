@@ -7,8 +7,9 @@ import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname ? import.meta.dirname : ".", "..");
 
-// 常驻层：每轮都进上下文 → 严格
-const ROOT_LIMITS = { bytes: 12 * 1024, lines: 120, bullet: 900 };
+// 常驻层：每轮都进上下文。**用户 2026-10-19 决定：AGENTS.md 体积/行数不受限**（流程契约优先于尺寸），
+// 仅保留「单条 bullet 别太长」这一条可读性约束；nested 层仍按需才读、维持原限。
+const ROOT_LIMITS = { bytes: Infinity, lines: Infinity, bullet: 2000 };
 // 就近层：按路径命中才读 → 可放宽，但仍不许长段落化
 const NESTED_LIMITS = { bytes: 12 * 1024, lines: 70, bullet: 1400 };
 

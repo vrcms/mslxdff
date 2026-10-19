@@ -85,6 +85,7 @@ const NO_429_RETRY = { network: { attempts: 0, delayMs: 0 }, 429: { attempts: 0,
 const freeBody = () => ({ model: "deepseek-v4.1-flash-free", stream: false, messages: [{ role: "user", content: "hi" }], tools: [{ function: { name: "bash" } }] });
 
 test("upstream：free 模型 429 ⇒ 请求内换出口重发，直到 200（额度穷尽优先）", async () => {
+  process.env.MSLXDFF_V6_INREQUEST_ROTATE = "1"; // 默认关（先借人），此处显式开
   const f = fakePool({ exhaustFirst: 1 });
   const c = createUpstreamClient({ authToken: "public", fetchImpl: f.fetchImpl, dispatcher: f.extDispatcher, keepAlive: false });
   const res = await c.chat(freeBody());
@@ -95,6 +96,7 @@ test("upstream：free 模型 429 ⇒ 请求内换出口重发，直到 200（额
 });
 
 test("upstream：出口池全耗尽 ⇒ 最后一个 429 原样交出（不无限重试、不伪造成功），次数有上限", async () => {
+  process.env.MSLXDFF_V6_INREQUEST_ROTATE = "1";
   const f = fakePool({ all429: true }); // 远超上限：必须在 MSLXDFF_V6_INREQUEST_RETRIES 处停
   const prev = process.env.MSLXDFF_V6_INREQUEST_RETRIES;
   process.env.MSLXDFF_V6_INREQUEST_RETRIES = "2";
@@ -147,6 +149,7 @@ test("upstream：非 free 模型的 429 不触发出口轮换（那是别家的�
 // ---------- SDK 引擎：429 free 必须委派 legacy（重试环在那儿） ----------
 
 test("upstream-engine：SDK 通道撞 free-429 ⇒ 委派 legacy.chat 走请求内换出口；无 rotateFor 时不重复打流量", async () => {
+  process.env.MSLXDFF_V6_INREQUEST_ROTATE = "1";
   const f = fakePool({ exhaustFirst: 1 });
   const engine = createUpstreamEngine({
     authToken: "public",
@@ -170,4 +173,12 @@ test("upstream-engine：SDK 通道撞 free-429 ⇒ 委派 legacy.chat 走请求�
   const res2 = await engine2.chat({ model: "glm-5.3-flash-free", stream: true, messages: [{ role: "user", content: "hi" }], tools: [{ function: { name: "bash" } }] });
   assert.equal(res2.status, 429);
   assert.equal(legacyCalls, 0, "救不了的场景不许白重放一遍请求");
+});
+
+
+
+
+// 文件级清理：上面几个用例显式打开过请求内换址（新契约默认关），跑完还原，避免污染其他测试文件。
+test("cleanup: 还原 MSLXDFF_V6_INREQUEST_ROTATE", () => {
+  delete process.env.MSLXDFF_V6_INREQUEST_ROTATE;
 });

@@ -4,6 +4,7 @@ import { errMsg } from "./helpers.js";
 import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
 import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
+import { serialTryPeers, PEER_SERIAL } from "./peer-serial.js";
 
 // peer 阶段总预算：三批候选（ordered / orderedByLastError / coolingByLastError）共享同一个
 // 截止时间，而不是每批各吃满一次等头超时。实测最坏路径是三批串行各 30s（≈90s），
@@ -32,6 +33,15 @@ export { PEER_HEADERS_TIMEOUT_MS };
 function peerConnectTimeoutMs() {
   const n = Number(process.env.MSLXDFF_PEER_CONNECT_TIMEOUT_MS);
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_PEER_CONNECT_TIMEOUT_MS;
+}
+
+// 单组员等待上限（串行模式下逐个体生效，MSLXDFF_PEER_ATTEMPT_TIMEOUT_MS，缺省 20s）。
+// 为什么必须限：串行是「一个失败才试下一个」，若一个黑洞节点吃满 120s（bodyTimeout），
+// 后面延迟更小的好组员根本轮不到——实测 172.93.221.187 常 38~44s 才回/被 abort。
+// 20s 足以覆盖正常首包，又不会让一个坏节点吃掉整个阶段预算；可用 env 调。
+function peerAttemptTimeoutMs() {
+  const n = Number(process.env.MSLXDFF_PEER_ATTEMPT_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 20_000;
 }
 
 // peer 阶段总预算（MSLXDFF_PEER_RACE_BUDGET_MS，0=不限）：一次 peer 阶段（同批或若干批候选）
@@ -249,6 +259,10 @@ function peerName(peer) {
   return String(peer?.name || "").trim() || null;
 }
 
+// 组员试法：**串行**（用户 2026-10-19 决定：不竞速）。实现在 ./peer-serial.js，
+// 本文件只保留调度与并发版（PEER_SERIAL=false 时的旧路径）。
+export { PEER_SERIAL };
+
 export async function racePeerCandidates(candidates, ctx) {
   const tried = (ctx.triedUrls ??= new Set());
   const fresh = candidates.filter((p) => !tried.has(p.url));
@@ -256,6 +270,15 @@ export async function racePeerCandidates(candidates, ctx) {
   // 没传的阶段（单批调用）不带预算——保持旧行为，不外溢到整条请求。
   const budgetMs = ctx.peerRaceBudgetMs ?? 0;
   const deadline = Number(ctx.peerRaceDeadline) || 0;
+
+  // 串行：按 candidates 的既有次序（调用方已按「延迟最小优先」排好）逐个试。
+  if (PEER_SERIAL) {
+    return serialTryPeers({
+      candidates: fresh, ctx, tried,
+      deps: { resolvePeerTarget, forwardToPeer, peerName, recordLater, summarizeRequest, runHook, errMsg, perAttemptCap: peerAttemptTimeoutMs(), deadline, budgetMs },
+    });
+  }
+
   for (let i = 0; i < fresh.length; i += PEER_RACE_LIMIT) {
     if (deadline > 0 && Date.now() >= deadline) {
       ctx.evt("peer-budget-out", { peer: null, reason: `peer 阶段总预算 ${budgetMs}ms 用尽`, budgetMs, remaining: fresh.length - i });

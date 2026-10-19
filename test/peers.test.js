@@ -105,7 +105,7 @@ test("recordResult ok warms the hot cache (EMA latency, model, reset fails)", as
   assert.equal(svc.isHot("http://a"), true);
 });
 
-test("ordered() puts hot peers first, then by earliest failure, never-failed last", async () => {
+test("ordered() 按延迟最小优先（用户 2026-10-19 新策略：不竞速、延迟最小先上）", async () => {
   const t = 1_000_000;
   const svc = createPeersService({ file: tmpStateFile(),
     peers: [
@@ -113,20 +113,19 @@ test("ordered() puts hot peers first, then by earliest failure, never-failed las
       { name: "b", url: "http://b", token: "t" },
       { name: "c", url: "http://c", token: "t" },
     ],
-    errors: { "http://b": t - 600_000, "http://a": t - 300_000 }, // b failed earlier
+    errors: { "http://b": t - 600_000, "http://a": t - 300_000 },
     stats: {
-      "http://b": { okAt: t - 1_000, latencyMs: 400, fails: 0, model: "m" },   // hot, slow
-      "http://c": { okAt: t - 2_000, latencyMs: 50, fails: 0, model: "m" },    // hot, fast
-      "http://a": { okAt: t - 10_000_000, latencyMs: 80, fails: 0, model: "m" }, // cold (expired)
+      "http://b": { okAt: t - 1_000, latencyMs: 400, fails: 0, model: "m" },   // 热但慢
+      "http://c": { okAt: t - 2_000, latencyMs: 50, fails: 0, model: "m" },    // 热且快
+      "http://a": { okAt: t - 10_000_000, latencyMs: 80, fails: 0, model: "m" }, // 冷但比 b 快
     },
     now: () => t,
     heatMs: 60_000,
     cooldownMs: 60_000,
   });
   const order = svc.ordered().map((p) => p.url);
-  // hot peers first (b, c order amongst hot is stable), then cold by failure
-  // recency: b failed earliest -> b before a; never-failed peers last
-  assert.deepEqual(order, ["http://b", "http://c", "http://a"]);
+  // 延迟升序 c(50) → a(80) → b(400)；「热」不再是判据
+  assert.deepEqual(order, ["http://c", "http://a", "http://b"]);
 });
 
 test("isHot false after heat window or during cooldown", async () => {
@@ -749,14 +748,12 @@ test("peer status endpoint unreachable -> peer skipped, local fallback serves", 
   }
 });
 
-test("two peers race: fast wins and the losing in-flight peer is cancelled", async () => {
-  let slowAborted = false;
+test("串行选路：只打延迟最小的那个，成功就不碰其他组员（用户 2026-10-19：不竞速）", async () => {
   const slowHits = [];
   const fastHits = [];
   const slowSrv = await stubChatServer(
     (req, res, body) => {
       slowHits.push(JSON.parse(body).model);
-      res.on("close", () => { if (!res.writableEnded) slowAborted = true; });
       setTimeout(() => {
         try {
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -783,6 +780,9 @@ test("two peers race: fast wins and the losing in-flight peer is cancelled", asy
     ],
     errors: {},
   });
+  // 先把 fast 标成延迟更小 —— 串行会优先选它
+  await peers.recordResult(fastUrl, { ok: true, latencyMs: 20, model: "deepseek-v4-flash-free" });
+  await peers.recordResult(slowUrl, { ok: true, latencyMs: 900, model: "deepseek-v4-flash-free" });
   const app = await boot({
     upstreamHandler: (req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -794,17 +794,10 @@ test("two peers race: fast wins and the losing in-flight peer is cancelled", asy
     const res = await postChat(app, { model: "deepseek-v4-flash-free", messages: [] });
     assert.equal(res.status, 200);
     const json = await res.json();
-    assert.equal(json.from, "fast", "fast responder wins the race");
-    // both peers were hit concurrently (both were prepared and forwarded)
-    assert.equal(slowHits.length, 1, "slow peer was also raced");
-    assert.equal(fastHits.length, 1, "fast peer was raced");
-    assert.equal(peers.stat(fastUrl).model, "deepseek-v4-flash-free");
-    // winner 确定即取消其余 in-flight：loser 不再产出"迟到成功"（不记热、不记错），
-    // 僵尸连接被主动断开（否则会挂到 bodyTimeout）。peer 的洗白改由"它自己赢"完成。
-    assert.equal(peers.stat(slowUrl)?.model, undefined, "cancelled loser must not be warmed by a late success");
-    assert.equal(peers.errors()[slowUrl], undefined, "cancelled loser must not be recorded as an error");
-    await new Promise((r) => setTimeout(r, 400));
-    assert.equal(slowAborted, true, "the losing in-flight peer must be aborted once a winner is picked");
+    assert.equal(json.from, "fast", "延迟最小的先上并成功");
+    // 串行：fast 成功即返回，slower 的 peer **一次都不该被调用**
+    assert.equal(fastHits.length, 1, "fast 被调用一次");
+    assert.equal(slowHits.length, 0, "串行下成功即止，不得再打慢组员（不再是并发竞速）");
   } finally {
     await app.close();
     slowSrv.closeAllConnections?.();
@@ -942,7 +935,7 @@ test("relayed body drops caller-bound reasoning but keeps plain reasoning", asyn
   }
 });
 
-test("first success returns immediately; a stalled peer does not block the race", async () => {
+test("串行下慢组员不会阻塞：延迟小的先上（stalled 不该被优先选中）", async () => {
   const fastSrv = await stubChatServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ from: "fast" }));
@@ -951,13 +944,17 @@ test("first success returns immediately; a stalled peer does not block the race"
     () => { /* never responds */ },
     () => [{ id: "deepseek-v4-flash-free", status: "normal" }]
   );
+  const fastUrl = `http://127.0.0.1:${fastSrv.address().port}`;
+  const stalledUrl = `http://127.0.0.1:${stalledSrv.address().port}`;
   const peers = createPeersService({ file: tmpStateFile(),
     peers: [
-      { name: "stalled", url: `http://127.0.0.1:${stalledSrv.address().port}`, token: "t" },
-      { name: "fast", url: `http://127.0.0.1:${fastSrv.address().port}`, token: "t" },
+      { name: "stalled", url: stalledUrl, token: "t" },
+      { name: "fast", url: fastUrl, token: "t" },
     ],
     errors: {},
   });
+  // 串行按延迟升序：fast 已知 20ms、stalled 未知 → fast 先上，stalled 不会被碰
+  await peers.recordResult(fastUrl, { ok: true, latencyMs: 20, model: "deepseek-v4-flash-free" });
   const app = await boot({
     upstreamHandler: (req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -972,7 +969,7 @@ test("first success returns immediately; a stalled peer does not block the race"
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.from, "fast");
-    assert.ok(elapsed < 2000, `race must return on first success (took ${elapsed}ms)`);
+    assert.ok(elapsed < 2000, `串行也应即时返回（延迟小的先上），实际 ${elapsed}ms`);
   } finally {
     await app.close();
     stalledSrv.closeAllConnections?.();
@@ -993,4 +990,66 @@ test("peer headers timeout 必须与 bodyTimeout 同档（组员压头等首块�
   // 提到 120s 不会真挂 120s：真闸门是 peerStageCtx 的 45s 阶段总预算，undici 只做最后兜底。
   assert.equal(PEER_HEADERS_TIMEOUT_MS, 120_000, "不得回退到 30s（组员永远等不到首块）");
   assert.equal(PEER_HEADERS_TIMEOUT_MS, PEER_BODY_TIMEOUT_MS, "两档必须同口径");
+});
+
+// ---- 选路策略（用户 2026-10-19：不竞速；延迟最小优先）----
+test("ordered(): 延迟最小优先（不再是「热优先」）", async () => {
+  const svc = createPeersService({
+    file: tmpStateFile(),
+    peers: [
+      { name: "slow", url: "http://slow", token: "t" },
+      { name: "fast", url: "http://fast", token: "t" },
+      { name: "mid", url: "http://mid", token: "t" },
+    ],
+    errors: {},
+  });
+  // slow 是「热」的（最近成功），但延迟大；fast 延迟最小但没 okAt 热标记
+  await svc.recordResult("http://slow", { ok: true, latencyMs: 900, model: "m" });
+  await svc.recordResult("http://fast", { ok: true, latencyMs: 50, model: "m" });
+  await svc.recordResult("http://mid", { ok: true, latencyMs: 300, model: "m" });
+  const urls = svc.ordered().map((p) => p.url);
+  assert.deepEqual(urls, ["http://fast", "http://mid", "http://slow"], "必须按延迟升序，热不热不参与");
+});
+
+test("ordered(): 未测过延迟的排在有数据的之后", async () => {
+  const svc = createPeersService({
+    file: tmpStateFile(),
+    peers: [
+      { name: "unknown", url: "http://unknown", token: "t" },
+      { name: "known", url: "http://known", token: "t" },
+    ],
+    errors: {},
+  });
+  await svc.recordResult("http://known", { ok: true, latencyMs: 500, model: "m" });
+  const urls = svc.ordered().map((p) => p.url);
+  assert.deepEqual(urls, ["http://known", "http://unknown"]);
+});
+
+test("ordered(): 无真实请求短板时，回落到**心跳上报**的延迟排序（组员定时上报即可知谁快）", async () => {
+  const svc = createPeersService({
+    file: tmpStateFile(),
+    peers: [
+      { name: "slow", url: "http://hb-slow", token: "t", heartbeatLatencyMs: 800 },
+      { name: "fast", url: "http://hb-fast", token: "t", heartbeatLatencyMs: 30 },
+      { name: "mid", url: "http://hb-mid", token: "t", heartbeatLatencyMs: 250 },
+    ],
+    errors: {},
+  });
+  // 一条真实请求都没跑过（stats 为空）→ 只能靠心跳延迟
+  const urls = svc.ordered().map((p) => p.url);
+  assert.deepEqual(urls, ["http://hb-fast", "http://hb-mid", "http://hb-slow"]);
+});
+
+test("ordered(): 真实请求 EMA 优先于心跳延迟", async () => {
+  const svc = createPeersService({
+    file: tmpStateFile(),
+    peers: [
+      { name: "hb-fast", url: "http://p1", token: "t", heartbeatLatencyMs: 10 },
+      { name: "real-fast", url: "http://p2", token: "t", heartbeatLatencyMs: 900 },
+    ],
+    errors: {},
+  });
+  await svc.recordResult("http://p2", { ok: true, latencyMs: 5, model: "m" });
+  const urls = svc.ordered().map((p) => p.url);
+  assert.deepEqual(urls, ["http://p2", "http://p1"], "真实请求实测 5ms 应压过心跳的 10ms 判断");
 });

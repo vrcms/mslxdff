@@ -188,14 +188,24 @@ export function createUpstreamClient({
       try { console.error(`[free-lane] resp model=${body?.model} status=${res.status} ct=${res.headers?.get?.("content-type") || ""}`); } catch {}
     }
 
-    // G1a（ADR-0061）**请求内**榨干 v6 出口池：free 模型撞出口池级 429 时，await dispatcher 换一个新
-    // 源地址、在**同一请求内**重发——额度按出口 IP 计，本节点 v6 池里的其余地址这一发就该用上，
-    // 而不是把 429 退回客户端/组长、留给"下一个请求"。
+    // 请求内换出口（v6 池）：撞 429 时在同一请求里换源地址重发。
+    //
+    // ⚠ 顺序契约（用户 2026-10-19 明确）：**先借人，再换出口**。
+    //   429 ⇒ ① 先走组员/组长接力（用**对方的 IPv4 出口**）；② 全都没得用/都失败，
+    //   才轮到 WARP / IPv6 换出口拿"新的自然额度"。WARP/IPv6 是另一层兜底，不该抢在借人之前。
+    //   故本功能**默认关闭**，需要时才显式开：MSLXDFF_V6_INREQUEST_ROTATE=1（原 ADR-0061 行为）。
+    //   关闭时 429 原样交回上层 → chat-pipeline 去试组员/组长，符合用户要的顺序。
     // 边界（探测实证过的硬约束）：① 仅头部即 429 才换（不碰半开的 200 流）；② 429 错误体已被
     // transport 非流分支读尽，无连接泄漏；③ 每轮换的是 session 粘的那个槽（swap 原地换 addr/e.agent，
     // 粘性映射不失效）；④ 次数上限防 429 风暴空烧认领地址；⑤ 无 rotateFor 的 dispatcher（直连/WARP）
     // 条件短路——WARP 换出口=重注册设备 6s~600s，在请求内做只会白等，**设计上排除**。
-    if (freeLane && res.status === 429 && typeof transport.dispatcher?.rotateFor === "function") {
+    const inRequestRotateOn = (() => {
+      const raw = process.env.MSLXDFF_V6_INREQUEST_ROTATE;
+      if (raw === undefined || raw === null || raw === "") return false; // 缺省关：先借人
+      const s = String(raw).trim().toLowerCase();
+      return !(s === "0" || s === "false" || s === "off" || s === "no");
+    })();
+    if (inRequestRotateOn && freeLane && res.status === 429 && typeof transport.dispatcher?.rotateFor === "function") {
       const maxRot = envIntOrZero("MSLXDFF_V6_INREQUEST_RETRIES", 3); // 0 = 关掉请求内换出口
       let rotated = 0;
       while (res.status === 429 && rotated < maxRot) {
