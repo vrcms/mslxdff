@@ -181,3 +181,114 @@ describe("codearts 并发闸 · 流式（回归：旧闸在 runChat 返回即放
     await p.close();
   });
 });
+
+// 账号会话饱和：上游按账号限同时活跃会话数，TM.00001041 是账号此刻进不去（非参数错）。
+// 多号场景应换另一个号重试，而不是把 400 直接抛给用户。
+function saturatedOnceStub() {
+  let calls = 0;
+  const srv = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/v2/chat/completions") {
+        calls++;
+        if (calls === 1) { // 首号：饱和
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error_code: "TM.00001041", error_msg: "并发会话数已达上限(3个)，请关闭部分会话后重试。" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(CHAT_SSE.map((f) => `data: ${f}\n\n`).join("")); // 次号：成功
+        return;
+      }
+      res.writeHead(404); res.end("{}");
+    });
+  });
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve({
+    url: `http://127.0.0.1:${srv.address().port}`, calls: () => calls,
+    close: () => new Promise((r) => srv.close(r)),
+  })));
+}
+
+describe("codearts 会话饱和换号", () => {
+  let srv, dir, stateFile, savedEnv;
+  beforeEach(async () => {
+    srv = await saturatedOnceStub();
+    dir = mkdtempSync(join(tmpdir(), "codearts-sat-"));
+    stateFile = join(dir, "state.json");
+    savedEnv = process.env.MSLXDFF_STATE_FILE;
+    process.env.MSLXDFF_STATE_FILE = stateFile;
+  });
+  afterEach(async () => {
+    process.env.MSLXDFF_STATE_FILE = savedEnv;
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    await srv.close();
+  });
+
+  test("首号 TM.00001041 → 换第二个号重试成功（不再把 400 抛给用户）", async () => {
+    const blobA = makeBlob();
+    const blobB = makeBlob();
+    saveProviderConfig("codearts", { baseUrl: srv.url, keys: [blobA, blobB] }, { file: stateFile });
+    const p = createCodeartsProvider({
+      baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url,
+      apiKeys: [blobA, blobB], file: stateFile,
+    });
+    const res = await p.chat({ model: "GLM-5.2", messages: [{ role: "user", content: "hi" }], stream: false });
+    assert.equal(res.status, 200, "撞账号饱和应换号重试并拿到 200");
+    assert.ok(srv.calls() >= 2, `应至少打了两次上游（首号饱和 + 换号），实测 ${srv.calls()}`);
+    await p.close();
+  });
+});
+
+// 所有号都饱和：应如实回传上游 400 + TM.00001041，而不是笼统的 "all accounts unavailable"。
+function alwaysSaturatedStub() {
+  let calls = 0;
+  const srv = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/v2/chat/completions") {
+        calls++;
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error_code: "TM.00001041", error_msg: "并发会话数已达上限(3个)，请关闭部分会话后重试。" }));
+        return;
+      }
+      res.writeHead(404); res.end("{}");
+    });
+  });
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve({
+    url: `http://127.0.0.1:${srv.address().port}`, calls: () => calls,
+    close: () => new Promise((r) => srv.close(r)),
+  })));
+}
+
+describe("codearts 全号饱和", () => {
+  let srv, dir, stateFile, savedEnv;
+  beforeEach(async () => {
+    srv = await alwaysSaturatedStub();
+    dir = mkdtempSync(join(tmpdir(), "codearts-allsat-"));
+    stateFile = join(dir, "state.json");
+    savedEnv = process.env.MSLXDFF_STATE_FILE;
+    process.env.MSLXDFF_STATE_FILE = stateFile;
+  });
+  afterEach(async () => {
+    process.env.MSLXDFF_STATE_FILE = savedEnv;
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    await srv.close();
+  });
+
+  test("两个号都饱和 → 400 且正文含 TM.00001041（不吞成 all accounts unavailable）", async () => {
+    const blobA = makeBlob();
+    const blobB = makeBlob();
+    saveProviderConfig("codearts", { baseUrl: srv.url, keys: [blobA, blobB] }, { file: stateFile });
+    const p = createCodeartsProvider({
+      baseUrl: srv.url, snapBase: srv.url, stsHost: srv.url, benefitHost: srv.url,
+      apiKeys: [blobA, blobB], file: stateFile,
+    });
+    const res = await p.chat({ model: "GLM-5.2", messages: [{ role: "user", content: "hi" }], stream: false });
+    const txt = await res.text();
+    assert.equal(res.status, 400);
+    assert.ok(/TM\.00001041/.test(txt), `正文应含 TM.00001041，实测：${txt.slice(0, 160)}`);
+    assert.ok(srv.calls() >= 2, `两个号各应打一次上游，实测 ${srv.calls()}`);
+    await p.close();
+  });
+});

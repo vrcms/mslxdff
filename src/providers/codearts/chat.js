@@ -26,6 +26,12 @@ export function injectReasoningPlaceholder(messages, model) {
 
 const PASSTHROUGH_KEYS = ["temperature", "top_p", "max_tokens", "max_completion_tokens", "reasoning_effort", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"];
 
+// 账号级「会话/并发饱和」：上游按账号限同时活跃会话数（TM.00001041 = 并发会话数已达上限(3个)）。
+// 这是账号此刻进不去，不是本请求参数错；槽位在上游保留分钟级才回收（与本地进程无关）。
+// 多号场景换另一个账号通常立即成功——故短冷却本账号让下一次 next() 换号并 continue 重试。
+const SESSION_SATURATED_RE = /TM\.00001041|并发会话数已达上限/;
+const SESSION_SATURATED_COOLDOWN_MS = Number.parseInt(process.env.MSLXDFF_CODEARTS_SESSION_COOLDOWN_MS ?? "", 10) || 30_000;
+
 export function buildUpstreamBody(body, { chatId, upstreamModel }) {
   const out = {
     model: upstreamModel,
@@ -57,6 +63,12 @@ function stripOwnPrefix(model, providerId) {
   const i = s.indexOf("/");
   if (i <= 0) return s;
   return s.slice(0, i).toLowerCase() === String(providerId || "").toLowerCase() ? s.slice(i + 1) : s;
+}
+
+// 从 4xx/5xx 正文里判「账号级会话饱和」：命中则可换号重试（不同于参数类 400，换号无意义）。
+export function isSessionSaturated(status, bodyText) {
+  if (status !== 400 && status !== 429 && status < 500) return false;
+  return SESSION_SATURATED_RE.test(String(bodyText || ""));
 }
 
 export function createChatService({
@@ -155,8 +167,16 @@ export function createChatService({
       }
       if (res.status >= 400) {
         const txt = await res.text().catch(() => "");
+        const msg = `codearts upstream http ${res.status}: ${String(txt).slice(0, 300)}`;
+        // 账号会话饱和：短冷却本号并换号重试（多号场景另一号通常立即成功）；
+        // 所有号都饱和才落到重试耗尽分支，交给上层按上游不可用输出。
+        if (isSessionSaturated(res.status, txt)) {
+          try { activeRing.onError(blob, SESSION_SATURATED_COOLDOWN_MS); } catch {}
+          lastErr = Object.assign(new Error(msg), { upstreamStatus: res.status, upstreamBody: txt });
+          continue;
+        }
         if (res.status === 429 || res.status >= 500) try { activeRing.onError(blob); } catch {}
-        return withTiming(errRes(res.status, `codearts upstream http ${res.status}: ${String(txt).slice(0, 300)}`), t0);
+        return withTiming(errRes(res.status, msg), t0);
       }
       try {
         const pre = await preflightResponse(res); // HTTP 200 内嵌错误（排队/未注册/福利未领）→ 抛 UpstreamEventError
@@ -172,6 +192,11 @@ export function createChatService({
         lastErr = err;
         continue;
       }
+    }
+    // 全部号跑完仍无成功：若最后一个是账号会话饱和（非参数错），如实回传上游 400，
+    // 别退化成笼统的 "all accounts unavailable"——用户要看得到「并发会话数已达上限」。
+    if (lastErr?.upstreamStatus && lastErr?.upstreamBody != null && isSessionSaturated(lastErr.upstreamStatus, lastErr.upstreamBody)) {
+      return withTiming(errRes(lastErr.upstreamStatus, lastErr.message), t0);
     }
     throw Object.assign(lastErr || new Error("codearts: all accounts unavailable"), {
       _t: { attempts: [], waitMs: 0, totalMs: Math.round(clock() - t0) },
