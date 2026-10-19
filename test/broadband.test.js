@@ -221,6 +221,40 @@ test("05 broadband join via POST /v1/groups/join with --broadband", async () => 
   }
 });
 
+test("07 forward 接受**成员 token**（member-token relay，治 401）；乱 token 仍 401；组长 token 仍可", async () => {
+  const { createGroupsService } = await import("../src/groups.js");
+  const { createRouter } = await import("../src/routes.js");
+  const { createUpstreamClient } = await import("../src/upstream.js");
+  const { startServer } = await import("../src/server.js");
+  const token = "a".repeat(64);
+  const file = tmpStateFile();
+  const groups = createGroupsService({ file });
+  groups.create("wg");
+  groups.addMember("wg", { key: "wg", memberName: "home-D", url: "relay://home-D", token: "member-tok", kind: "broadband", lastSeen: Date.now() });
+  const upstream = createUpstreamClient({ baseUrl: "http://127.0.0.1:1", retry: {} });
+  const srv = startServer({ router: createRouter({ token, upstream, groups }) }, 0);
+  await srv.ready();
+  const port = srv.server.address().port;
+  const leaderUrl = `http://127.0.0.1:${port}`;
+  const call = (auth) => fetch(`${leaderUrl}/v1/groups/relay/forward`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth}` },
+    body: JSON.stringify({ group: "wg", target: "relay://nope-point", body: { model: "m", messages: [] }, reqId: "x" }),
+  });
+  try {
+    const memberRes = await call("member-tok");
+    assert.notEqual(memberRes.status, 401, "成员 token 必须被接受（member-token relay）");
+    assert.equal(memberRes.status, 404, "过了鉴权、走到「目标不在组」= 这正是我们要的（不是 401）");
+    const badRes = await call("wrong-token");
+    assert.equal(badRes.status, 401, "非组长且不在成员表 → 401");
+    const leaderRes = await call(token);
+    assert.notEqual(leaderRes.status, 401, "组长自己的 token 必须仍可（本机 forward 自用）");
+  } finally {
+    await srv.close();
+    srv.server.closeAllConnections?.();
+  }
+});
+
 test("06 forward 回包带 x-mslxdff-relay-via=broadband（成员回报 502 也能一眼断在成员那一跳）", async () => {
   const { createGroupsService } = await import("../src/groups.js");
   const { createRouter } = await import("../src/routes.js");

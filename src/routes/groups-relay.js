@@ -1,4 +1,4 @@
-import { clientIp, json, readBody, parseHops, errMsg } from "./helpers.js";
+import { clientIp, json, readBody, parseHops, errMsg, authorized } from "./helpers.js";
 import { DEFAULT_MAX_HOPS } from "../peers.js";
 import { enqueueRelay, dequeueRelayForPoll, resolveRelay, subscribeStream, unsubscribeStream } from "./relay-queue.js";
 import { compatFetch } from "../compat.js";
@@ -148,11 +148,20 @@ export async function streamHandler({ req, res, groups, bus, logs }) {
   await new Promise(() => {});
 }
 
-export async function forwardHandler({ req, res, groups, bus, logs }) {
+export async function forwardHandler({ req, res, groups, bus, logs, token }) {
   let body;
   try { body = await readBody(req); } catch { return json(res, 400, { error: "Invalid JSON body" }); }
   const groupName = body?.group || body?.name;
   const target = body?.target || body?.url;
+  // 鉴权（对齐 heartbeat/poll/result）：接受**组长自己的 token**（本机 forward 自用）**或本组的任一成员 token**
+  // （成员经组长转发用的就是成员 token）。路由层 authorized() 只认组长那一个 token，故本路由 requiresAuth:false，
+  // 校验下沉到这里——否则成员中继一律 401（现网 2026-10-19：所有 relay-fail 均 status=401）。
+  const bearer = (/^Bearer (.+)$/.exec(req.headers["authorization"] || "") || [])[1] || "";
+  const authed = Boolean(bearer) && (authorized(req, token) || Boolean(groupName && groups?.membersForToken?.(groupName, bearer)));
+  if (!authed) {
+    res.setHeader("WWW-Authenticate", "Bearer");
+    return json(res, 401, { error: "Unauthorized" });
+  }
   const hops = parseHops(req.headers["x-mslxdff-hops"] || body?.hops);
   if (!groupName || !target) return json(res, 400, { error: "group and target required" });
   if (hops >= DEFAULT_MAX_HOPS) return json(res, 429, { error: "max hops exceeded" });

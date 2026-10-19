@@ -110,7 +110,11 @@ const ROUTES = [
   {
     method: "POST",
     path: "/v1/groups/relay/forward",
-    requiresAuth: true,
+    // 鉴权下沉到 forwardHandler：接受**组长 token 或本组成员 token**（成员经组长转发的正是成员 token）。
+    // 路由层 authorized(req, token) 只认组长自己那一个 token ⇒ 用 requiresAuth:true 会把成员中继一律 401
+    // （现网 2026-10-19 实证：deepseek-v4.1-flash-free.log 里所有 relay-fail 都是 status=401，组员接力从未通过）。
+    // 同族 heartbeat/poll/result 同理走 requiresAuth:false + membersForToken 自校验。
+    requiresAuth: false,
     handler: forwardHandler,
   },
   {

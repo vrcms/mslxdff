@@ -2,13 +2,13 @@
 //
 // 为什么需要它：这条链路跨 3 台机器 + 1 道鉴权，坏了只会看到一句 `502 fetch failed`，
 // 完全无法定位是哪一跳断的。本模块**按阶段**记录，把断点直接指出来：
-//   ① 定位本机组/组长 → ② 取组长 token（调组长 forward 要**组长的** token，见下）→
+//   ① 定位本机组/组长 → ② 取组长 token（调组长 forward 用组长自己的 token 恒可）→
 //   ③ POST 组长 /v1/groups/relay/forward → ④ 判读回包（200 拿内容 / 401 鉴权 / 404 成员不存在 / 502·504 转发失败）
 //
-// ⚠ 鉴权事实（2026-10-19 实测）：`authorized()` 比的是**接收方自己的 token**，
-//   而 `/v1/groups/relay/forward` 在路由层 requiresAuth=true ⇒ 要**组长 token**。
-//   普通组员只有自己的 token ⇒ 调不动组长 forward（这就是"组员经组长"从没通的原因）。
-//   本命令调用时用组长 token；若拿不到组长 token（如你只是组员且未持有），会明确报出这一步。
+// 鉴权（2026-10-19 修正）：forward 路由由 `requiresAuth:true` 改为鉴权下沉到 handler——
+//   接受**组长 token 或本组成员 token**。旧实现只认组长 token，导致生产里成员经组长转发一律 401、
+//   组员接力从未通过（deepseek-v4.1-flash-free.log 所有 relay-fail 均 401）。本命令仍用组长 token 调
+//   （组长 token 恒可），若拿不到则明确报出这一步。
 import { loadPeers, loadGroupsJoined, loadToken } from "../state.js";
 import { compatFetch, timeoutSignal } from "../compat.js";
 
@@ -87,8 +87,8 @@ export async function runGroupLinkTest({
   // 按阶段归类失败 —— 这是本命令存在的意义：一眼看出断在哪一跳
   if (res.status === 401) {
     return { status: "error", stage: "auth", httpStatus: 401, target, leaderUrl: lead.leaderUrl, group: groupName, ms,
-      error: "组长拒了鉴权（401）：调 /v1/groups/relay/forward 需要**组长的** token，本机没有",
-      hint: "这是已知缺陷：组员中继链路的鉴权断了。修复 = 组长侧 forward 应接受成员 token（见 -group test 的 PR）" };
+      error: "组长拒了鉴权（401）：本机持有的 token 既不是组长 token、也不在该组成员表里",
+      hint: "检查本机是否真的已加入该组（state.peers[leader].token / groupsJoined 是否过期）；用 -addtogroup 重新入组。注：0.1.213+ 组长已接受成员 token，正常入组的节点不该再 401。" };
   }
   if (res.status === 404) {
     return { status: "error", stage: "target-missing", httpStatus: 404, target, leaderUrl: lead.leaderUrl, group: groupName, ms, error: txt.slice(0, 200), hint: "该目标不在组内（名称/url 对不上）；用 -group list 核对" };
