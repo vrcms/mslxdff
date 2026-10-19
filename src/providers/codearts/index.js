@@ -62,11 +62,11 @@ export function createCodeartsProvider({
   };
   const pool = createAuthPool({ keys: allKeys, fetchImpl, stsHost, clock, saveFn });
   const catalog = createCatalog();
-  // 该上游对并发极敏感（实测 >3 即坏号/限流）；且上游按「账号最近约 90s 内打开过的会话数」判限，
+  // 该上游对并发极敏感（实测 >3 即坏号/限流）；且上游按「最近约 90s 内打开过的会话数」判限，
   // 请求结束**不立即释放**槽（实测 ~80s 才回收）——故闸要同时压「在途」与「窗口内已开会话」。
-  // 上限随账号数放大：上游按「账号」限 3 个，N 个号即 3N 个额度，写死 3 会白白浪费后续号。
-  const accountCount = Math.max(1, ring.size || 1);
-  const gate = createGate({ limit: maxConcurrent * accountCount, sessionWindowMs });
+  // 上限恒为 3：现网实测**两个不同 domainId 的账号也共享同一个 3**（第 4 个必被拒 TM.00001041），
+  // 故不能按账号数放大（0.1.218 曾乘账号数=6，反而放行第 4 个，2026-10-19 回归）。
+  const gate = createGate({ limit: maxConcurrent, sessionWindowMs });
 
   let agent = null; let dispatcher = null;
   try {
