@@ -101,6 +101,15 @@ export function startBroadband({ token, upstream, logs, log = console.log }) {
   // 组长侧据此排序「谁的延迟更低」（选路=延迟最小优先，见 routes/peers.js 的 ordered）。
   // 用上一轮而不是本轮的原因：本轮 RTT 要等响应回来才知道，来不及带在这次请求里。
   const hbRtt = new Map(); // group name -> ms
+  // 本机 IPv6 出口池是否可用：心跳里带 hasV6，组长据此知道「谁的 v6 额度还能用」。
+  // 只有本机真的建起了带地址的 v6 池才算 true（空池/未检测到前缀 = false）。
+  const v6Available = () => {
+    try {
+      const d = upstream?.dispatcher;
+      const slots = d?.stats?.().slots;
+      return Array.isArray(slots) && slots.some((s) => s.addr && !s.cooling);
+    } catch { return false; }
+  };
   const doHeartbeat = async () => {
     for (const g of broadbandGroups()) {
       try {
@@ -108,7 +117,7 @@ export function startBroadband({ token, upstream, logs, log = console.log }) {
         const res = await compatFetch(`${g.leaderUrl}/v1/groups/relay/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ name: g.name, group: g.name, rttMs: hbRtt.get(g.name) ?? null }),
+          body: JSON.stringify({ name: g.name, group: g.name, rttMs: hbRtt.get(g.name) ?? null, hasV6: v6Available() }),
           signal: timeoutSignal(5000),
         });
         const rtt = Date.now() - t0;

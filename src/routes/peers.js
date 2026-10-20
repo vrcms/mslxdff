@@ -126,58 +126,10 @@ export function stripCallerBoundReasoning(body) {
   return changed ? { ...body, messages: out } : body;
 }
 
-function peerHealthTtlMs() {
-  const n = Number(process.env.MSLXDFF_PEER_HEALTH_TTL_MS);
-  return Number.isInteger(n) && n >= 0 ? n : 30_000;
-}
-
-const healthCache = new Map(); // url -> { at, data }
-const healthInflight = new Map(); // url -> Promise
-
-export function clearPeerHealthCache() {
-  healthCache.clear();
-  healthInflight.clear();
-}
-
-export async function peerHealthyModels(peer, { timeoutMs = PEER_STATUS_TIMEOUT_MS, fetchImpl = compatFetch } = {}) {
-  const key = peer?.url || "";
-  const ttl = peerHealthTtlMs();
-  if (ttl > 0) {
-    const hit = healthCache.get(key);
-    if (hit && Date.now() - hit.at < ttl) return hit.data;
-    const inflight = healthInflight.get(key);
-    if (inflight) return inflight;
-  }
-  const p = (async () => {
-    try {
-      const res = await fetchImpl(`${peer.url}/v1/models/status`, {
-        headers: {
-          "Authorization": `Bearer ${peer.token || ""}`,
-          "Accept": "application/json",
-        },
-        signal: timeoutSignal(timeoutMs),
-      });
-      if (!res.ok) return [];
-      const j = await res.json().catch(() => ({}));
-      return (j.data || [])
-        .filter((m) => m && typeof m.id === "string" && m.status === "normal")
-        .map((m) => m.id);
-    } catch {
-      return [];
-    }
-  })();
-  if (ttl > 0) {
-    healthInflight.set(key, p);
-    try {
-      const data = await p;
-      healthCache.set(key, { at: Date.now(), data });
-      return data;
-    } finally {
-      healthInflight.delete(key);
-    }
-  }
-  return p;
-}
+// 健康探测与缓存已拆到 ./peer-health.js（本文件受 20KB 硬闸约束）。
+// 这里 import 后再 re-export：既要给本文件内部函数用，也要保持既有 import 方无需改动。
+import { clearPeerHealthCache, peerHealthyModels } from "./peer-health.js";
+export { clearPeerHealthCache, peerHealthyModels };
 
 // controller 由调用方持有：赛跑 winner 确定后可主动 abort 其余 in-flight，
 // 避免迟到流挂满 bodyTimeout（并给对方省下无用负载）。
@@ -273,9 +225,23 @@ export async function racePeerCandidates(candidates, ctx) {
 
   // 串行：按 candidates 的既有次序（调用方已按「延迟最小优先」排好）逐个试。
   if (PEER_SERIAL) {
+    // 常驻热备（用户 2026-10-20）：IPv4 链走空后进 IPv6 阶段。
+    // v6 候选 = 心跳自报 hasV6 的节点（组长优先、其余延迟升序），由 peers.standbyChain 产出。
+    // 兼容：ctx.peers 可能是测试注入的假对象，缺 standbyChain 时 v6 阶段自然为空。
+    let v6Candidates = [];
+    try {
+      v6Candidates = ctx.peers?.standbyChain?.().ipv6 ?? [];
+    } catch { v6Candidates = []; }
     return serialTryPeers({
-      candidates: fresh, ctx, tried,
-      deps: { resolvePeerTarget, forwardToPeer, peerName, recordLater, summarizeRequest, runHook, errMsg, perAttemptCap: peerAttemptTimeoutMs(), deadline, budgetMs },
+      candidates: fresh,
+      v6Candidates,
+      ctx, tried,
+      deps: {
+        resolvePeerTarget, forwardToPeer, peerName, recordLater, summarizeRequest, runHook, errMsg,
+        perAttemptCap: peerAttemptTimeoutMs(), deadline, budgetMs,
+        // 连接预热：对「下一个备选」提前打 /health，复用 chat 的同一连接池（见 warmPeerHealth 注释）
+        warmPeer: (peer) => { if (peer?.url) warmPeerHealth(peer.url, { timeoutMs: 1500 }).catch(() => {}); },
+      },
     });
   }
 

@@ -44,12 +44,16 @@ export async function heartbeatHandler({ req, res, groups, bus, logs }) {
         const reportedRtt = Number(body?.rttMs);
         const memberRtt = Number.isFinite(reportedRtt) && reportedRtt >= 0 ? Math.round(reportedRtt) : null;
         if (memberRtt != null) m.latencyMs = memberRtt;
+        // hasV6：成员自报「我这台有没有可用的 IPv6 出口池」。IPv4 链全用完后的 v6 阶段靠它筛候选
+        // （先组长 v6 → 再按延迟升序找有 v6 的组员）。
+        const hasV6 = body?.hasV6 === true;
+        m.hasV6 = hasV6;
         try {
-          groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen, ...(memberRtt != null ? { latencyMs: memberRtt } : {}) });
+          groups.upsertMember(groupName, { memberName: targetId, url: m.url, token: m.token, kind: "broadband", publicIp: ip, lastSeen: m.lastSeen, hasV6, ...(memberRtt != null ? { latencyMs: memberRtt } : {}) });
         } catch {}
       }
       const serverMs = Date.now() - tRecv;
-      const evtData = { ts: Date.now(), type: "relay-heartbeat", member: targetId, ip, lastSeen: m?.lastSeen, rttMs: Number.isFinite(Number(body?.rttMs)) ? Number(body.rttMs) : null, serverMs, group: groupName };
+      const evtData = { ts: Date.now(), type: "relay-heartbeat", member: targetId, ip, lastSeen: m?.lastSeen, rttMs: Number.isFinite(Number(body?.rttMs)) ? Number(body.rttMs) : null, hasV6: body?.hasV6 === true, serverMs, group: groupName };
       if (bus) bus.emit(evtData);
       logs?.appendEvent?.(evtData);
     }

@@ -144,6 +144,12 @@ export function createPeersService({
   //   ① stats 里的真实请求 EMA（recordResult 记的 latencyMs）——最可信；
   //   ② peer.heartbeatLatencyMs —— 组员**定时心跳**上报的 rtt（没跑过真实请求时也能排序）；
   // 未测过延迟的排在有数据之后；同延迟按「最早失败优先」；都没失败过的排最后。
+  // 组长识别：本机是组员时，peers 里有 name==="leader" 的记录（cli/group-test.js 同口径）。
+  // 组长自己节点视角没有这条记录 → isLeaderPeer 恒 false，退化为纯延迟排序（正是想要的行为）。
+  function isLeaderPeer(p) {
+    return String(p?.name || "").toLowerCase() === "leader";
+  }
+
   function peerLatency(p) {
     const s = stats[p.url]?.latencyMs;
     if (s != null) return s;
@@ -151,20 +157,56 @@ export function createPeersService({
     return Number.isFinite(Number(hb)) ? Number(hb) : null;
   }
 
+  // 组员延迟升序（组长不参与），供两处复用：ordered 的第二档 + standbyChain。
+  function byLatencyAsc(a, b) {
+    const la = peerLatency(a);
+    const lb = peerLatency(b);
+    const ha = la != null, hb = lb != null;
+    if (ha !== hb) return ha ? -1 : 1;          // 有延迟数据的优先
+    if (ha && hb && la !== lb) return la - lb;  // 延迟小的先上
+    const ea = lastErrorAt[a.url];
+    const eb = lastErrorAt[b.url];
+    if (ea == null && eb == null) return 0;
+    if (ea == null) return 1;
+    if (eb == null) return -1;
+    return ea - eb;
+  }
+
+  // 用户 2026-10-20 约定：**组长恒定第一**（先榨干组长额度），组长用完再按延迟升序上组员。
+  // 之前是纯延迟排序，「9/9 走组长」只是组长恰好延迟最低的巧合（AGENTS.md 已记差距）。
   function ordered(t = now()) {
     return available().sort((a, b) => {
-      const la = peerLatency(a);
-      const lb = peerLatency(b);
-      const ha = la != null, hb = lb != null;
-      if (ha !== hb) return ha ? -1 : 1;          // 有延迟数据的优先
-      if (ha && hb && la !== lb) return la - lb;  // 延迟小的先上
-      const ea = lastErrorAt[a.url];
-      const eb = lastErrorAt[b.url];
-      if (ea == null && eb == null) return 0;
-      if (ea == null) return 1;
-      if (eb == null) return -1;
-      return ea - eb;
+      const la = isLeaderPeer(a), lb = isLeaderPeer(b);
+      if (la !== lb) return la ? -1 : 1; // 组长恒排第一
+      return byLatencyAsc(a, b);
     });
+  }
+
+  /**
+   * 常驻接力链（用户 2026-10-20：永远准备一个备选，429 立即切）。
+   * IPv4 阶段：组长 → 组员(延迟升序)；IPv4 全用完才进 IPv6 阶段：先本机/组长 v6，
+   * 再按延迟升序找 hasV6 的组员。
+   * @returns {{ipv4: object[], ipv6: object[]}} 两段链，各自已排序
+   */
+  function standbyChain(t = now()) {
+    const ipv4 = available().sort((a, b) => {
+      const la = isLeaderPeer(a), lb = isLeaderPeer(b);
+      if (la !== lb) return la ? -1 : 1;
+      return byLatencyAsc(a, b);
+    });
+    // IPv6 阶段：只保留心跳自报 hasV6 的节点，同样组长优先、其余延迟升序
+    const ipv6 = ipv4.filter((p) => p.hasV6 === true);
+    return { ipv4, ipv6 };
+  }
+
+  /** 下一个备选：从链里取第一个还没试过的。这就是「永远准备好的那个」。 */
+  function nextStandby(tried, t = now()) {
+    const { ipv4, ipv6 } = standbyChain(t);
+    const skip = tried instanceof Set ? tried : new Set(tried || []);
+    return {
+      ipv4: ipv4.find((p) => !skip.has(p.url)) || null,
+      ipv6: ipv6.find((p) => !skip.has(p.url)) || null,
+    };
   }
 
   // Available peers ordered specifically for recovery-time retry: earliest
@@ -259,6 +301,7 @@ export function createPeersService({
       const peer = list.find((p) => p.url === url);
       return peer ? isBroadbandStale(peer, now(), broadbandStaleMs()) : false;
     }, isHot, stat, ordered, orderedByLastError, coolingByLastError, available, next,
+    standbyChain, nextStandby, isLeaderPeer,
     recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
   };
 }

@@ -188,6 +188,13 @@ test("recordResult ok clears the long-lived error memory", async () => {
 async function stubChatServer(onChat, onStatus) {
   const srv = createServer((req, res) => {
     const url = (req.url || "").split("?")[0];
+    // 连接预热（peer-serial 的 warmPeer）会打 GET /health：它只建连、不算一次 chat 转发，
+    // 必须单独应答，否则会被 onChat 计成「又打了一次这个组员」，污染串行选路断言。
+    if (req.method === "GET" && url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
     if (req.method === "GET" && url === "/v1/models/status") {
       if (onStatus) {
         if (onStatus.length >= 2) return onStatus(req, res);

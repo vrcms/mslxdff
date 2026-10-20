@@ -205,7 +205,10 @@ export function syncPeersFromMembers({ peers, members, myUrl, group, skipIds = [
     // heartbeatLatencyMs：组长在**心跳**里量的成员延迟（成员上报 rttMs）。选路 `ordered()` 在没有
     // 真实请求 EMA 时回落到它——这就是「组员定时上报的过程中就知道谁延迟更低」。
     const hbLat = Number.isFinite(Number(m?.latencyMs)) && Number(m.latencyMs) >= 0 ? Number(m.latencyMs) : null;
-    if (peers.add({ name: id, url, token: m?.token || "", group, ...(hbLat != null ? { heartbeatLatencyMs: hbLat } : {}) })) added++;
+    // hasV6：该成员自己在心跳里报的「我有可用 IPv6 出口池」。IPv4 链全用完时才进 v6 阶段，
+    // 靠这个标记筛「谁的 v6 额度还能用」（见 routes/peer-serial.js 的 v6 阶段）。
+    const hasV6 = m?.hasV6 === true;
+    if (peers.add({ name: id, url, token: m?.token || "", group, hasV6, ...(hbLat != null ? { heartbeatLatencyMs: hbLat } : {}) })) added++;
   }
   return { removed, added, total: Object.keys(members || {}).length };
 }
