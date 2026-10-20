@@ -46,6 +46,7 @@ export async function setupWorkbuddyGrowth({ bus, logs } = {}) {
   const stateMod = await import("../state.js");
   const { runGrowthAll } = await import("../providers/workbuddy/growth.js");
   const { runCatTravel } = await import("../providers/workbuddy/cat-travel.js");
+  const { reportChatActivity, runStreakBonus } = await import("../providers/workbuddy/activity.js");
   const { createAuthService, decodeJwtExp } = await import("../providers/workbuddy/auth.js");
 
   let running = false;
@@ -83,6 +84,23 @@ export async function setupWorkbuddyGrowth({ bus, logs } = {}) {
           tasks: row.tasks.filter((t) => t.ok && !t.skipped).length, reason,
         }),
       });
+      // 活跃上报必须单独发：签到不点亮连登（2026-10-20 实测 days 恒 0），
+      // 不报就连登档位 7/14/28 天的积分与抽奖次数永远拿不到。
+      const activity = [];
+      const streak = [];
+      for (const a of accounts) {
+        const r = await reportChatActivity(a);
+        activity.push({ uid: a.uid, ok: r.ok, msg: r.msg });
+        emit("workbuddy-activity", { uid: String(a.uid).slice(0, 8), ok: r.ok, msg: r.msg, reason });
+        const s = await runStreakBonus({ ...a, onStep: (e) => emit("workbuddy-streak", { uid: String(a.uid).slice(0, 8), ...e }) });
+        streak.push({ uid: a.uid, days: s.days, redeemed: s.redeemed, drawn: s.drawn, credit: s.credit, errors: s.errors });
+        emit("workbuddy-streak-done", {
+          uid: String(a.uid).slice(0, 8), days: s.days,
+          redeemed: s.redeemed.map((x) => x.tier).join(",") || "-", drawn: s.drawn, credit: s.credit,
+          errors: s.errors.length ? s.errors : undefined, reason,
+        });
+        await sleep(1000);
+      }
       const travel = [];
       for (const a of accounts) {
         try {
@@ -95,17 +113,21 @@ export async function setupWorkbuddyGrowth({ bus, logs } = {}) {
         await sleep(1000);
       }
       const date = todayKey();
-      const creditTotal = growthRes.creditTotal + travel.reduce((s, r) => s + (r.credits || 0), 0);
+      const streakCredit = streak.reduce((s, r) => s + (r.credit || 0), 0);
+      const creditTotal = growthRes.creditTotal + travel.reduce((s, r) => s + (r.credits || 0), 0) + streakCredit;
       try {
         stateMod.writeStateImmediate(stateMod.defaultStateFile(), {
           workbuddyGrowth: {
             date, at: Date.now(), ok: growthRes.ok, credit: creditTotal, accounts: accounts.length,
+            streakCredit,
+            activity: activity.map((a) => ({ uid: a.uid, ok: a.ok })),
+            streak: streak.map((s) => ({ uid: s.uid, days: s.days, drawn: s.drawn, credit: s.credit })),
             travel: travel.map((t) => ({ uid: t.uid, outcome: t.outcome, credits: t.credits })),
           },
         });
       } catch {}
-      emit("workbuddy-growth-done", { date, accounts: accounts.length, credit: creditTotal, ok: growthRes.ok, reason });
-      return { ok: true, creditTotal, growthRes, travel };
+      emit("workbuddy-growth-done", { date, accounts: accounts.length, credit: creditTotal, streakCredit, ok: growthRes.ok, reason });
+      return { ok: true, creditTotal, streakCredit, growthRes, travel, streak };
     } catch (e) {
       emit("workbuddy-growth-failed", { error: String(e?.message || e).slice(0, 200), reason });
       return { ok: false, error: String(e?.message || e).slice(0, 200) };

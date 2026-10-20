@@ -76,6 +76,8 @@ export async function handleProvider(args) {
   if (await handleClineLogin(id, sub)) return true;
   const { handleWorkbuddyLogin } = await import("./workbuddy-login.js");
   if (await handleWorkbuddyLogin(id, sub, rest)) return true;
+  const { handleWorkbuddyQuota } = await import("./workbuddy-quota.js");
+  if (await handleWorkbuddyQuota(id, sub, rest)) return true;
   const { handleCodeartsLogin } = await import("./codearts-login.js");
   if (await handleCodeartsLogin(id, sub, rest)) return true;
   const { handleTraeworkLogin } = await import("./traework-login.js");

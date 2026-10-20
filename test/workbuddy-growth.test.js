@@ -153,7 +153,7 @@ describe("growth-api 底层请求", () => {
       },
     });
     assert.equal(r.ok, true);
-    assert.match(r.url, /codebuddy\.cn/);
+    assert.ok(r.url.includes(GROWTH_BASES[1]), `应切到第二域，实际 ${r.url}`);
     assert.equal(seen.length, 2);
   });
 
@@ -182,7 +182,11 @@ describe("growth 策略表", () => {
     assert.equal(planFor("chat_5").level, PLAN_LEVELS.MULTI);
     assert.equal(planFor("automation_1").level, PLAN_LEVELS.AUTO);
     assert.equal(planFor("Model_chat_GLM5.2").model, "glm-5.2");
-    assert.equal(planFor("expert_5").actionable, false);
+    // 专家类走真实专家 id + 对话回执通道，不再是「只能人工」
+    assert.equal(planFor("expert_5").level, PLAN_LEVELS.EXPERT);
+    assert.equal(planFor("expert_5").actionable, true);
+    // 需要真实捐赠回执的仍然不可自动
+    assert.equal(planFor("Expert_Philanthropy").actionable, false);
   });
 
   it("未登记任务默认 MANUAL 不盲发", () => {
