@@ -62,6 +62,10 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "raccoon") {
       const { createRaccoonProvider } = await import("../../../providers/raccoon/index.js");
       provider = createRaccoonProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "railway") {
+      // 免凭证型：无可执行端点差异，但必须用定制工厂（generic 会把付费模型一起列出来）
+      const { createRailwayProvider } = await import("../../../providers/railway.js");
+      provider = createRailwayProvider({ baseUrl: baseUrl || undefined, file: defaultStateFile() });
     } else {
       if (!baseUrl) {
         console.error(`provider ${id}: missing baseUrl — set via: mslxdff -provider ${id} set-url <baseUrl>`);

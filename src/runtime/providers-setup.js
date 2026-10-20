@@ -10,13 +10,13 @@ import { createGroupsService, createBansService } from "../groups.js";
 import { logDir, appendEvent } from "../logs.js";
 import { loadPlugins, runHook, resolvePluginDirs } from "../plugins.js";
 import { createOpenCodeProvider } from "../providers/opencode.js";
-import { loadProviderKeys, loadProviderAuths, loadProviderConfigs } from "../state.js";
+import { loadProviderKeys, loadProviderAuths, loadProviderConfigs, saveProviderConfig } from "../state.js";
 import { refreshIntervalMs, modelCooldownMs, slowCooldownMs, peerCooldownMs, peerLimitCooldownMs, peerHeatMs, banWindowMs, banThreshold } from "../cli/policy.js";
 import { errMsg } from "../cli/util.js";
 import { createPreferredDispatcher } from "../v6pool/index.js";
 
 
-import { shouldEnableCustomProvider, loadAuthDocs } from "./provider-gate.js";
+import { shouldEnableCustomProvider, loadAuthDocs, seedNoCredentialProviders } from "./provider-gate.js";
 /**
  * 世界组装 — 插件加载 → providers → models/auto/peers/groups/bans。
  * 无参（读 env/state 自身），返回 ctx 由门面接力 server-lifecycle。
@@ -81,6 +81,25 @@ export async function setupProviders() {
       appendEvent({ ts: Date.now(), type: "provider-enabled", provider: "openrouter", keys: orKeys.length });
     }
     const genericConfigs = loadProviderConfigs();
+    // 免凭证供应商（railway）：没有配置记录就不会进下面的循环，先幂等补种一条。
+    try {
+      const seeded = await seedNoCredentialProviders({
+        configs: genericConfigs,
+        saveConfig: async (gid, cfg) => {
+          genericConfigs[gid] = cfg;
+          // 两步写：saveProviderConfig 不解构 allowAnyModels，得用专门的 setter 补，
+          // 否则 /v1/models 按「空白名单 = 不暴露」的安全默认，railway 一个模型都列不出来。
+          saveProviderConfig(gid, { baseUrl: cfg.baseUrl, keys: cfg.keys || [] });
+          if (cfg.allowAnyModels !== undefined) {
+            const { saveProviderAllowAnyModels } = await import("../state.js");
+            saveProviderAllowAnyModels(gid, cfg.allowAnyModels);
+          }
+        },
+      });
+      if (seeded.length) console.log(`provider seeded (no credential): ${seeded.join(", ")}`);
+    } catch (err) {
+      console.log(`provider seed failed: ${errMsg(err)}`);
+    }
     for (const [gid, cfg] of Object.entries(genericConfigs)) {
       if (gid === "opencode" || gid === "openrouter") continue;
       const base = String(cfg?.baseUrl || "").trim();

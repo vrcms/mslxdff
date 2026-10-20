@@ -49,6 +49,13 @@ export const customProviders = [
     load: () => import("./zcode/index.js").then((m) => m.createZcodeProvider),
   },
   {
+    id: "railway",
+    // opencode zen free 层的另一个 IP 出口（Railway 反代），只暴露 free 模型。
+    // 匹配必须排在 generic 之前，且不能与其它条目撞（railway.app 域名足够独特）。
+    match: (id, baseUrl) => id === "railway" || String(baseUrl).includes("railway.app"),
+    load: () => import("./railway.js").then((m) => m.createRailwayProvider),
+  },
+  {
     id: "raccoon",
     match: (id, baseUrl) => id === "raccoon" || String(baseUrl).includes("xiaohuanxiong.com"),
     load: () => import("./raccoon/index.js").then((m) => m.createRaccoonProvider),
