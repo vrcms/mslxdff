@@ -10,7 +10,7 @@ export async function renderOtherProviders({ pickedIds, ids, fullAliases }) {
   try { _la2(); } catch {}
   const configs = loadProviderConfigs();
   const otherIds = Object.keys(configs).filter((k) => String(k).toLowerCase() !== "opencode");
-  const order2 = ["workbuddy", "cline", "openrouter", "bai", "qoder", "qwenwork", "globalqwenwork", "traework", "zcode", "raccoon", "codearts"];
+  const order2 = ["workbuddy", "cline", "openrouter", "bai", "qoder", "qwenwork", "globalqwenwork", "traework", "zcode", "raccoon", "codearts", "railway"];
   otherIds.sort((a, b) => {
     const ia = order2.indexOf(a), ib = order2.indexOf(b);
     if (ia !== -1 || ib !== -1) {
@@ -31,10 +31,25 @@ export async function renderOtherProviders({ pickedIds, ids, fullAliases }) {
         ? (allowed.length ? `allowlist ${allowed.length} (allowAny ON)` : `allowAny ON (allowlist 空=放行全部)`)
         : (allowed.length ? `allowlist ${allowed.length} (allowAny OFF)` : `allowlist 空 + allowAny OFF = 阻塞`);
       console.log(`\n  ── ${pid} (${header})${baseUrl ? `  baseUrl=${baseUrl}` : ""} ──`);
+      // allowAny ON 且没设 allowlist = 该供应商全部模型放行。此时**把 live 列表展开**：
+      // 只打「未设 allowlist」两行会让用户以为这家没有模型（2026-10-20 railway 就是这么"消失"的）。
+      const live = (ids || []).filter((id) => String(id).startsWith(`${pid}/`));
       if (!allowed.length) {
         if (allowAny) {
-          console.log(`     (未设 allowlist，全部模型放行)  查看 live 列表: mslxdff -provider ${pid} models`);
-          console.log(`     限制可用模型: mslxdff -provider ${pid} allowlist set <model1> <model2>`);
+          if (live.length) {
+            for (const canonical of live.sort(compareModelIds)) {
+              let alias = null;
+              try { alias = _gaf(canonical); } catch {}
+              if (!alias && String(canonical).includes("/")) alias = String(canonical).replace(/\//g, "-");
+              const aliasStr = alias && alias !== canonical ? `  (别名: ${alias})` : "";
+              const pickedMark = pickedIds.includes(canonical) || pickedIds.includes(alias || "") ? "*" : " ";
+              console.log(`     ${pickedMark} ${canonical}${aliasStr}`);
+            }
+            console.log(`     管理: mslxdff -provider ${pid} allowlist [list|add|remove|clear] | allowAny on|off`);
+          } else {
+            console.log(`     (未设 allowlist，全部模型放行)  查看 live 列表: mslxdff -provider ${pid} models`);
+            console.log(`     限制可用模型: mslxdff -provider ${pid} allowlist set <model1> <model2>`);
+          }
         } else {
           console.log(`     阻塞中：无可用模型 — 设白名单: mslxdff -provider ${pid} allowlist set <model1> <model2>`);
           console.log(`     或放行全部: mslxdff -provider ${pid} allowAny on`);

@@ -30,7 +30,31 @@ export async function handleModelList(args, idx, sub) {
     }
   }
   const cacheFile = join(logDir(), "models.json");
+  // 模型来源：优先问**本机网关**（daemon 的多供应商聚合，含 railway/codearts/workbuddy 等），
+  // 拉不到才退回「直连 opencode 单家」——后者只有一个供应商，会让所有定制供应商的模型消失
+  // （2026-10-20 实测：-models 看不到 railway 正是这个原因）。
+  async function tryGatewayModels() {
+    try {
+      const port = process.env.PORT || process.env.MSLXDFF_PORT || 8989;
+      const { loadToken } = await import("../../../state.js");
+      const { token } = await loadToken();
+      if (!token) return null;
+      const res = await fetch(`http://127.0.0.1:${port}/v1/models?all=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) return null;
+      const j = await res.json();
+      return Array.isArray(j?.data) && j.data.length ? j : null;
+    } catch {
+      return null;
+    }
+  }
   async function tryRefreshModels() {
+    // ① 网关聚合（最全，含所有已装配供应商）
+    const viaGateway = await tryGatewayModels();
+    if (viaGateway) return viaGateway;
+    // ② 回退：直连 opencode（daemon 没起/无 token 时的单家兜底）
     try {
       const models = createModelsService({
         baseUrl: process.env.UPSTREAM_BASE_URL || "https://opencode.ai",
