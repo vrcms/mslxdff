@@ -62,6 +62,50 @@ test("peer cooling makes it unavailable until window passes", async () => {
   assert.equal(svc.available().length, 1);
 });
 
+test("探测死亡（health 探不通）：10min 冷却、不出现在候选、兜底不捞回", async () => {
+  let t = 0;
+  const svc = createPeersService({ file: tmpStateFile(),
+    peers: [{ name: "dead", url: "http://dead:8989", token: "t" }],
+    errors: {},
+    now: () => t,
+    cooldownMs: 100,
+  });
+  assert.equal(svc.available().length, 1, "初始可用");
+  await svc.recordProbeDead("http://dead:8989");
+  assert.equal(svc.available().length, 0, "探测失败后进冷却，不再候选");
+  assert.equal(svc.ordered().length, 0, "ordered 也不包含它");
+  assert.equal(svc.coolingByLastError().length, 0, "兜底也不捞回（白等拒连）");
+  // 10min 后恢复
+  t = 10 * 60_000 + 1;
+  assert.equal(svc.available().length, 1, "冷却窗过后重新可用");
+});
+
+test("探测死亡：recordProbeOk（探测成功）立即解除冷却", async () => {
+  let t = 0;
+  const svc = createPeersService({ file: tmpStateFile(),
+    peers: [{ name: "a", url: "http://a:8989", token: "t" }],
+    errors: {},
+    now: () => t,
+  });
+  await svc.recordProbeDead("http://a:8989");
+  assert.equal(svc.available().length, 0, "标记死亡后不可用");
+  await svc.recordProbeOk("http://a:8989");
+  assert.equal(svc.available().length, 1, "探测成功立即解除，不等 10min");
+});
+
+test("探测死亡：真实请求成功（recordResult ok）也解除冷却", async () => {
+  let t = 0;
+  const svc = createPeersService({ file: tmpStateFile(),
+    peers: [{ name: "a", url: "http://a:8989", token: "t" }],
+    errors: {},
+    now: () => t,
+  });
+  await svc.recordProbeDead("http://a:8989");
+  await svc.recordResult("http://a:8989", { ok: true, latencyMs: 50 });
+  assert.equal(svc.available().length, 1, "请求成功说明节点活着，解除探测冷却");
+  assert.equal(svc.stats()["http://a:8989"]?.probeDeadAt, undefined, "probeDeadAt 被清掉");
+});
+
 test("next() round-robins across available peers", () => {
   let t = 0;
   const svc = createPeersService({ file: tmpStateFile(),

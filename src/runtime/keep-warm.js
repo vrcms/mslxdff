@@ -50,15 +50,23 @@ export async function warmOnce({
   byId = null,
   upstream = null,
   warmPeer = warmPeerHealth,
+  markProbe = null, // (url, ok) => void：探测结果写进 peer 冷却账（health 探不通 ⇒ 10min 不当候选）
   evt = () => {},
 } = {}) {
   const staticPeers = peers.filter((p) => p?.url && !String(p.url).startsWith("relay://")); // broadband 走 relay 队列，不直连
+  const safeMark = (url, ok) => {
+    try {
+      const p = markProbe?.(url, ok);
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch { /* 记账失败不影响保热 */ }
+  };
   let peerOk = 0, peerFail = 0;
   for (const p of staticPeers) {
     try {
       const r = await warmPeer(String(p.url));
-      if (r?.ok) peerOk += 1; else peerFail += 1;
-    } catch { peerFail += 1; }
+      if (r?.ok) { peerOk += 1; safeMark(String(p.url), true); }
+      else { peerFail += 1; safeMark(String(p.url), false); }
+    } catch { peerFail += 1; safeMark(String(p.url), false); }
   }
   const heads = providerHeadsFromPicks(picks);
   let provOk = 0, provFail = 0, provSkip = 0;
@@ -108,6 +116,13 @@ export function startKeepWarm({
         byId,
         upstream,
         warmPeer,
+        // 探测结果写进冷却账：health 连不上 ⇒ 10min 不当候选（防"探到了但选路不知道"——现网 2026-10-20 13:27）
+        markProbe: async (url, ok) => {
+          try {
+            if (ok) await peers?.recordProbeOk?.(url);
+            else await peers?.recordProbeDead?.(url);
+          } catch { /* 记账失败不影响保热 */ }
+        },
         evt: emit,
       });
     } catch { /* 保热永不影响主链路 */ }

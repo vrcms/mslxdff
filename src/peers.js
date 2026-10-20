@@ -10,6 +10,16 @@ export const DEFAULT_MAX_HOPS = 3;
 export const DEFAULT_BROADBAND_STALE_MS = 90_000;
 // 连续几次连接级失败即视为"这个地址没服务"，进长冷却（不再靠 30s 短冷却反复捞回）。
 export const DEAD_FAIL_THRESHOLD = 2;
+// 探测失败（GET /health 连不上）视为"这个节点当前不可用"，10 分钟内不再当候选。
+// 与请求失败账分开：health 探测是**主动、零额度**的可用性判断，比"这一发不顺"更可信——
+// 现网 2026-10-20 13:27 req mvg8r7cz-b8qn：152.67.222.233:62028 早已 health timeout，
+// CLI/保热都探到了，但选路不知道，仍把它排进候选并吃满 20s 单次上限（总 27s）。
+export const DEFAULT_PEER_PROBE_DEAD_MS = 10 * 60_000;
+
+export function peerProbeDeadMs() {
+  const n = Number(process.env.MSLXDFF_PEER_PROBE_DEAD_MS);
+  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_PEER_PROBE_DEAD_MS;
+}
 
 const EMA_ALPHA = 0.3;
 
@@ -86,6 +96,8 @@ export function createPeersService({
   // 连接级永久失败（ECONNREFUSED/ENOTFOUND，deadFails >= 2）同样进长冷却；
   // 其他失败（网络抖动、5xx）→ cooldownMs（可能几秒恢复，给快速重试机会）。
   function coolingWindowMs(url) {
+    // 探测死亡（health 连不上）：10min 内不再考虑——比请求失败更可信的"没服务"证据
+    if (stats[url]?.probeDeadAt !== undefined && now() - stats[url].probeDeadAt < peerProbeDeadMs()) return limitCooldownMs;
     if ((stats[url]?.deadFails ?? 0) >= DEAD_FAIL_THRESHOLD) return limitCooldownMs;
     const streak = stats[url]?.streak429 ?? 0;
     return streak >= 2 ? limitCooldownMs : cooldownMs;
@@ -99,6 +111,9 @@ export function createPeersService({
   }
 
   function isCooling(url) {
+    // 探测死亡（health 探不通）：10min 内不再当候选——比请求失败更可信的"没服务"证据
+    const pDead = stats[url]?.probeDeadAt;
+    if (pDead !== undefined && now() - pDead < peerProbeDeadMs()) return true;
     const win = coolingWindowMs(url);
     if (!win) return false;
     const err = lastErrorAt[url];
@@ -233,6 +248,7 @@ export function createPeersService({
       .filter((p) => {
         const err = lastErrorAt[p.url];
         if (typeof err !== "number") return false;
+        if (stats[p.url]?.probeDeadAt !== undefined && now() - stats[p.url].probeDeadAt < peerProbeDeadMs()) return false; // 探测死亡：兜底也不考虑（否则每次白等一次拒连）
         if ((stats[p.url]?.streak429 ?? 0) >= 2) return false; // 429 长冷却：兜底也不考虑
         if ((stats[p.url]?.deadFails ?? 0) >= DEAD_FAIL_THRESHOLD) return false; // 连接级永久失败：兜底也不考虑（否则每次白等一次拒连）
         return t - err < cooldownMs;
@@ -279,7 +295,7 @@ export function createPeersService({
         await persistErrors({ ...lastErrorAt });
       }
       const prev = stats[url] || {};
-      stats[url] = {
+      const next = {
         okAt: now(),
         latencyMs: prev.latencyMs != null && typeof latencyMs === "number"
           ? Math.round(prev.latencyMs * (1 - EMA_ALPHA) + latencyMs * EMA_ALPHA)
@@ -289,10 +305,32 @@ export function createPeersService({
         streak429: 0,
         deadFails: 0,
       };
+      // 探测死亡标记：请求成功 = 节点活着，冷却窗口立即解除。
+      // next 本身不含 probeDeadAt 键，天然清除；这里只兜底确保没有残留。
+      stats[url] = next;
+      delete stats[url].probeDeadAt;
     } else {
       const prev = stats[url] || {};
       stats[url] = { ...prev, fails: (prev.fails || 0) + 1 };
     }
+    await persistStats({ ...stats });
+  }
+
+  // 探测死亡标记（health 连不上）：probeDeadAt 置为此刻，10min 内冷却。不反复探。
+  // recordProbeOk 在探测成功时清标记（节点回来了，冷却窗口立刻结束）。
+  async function recordProbeDead(url) {
+    if (!url) return;
+    const prev = stats[url] || {};
+    stats[url] = { ...prev, probeDeadAt: now() };
+    await persistStats({ ...stats });
+  }
+
+  async function recordProbeOk(url) {
+    if (!url) return;
+    const prev = stats[url] || {};
+    if (!("probeDeadAt" in prev)) return;
+    delete prev.probeDeadAt;
+    stats[url] = prev;
     await persistStats({ ...stats });
   }
 
@@ -302,6 +340,6 @@ export function createPeersService({
       return peer ? isBroadbandStale(peer, now(), broadbandStaleMs()) : false;
     }, isHot, stat, ordered, orderedByLastError, coolingByLastError, available, next,
     standbyChain, nextStandby, isLeaderPeer,
-    recordError, recordResult, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
+    recordError, recordResult, recordProbeDead, recordProbeOk, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
   };
 }

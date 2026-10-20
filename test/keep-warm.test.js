@@ -63,6 +63,32 @@ test("warmOnce：单支挂掉不抛、如实计数（保热永不拖垮自己，
   assert.equal(r.provOk, 1, "opencode 照常保热");
 });
 
+test("warmOnce：health 探测失败写冷却账（markProbe false）、成功清账（true）", async () => {
+  const marks = [];
+  const r = await warmOnce({
+    peers: [{ url: "http://dead:8989" }, { url: "http://alive:8989" }],
+    picks: [],
+    warmPeer: async (url) => (String(url).includes("dead") ? { ok: false, error: "fetch failed" } : { ok: true }),
+    markProbe: async (url, ok) => { marks.push([url, ok]); },
+  });
+  assert.deepEqual(marks, [["http://dead:8989", false], ["http://alive:8989", true]], "挂掉的记 false、活的记 true，顺序与探测一致");
+  assert.equal(r.peerFail, 1, "失败如实计数");
+  assert.equal(r.peerOk, 1);
+});
+
+test("warmOnce：markProbe 抛错不影响整轮（记账失败不算保热失败）", async () => {
+  let marked = false;
+  const r = await warmOnce({
+    peers: [{ url: "http://a:8989" }],
+    picks: [],
+    warmPeer: async () => ({ ok: false, error: "x" }),
+    markProbe: async () => { marked = true; throw new Error("persist boom"); },
+  });
+  assert.equal(marked, true, "markProbe 确实被调了");
+  assert.equal(r.peerFail, 1, "探测本身失败如实计数，不被记账异常吞掉");
+});
+
+
 test("warmOnce：preheat 抛错也只记 fail，不影响其它支", async () => {
   const r = await warmOnce({
     peers: [], picks: ["a-free", "workbuddy/g"],
