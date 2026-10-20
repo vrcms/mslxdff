@@ -5,6 +5,7 @@ import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
 import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 import { serialTryPeers, PEER_SERIAL } from "./peer-serial.js";
+import { overForwardLimit, contextGuardMessage } from "../chat-pipeline/context-guard.js";
 
 // peer 阶段总预算：三批候选（ordered / orderedByLastError / coolingByLastError）共享同一个
 // 截止时间，而不是每批各吃满一次等头超时。实测最坏路径是三批串行各 30s（≈90s），
@@ -143,8 +144,15 @@ export { clearPeerHealthCache, peerHealthyModels };
 const DEFAULT_PEER_HEADERS_TIMEOUT_MS = 120_000;
 
 async function forwardToPeer(peer, body, model, hops, controller = new AbortController(), waitMs = DEFAULT_PEER_HEADERS_TIMEOUT_MS) {
-  const timer = setTimeout(() => controller.abort(), Math.max(1, Math.round(waitMs)));
-  try {
+  // 转发前上下文预检（真正的出站闸门）：所有经组员的转发都从这里出去，大上下文必须在这里拦下。
+  // 现网实证：errors.log 里 376 条 `context_length_exceeded`，274 条正是组员执行撞的 —— 白烧对方额度。
+  const guard = overForwardLimit(body);
+  if (guard) {
+    const err = new Error(contextGuardMessage(guard));
+    err.contextGuard = guard;
+    return err;
+  }
+  const timer = setTimeout(() => controller.abort(), Math.max(1, Math.round(waitMs)));  try {
     const headers = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${peer.token}`,
@@ -214,6 +222,9 @@ function peerName(peer) {
 // 组员试法：**串行**（用户 2026-10-19 决定：不竞速）。实现在 ./peer-serial.js，
 // 本文件只保留调度与并发版（PEER_SERIAL=false 时的旧路径）。
 export { PEER_SERIAL };
+// 测试接缝：转发闸门是「上下文超限不许出站」的唯一落点，必须有直接单测钉住
+// （经 race/serial 间接测会被网络的真实失败盖掉，判不出是闸门还是对端挂了）。
+export { forwardToPeer };
 
 export async function racePeerCandidates(candidates, ctx) {
   const tried = (ctx.triedUrls ??= new Set());

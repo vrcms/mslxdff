@@ -14,6 +14,7 @@ import { summarizeRequest, upstreamEcho } from "../model-trace.js";
 import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
 import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
+import { forwardOrGuard } from "./context-forward.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -253,21 +254,24 @@ export async function runSerialTrial(ctx, deps = {}) {
       }
       break;
     }
+    // 转发闸门（详见 context-forward.js）：被拦即收场，不许换路重试——同一份大上下文换个目标照样撑爆。
+    const gc = { res, body, order, handlerCtx, evt, logCall, logError, mark, perf0, stages, done, requested, useAuto, model, exhaustedLocal };
     if (canForwardPeers) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (peer)` });
       } else {
-        const pr = await peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res });
-        if (pr.handled) return { done: true };
-        if (pr.lastErr) lastErr = pr.lastErr;
+        const fr = await forwardOrGuard(() => peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res }), gc);
+        if (fr.done) return fr;
+        lastErr = fr.lastErr ?? lastErr;
       }
     }
     if (groups) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (broadband)` });
       } else {
-        const br = await broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, attemptStartMs: performance.now(), stages, res, startedAt, plugins });
-        if (br.handled) return { done: true };
+        const fr = await forwardOrGuard(() => broadbandRelay({ model, body, hops, lastErr, requested, useAuto, lockModel, auto, groups, token, bus, logs, handlerCtx, evt, mark, perf0, attemptStartMs: performance.now(), stages, res, startedAt, plugins }), gc);
+        if (fr.done) return fr;
+        lastErr = fr.lastErr ?? lastErr;
       }
     }
     if (canFailover()) { evt("fallback", { reqId, from: model, to: order[idx + 1] ?? null, reason: lastErr?.message || `upstream ${lastErr?.status ?? 502}` }); continue; }

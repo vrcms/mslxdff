@@ -5,6 +5,7 @@ import { getViaRoute } from "../../bench/via-routes.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../../providers/share-keys.js";
 import { errMsg } from "../helpers.js";
 import { compatFetch } from "../../compat.js";
+import { overForwardLimit, contextGuardMessage } from "../../chat-pipeline/context-guard.js";
 
 function shortLabel(p) {
   const raw = String(p?.name || p?.id || p?.url || "").trim();
@@ -59,6 +60,15 @@ export async function handleViaRoute({
     return { handled: false };
   }
   evt("via-route-hit", { reqId: handlerCtx.reqId, model, peer: peer.url, peerLabel, routeBest: route.best, at: route.at });
+  // 转发前上下文预检：via-route 是**第一条**出站口（比 peer/broadband 更早），大上下文在这里就该拦下，
+  // 否则白烧组员额度再撞上游 `400 context_length_exceeded`。放行由调用方继续走 peer/broadband 的同一闸门。
+  const guard = overForwardLimit(body);
+  if (guard) {
+    const msg = contextGuardMessage(guard);
+    evt("context-guard", { reqId: handlerCtx.reqId, model, via: "via-route", peer: peer.url, estimated: guard.estimated, limit: guard.limit, over: guard.over });
+    try { logError?.(model, 400, msg); } catch {}
+    return { handled: false, lastErr: { model, upstream: null, status: 400, message: msg, contextGuard: true } };
+  }
   // 单路径转发，不并发：直接打 best peer
   const hops = handlerCtx.hops || 0;
   // ADR-0019：借道 = 用 A 的 key —— 转发时自动附带（组内互信，无开关），与 peers.js 共用同一组装点。

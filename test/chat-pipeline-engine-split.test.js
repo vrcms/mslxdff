@@ -177,4 +177,47 @@ describe("chat-pipeline engine 二次拆", () => {
     await runSerialTrial(ctx, deps);
     assert.equal(res.statusCode, 403);
   });
+
+  // 转发前上下文预检：本地失败后要把同一份大上下文转给组员时，必须先拦下让客户端压缩，
+  // 而不是白烧对方额度再撞上游 `400 context_length_exceeded`。
+  // 闸门设在**真正的出站口**（peers.forwardToPeer / via-route / broadband），所以这里用真 peerRelay 之外的
+  // 真实路径难造；改为直接验证「peer 返回 contextGuard 时不再转给 broadband、立即收场」这条编排。
+  test("US5 peer 被上下文闸门拦下 → 不再转 broadband，回 context_length_exceeded", async () => {
+    const res = fakeRes();
+    const events = [];
+    let broadbandCalled = false;
+    const guardErr = {
+      model: "m1",
+      upstream: null,
+      status: 400,
+      message: "context_length_exceeded: 请求约 250000 tokens，超过网关注入的转发上限 200000；请先运行 /compact 压缩上下文再重试。",
+      contextGuard: { estimated: 250000, limit: 200000, over: 50000 },
+    };
+    const deps = {
+      localRelay: async () => { throw new Error("should not relay"); },
+      peerRelay: async () => { throw new Error("should not peer"); },
+      // 真 peerRelay 会调 peers.js 的 forwardToPeer；这里直接在编排层模拟它带回 contextGuard
+      broadbandRelay: async () => { broadbandCalled = true; return { handled: true }; },
+      viaRoute: async () => ({ handled: false }),
+      exhaustedLocal: async () => { throw new Error("should not exhaust"); },
+      exhaustedAll: async () => { throw new Error("should not exhaust all"); },
+      hedge: async () => ({ handled: false }),
+    };
+    const ctx = baseCtx({
+      order: ["m1"],
+      useAuto: false,
+      res,
+      canForwardPeers: true,
+      groups: { list: () => ({}) },
+      peers: { ordered: () => [], orderedByLastError: () => [], coolingByLastError: () => [] },
+      evt: (t, d) => events.push({ t, d }),
+      upstream: { chat: async () => errRes(429) },
+    });
+    // 让 peerRelay 直接交回被闸门拦下的结果（与 forwardToPeer 的真实产物同形）
+    await runSerialTrial(ctx, { ...deps, peerRelay: async () => ({ handled: false, lastErr: guardErr }) });
+    assert.equal(broadbandCalled, false, "被闸门拦下后不允许再试 broadband");
+    assert.equal(res.statusCode, 400);
+    assert.match(res.wrote.join(""), /context_length_exceeded/);
+    assert.ok(events.some((e) => e.t === "context-guard"), "必须留 context-guard 事件");
+  });
 });
