@@ -171,4 +171,42 @@ describe("railway：工厂行为", () => {
       await p.close();
     } finally { await teardown(); }
   });
+
+  // 客户端透传的 x-session-id 是任意串（不是 opencode id 形状）。裸拼 `ses_` + 该串会产出
+  // 不合规 id：上游会反解低 12 位校验 counter，形状不符即 403 FreeTierError。
+  test("客户端透传任意会话串：派生出的 session 头必须合规（不可裸拼 ses_）", async () => {
+    await setup();
+    try {
+      const p = createRailwayProvider({ baseUrl: srv.url });
+      const clientId = "b7f3c1a0-9d2e-4f11-8a3b-client-side-affinity-id";
+      const send = () => p.chat(
+        { model: "deepseek-v4.1-flash-free", stream: true, messages: [{ role: "user", content: "hi" }] },
+        { sessionId: clientId },
+      );
+      assert.equal((await send()).status, 200);
+      const sess = srv.seen.at(-1).headers["x-opencode-session"];
+      assert.match(sess, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/, `session 形状不合规: ${sess}`);
+      const counter = Number((~BigInt("0x" + sess.slice(4, 16))) & 0xfffn);
+      assert.ok(counter >= 0 && counter <= 63, `counter 越界: ${counter}`);
+
+      // 同一客户端会话串必须派生出同一 session（会话亲和 / 上游按 session 归组额度）
+      await send();
+      assert.equal(srv.seen.at(-1).headers["x-opencode-session"], sess, "同一会话串应稳定派生");
+      await p.close();
+    } finally { await teardown(); }
+  });
+
+  test("已合规的 ses_ 会话 id 原样透传", async () => {
+    await setup();
+    try {
+      const p = createRailwayProvider({ baseUrl: srv.url });
+      const good = "ses_0123456789abABCDEFghijklmn";
+      await p.chat(
+        { model: "deepseek-v4.1-flash-free", stream: true, messages: [{ role: "user", content: "hi" }] },
+        { sessionId: good },
+      );
+      assert.equal(srv.seen.at(-1).headers["x-opencode-session"], good);
+      await p.close();
+    } finally { await teardown(); }
+  });
 });

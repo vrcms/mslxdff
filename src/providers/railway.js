@@ -7,12 +7,13 @@
 //   ③ 带 opencode 身份头（UA + client/session/request/project），否则同样 403。
 //
 // 端点：<base>/zen/v1/models、<base>/zen/v1/chat/completions（base 缺省为 Railway 反代根）。
+import crypto from "node:crypto";
 import { createKeyRing } from "./keyring.js";
 import { collectApiKeysGeneric, envInt, createAgent, getUndici, joinUrl } from "./base.js";
 import { compatFetch } from "../compat.js";
 import { loadProviderBaseUrl, loadProviderKeys, saveProviderConfig } from "../state.js";
 import { ensureFreeLaneShape, aggregateChatSse } from "../free-lane.js";
-import { genId, opencodeUa } from "../opencode-identity.js";
+import { genId, opencodeUa, digestIdTail } from "../opencode-identity.js";
 import { joinModelId } from "./model-id.js";
 
 const { UndiciFetch } = getUndici();
@@ -72,17 +73,31 @@ export function createRailwayProvider({
   } catch {}
 
   // 身份头 + free-lane：railway 反代的是 zen，两样缺一不可（缺任一都是 403 FreeTierError）。
+  // 会话取值同 generic.js 的 resolveGoSession：已合规（ses_ 前缀）直接用；客户端透传的任意串
+  // 做 sha1 摘要派生（稳定 + 合规）；无则每请求 fresh。绝不可裸拼 `ses_` + 客户端串——上游会反解
+  // 低 12 位校验 counter，形状不符 403 FreeTierError（见 opencode-identity.js 头注）。
+  function resolveSession(id) {
+    const raw = String(id || "").trim();
+    if (/^ses_/.test(raw)) return raw;
+    if (raw) {
+      try {
+        return `ses_${digestIdTail(crypto.createHash("sha1").update(raw).digest())}`;
+      } catch {
+        return genId("ses_");
+      }
+    }
+    return genId("ses_");
+  }
+
   function buildHeaders(opts = {}) {
     return {
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
       "User-Agent": opencodeUa(),
       "x-opencode-client": "desktop",
-      // session 复用调用方给的会话 id（同会话粘同一上游会话），没有才现生成
-      "x-opencode-session": opts.sessionId ? `ses_${String(opts.sessionId).slice(0, 24)}` : genId("ses_"),
+      "x-opencode-session": resolveSession(opts.sessionId),
       "x-opencode-request": genId("msg_"),
       "x-opencode-project": "global",
-      ...(ring.size ? {} : {}),
     };
   }
 
