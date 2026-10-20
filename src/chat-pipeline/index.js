@@ -101,7 +101,11 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     }
     if (!order.length) order = [""];
     const canFallback = order.length > 1;
-    const canForwardPeers = Boolean(peers) && hops < (maxHops ?? 3);
+    // hi 探针（x-mslxdff-probe:1）只问「这台机器此刻能不能打通上游」，不代表真实业务：
+    // 它绝不能再触发本机的组员/宽带接力——否则探针会跟着走完整条接力链（最坏 45s 预算），
+    // 而调用方只看它几百毫秒内活不活。组员侧就地直连，成败如实回给调用方。
+    const isProbe = String(req?.headers?.["x-mslxdff-probe"] || "") === "1";
+    const canForwardPeers = !isProbe && Boolean(peers) && hops < (maxHops ?? 3);
     mark("ordered");
 
     const reqIp = clientIp(req); // 一次解析两处用：request 事件的 ip 字段 + 回路语料的 clientIp（routes/helpers.js 取 x-forwarded-for 首段）
@@ -125,7 +129,7 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
     const clientSession = String(req?.headers?.["x-session-affinity"] || req?.headers?.["x-session-id"] || "").trim() || null;
     // triedUrls 挂请求级并**按引用**共享：同一请求内"同一组员不重复试"的契约跨候选生效
     // （peer 阶段各分支会 spread 出上下文副本，集合在这里建一次才不会各存一份）。
-    const handlerCtx = { reqId, api, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp, triedUrls: new Set() };
+    const handlerCtx = { reqId, api, model: null, body: req?.body, hops, peers, plugins, evt, logError, logCall, logs, workbuddyUid, sessionId: clientSession, clientIp: reqIp, triedUrls: new Set(), isProbe };
     if (clientSession) evt("client-session", { reqId, sessionId: clientSession.slice(0, 24) });
 
     await engine.run({

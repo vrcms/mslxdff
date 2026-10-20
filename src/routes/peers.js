@@ -5,6 +5,7 @@ import { runHook } from "../plugins.js";
 import { buildShareKeysHeader, SHARE_KEYS_HEADER } from "../providers/share-keys.js";
 import { compatFetch, timeoutSignal, getUndici } from "../compat.js";
 import { serialTryPeers, PEER_SERIAL } from "./peer-serial.js";
+import { probePeer, peerProbeTimeoutMs } from "./peer-probe.js";
 import { overForwardLimit, contextGuardMessage } from "../chat-pipeline/context-guard.js";
 
 // peer 阶段总预算：三批候选（ordered / orderedByLastError / coolingByLastError）共享同一个
@@ -252,6 +253,13 @@ export async function racePeerCandidates(candidates, ctx) {
         perAttemptCap: peerAttemptTimeoutMs(), deadline, budgetMs,
         // 连接预热：对「下一个备选」提前打 /health，复用 chat 的同一连接池（见 warmPeerHealth 注释）
         warmPeer: (peer) => { if (peer?.url) warmPeerHealth(peer.url, { timeoutMs: 1500 }).catch(() => {}); },
+        // 用户 2026-10-20：备选时打一个 hi、轮到它时再打一个 hi，hi 回不来就换下一个。
+        // 走 getPeerDispatcher 的**同一条连接池**（与 chat 转发复用 socket，裸 fetch 热的是另一条等于白热）。
+        probePeer: (peer, model) => probePeer(peer, {
+          model: model || null,
+          timeoutMs: peerProbeTimeoutMs(),
+          dispatcher: getPeerDispatcher(),
+        }),
       },
     });
   }

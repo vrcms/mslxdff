@@ -100,7 +100,9 @@ export async function runSerialTrial(ctx, deps = {}) {
     const chatOptsArg = Object.keys(chatOpts).length ? chatOpts : undefined;
     // 空转 200（模型无输出）同模型暂停重试：默认 3 次、阶梯 [2s,8s,30s]；仅 EMPTY_MODEL_RESPONSE，
     // 429/403/500 与 fetch 异常走原有切号/failover（防烧额度）。MSLXDFF_EMPTY_TURN_RETRIES=0 关闭。
-    const emptyCfg = emptyRetryCfg();
+    // 探针（x-mslxdff-probe:1）不重试：调用方只要一个「活不活」的答案，重试阶梯会把它吊 40s。
+    const isProbe = handlerCtx?.isProbe === true;
+    const emptyCfg = isProbe ? { max: 0, steps: null, delayMs: 0 } : emptyRetryCfg();
     const raiseCap = emptyRaiseCap();
     const nudgeCfg = emptyNudgeCfg();
     let emptyRetried = 0;

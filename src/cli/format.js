@@ -62,6 +62,8 @@ export function fmtEvent(e) {
       return `${head} peer check    ${e.peer} -> ${e.count ? e.healthy.join(", ") : "no healthy models"}${e.strict ? " (strict)" : ""}`;
     case "peer-request":
       return `${head} peer req      并发发出 peer=${e.peer} model=${m(e.model)} hops=${e.hops}`;
+    case "peer-probe":
+      return `${head} peer hi       备选探活 peer=${e.peer} ${e.ok ? "ok" : `fail HTTP ${e.status ?? "network"}`} model=${m(e.model)} ${e.latencyMs ? `${e.latencyMs}ms` : ""}${e.action === "skip" ? " → 跳过换下一个" : ""}`;
     case "peer-forward":
       return `${head} peer resp     收到响应 peer=${e.peer} model=${m(e.model)} ${e.ok ? "ok" : "fail"} ${e.latencyMs ? `${e.latencyMs}ms` : ""} hops=${e.hops}${e.retry ? " (retry)" : ""}`;
     case "peer-error":

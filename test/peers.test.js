@@ -238,8 +238,7 @@ async function stubChatServer(onChat, onStatus) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
       return;
-    }
-    if (req.method === "GET" && url === "/v1/models/status") {
+    }    if (req.method === "GET" && url === "/v1/models/status") {
       if (onStatus) {
         if (onStatus.length >= 2) return onStatus(req, res);
         const data = onStatus();
@@ -253,7 +252,15 @@ async function stubChatServer(onChat, onStatus) {
     }
     let body = "";
     req.on("data", (c) => (body += c));
-    req.on("end", () => onChat(req, res, body));
+    req.on("end", () => {
+      // hi 探针（备选时一个、轮到它时一个）是体检不是业务：只回 200，不计入 onChat 的转发计数。
+      if (req.headers["x-mslxdff-probe"] === "1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ object: "probe" }));
+        return;
+      }
+      onChat(req, res, body);
+    });
   });
   await new Promise((r) => srv.listen(0, "127.0.0.1", () => r()));
   return srv;

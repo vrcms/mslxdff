@@ -45,7 +45,7 @@ export function warmPeer(peer, deps = {}) {
 export async function serialTryPeers({ candidates, v6Candidates = [], ctx, tried, deps }) {
   const {
     resolvePeerTarget, forwardToPeer, peerName, recordLater, summarizeRequest, runHook, errMsg,
-    perAttemptCap, deadline, budgetMs,
+    perAttemptCap, deadline, budgetMs, probePeer,
   } = deps;
   const warm = deps.warmPeer || warmPeer;
   const failed = [];
@@ -71,21 +71,50 @@ export async function serialTryPeers({ candidates, v6Candidates = [], ctx, tried
   const ipv4Chain = filterSlow(fresh(candidates));
   const ipv6Chain = filterSlow(fresh(v6Candidates));
 
-  // —— 预取：进循环前就把「下一个」定好，并顺手预热连接 ——
+  // —— 预取 + 探针（用户 2026-10-20 口径）——
+  // 「某个节点当备选的时候打一个 hi，准备轮到它了也打一个 hi；hi 都回不来就当它不行，直接换。」
+  // 两个 hi 都打，不做结果复用：备选是上一次切换时定的，中间可能已过了几十秒
+  // （上一个节点在大 body 上撞墙，实测 1.5MB 要 28~62s），那时活不代表现在活。
+  // 备选那个 hi 的作用是暖连接 + 提前暴露死节点，轮到时的那个才决定去留。
   let pending = null;
-  const prime = (peer) => {
+  // resolvePeerTarget 会打 /v1/models/status，别为探针白测两次：这里记住解析结果给下一轮复用。
+  const resolved = new Map(); // url -> Promise<{peer,target}|null>
+  const resolveOnce = (peer) => {
+    const hit = resolved.get(peer.url);
+    if (hit) return hit;
+    const p = Promise.resolve()
+      .then(() => resolvePeerTarget(ctx, peer))
+      .catch(() => null);
+    resolved.set(peer.url, p);
+    return p;
+  };
+  const prime = (peer, target) => {
+    if (!peer || !target || typeof probePeer !== "function") return;
+    try {
+      const p = probePeer(peer, target);
+      if (p && typeof p.then === "function") p.catch(() => {});
+    } catch { /* 预热失败不影响主流程 */ }
+  };
+  const primeAt = (peer) => {
     if (!peer) return;
-    warm(peer, deps.warmPeerDeps);
+    resolveOnce(peer)
+      .then((r) => { if (r) prime(r.peer, r.target); })
+      .catch(() => {});
   };
   const takeNext = (stage) => {
     const chain = stage === "ipv6" ? ipv6Chain : ipv4Chain;
     const p = chain.shift() || null;
-    if (p) prime(chain[0] || null); // 立即预热「再下一个」，保证永远有备选就绪
+    // 立刻给「再下一个」打 hi。模型名要现在解析——下一轮循环该它时 ctx.model 可能已变。
+    if (p) primeAt(chain[0] || null);
     return p;
   };
 
   let stage = "ipv4";
   let emptyIpv4Announced = false;
+
+  // 链头从没当过「备选」（它一上来就是主角），进入循环前先给它也打一个 hi ——
+  // 此时 ctx.model 还是本机刚失败的那个模型，解析目标与后面轮到时同源。
+  primeAt(ipv4Chain[0] || null);
 
   for (;;) {
     if (deadline > 0 && Date.now() >= deadline) {
@@ -110,12 +139,33 @@ export async function serialTryPeers({ candidates, v6Candidates = [], ctx, tried
     }
     if (!pending) break;
 
-    const prepared = await resolvePeerTarget(ctx, pending);
+    const prepared = await resolveOnce(pending);
     if (!prepared) continue;
     const { peer, target } = prepared;
     tried.add(peer.url);
     const ctrl = new AbortController();
     const name = peerName(peer);
+
+    // 轮到它了：再打一个 hi。回不来就当这个备选不行，直接换下一个。
+    if (typeof probePeer === "function") {
+      const t = performance.now();
+      let r;
+      try { r = await probePeer(peer, target); } catch { r = { ok: false }; }
+      const probeMs = Math.round(performance.now() - t);
+      if (r && r.ok === false) {
+        ctx.evt("peer-probe", { peer: peer.url, name, model: target, phase: "turn", ok: false, status: r.status ?? null, latencyMs: probeMs, action: "skip" });
+        failed.push({ ok: false, peer, target, res: null, status: r.status || 502 });
+        recordLater(() => ctx.peers.recordError(peer.url, { status: r.status || 502 }));
+        recordLater(() => ctx.peers.recordResult(peer.url, { ok: false }));
+        continue;
+      }
+      ctx.evt("peer-probe", { peer: peer.url, name, model: target, phase: "turn", ok: true, status: r?.status ?? null, latencyMs: probeMs });
+      if (deadline > 0 && Date.now() >= deadline) {
+        ctx.evt("peer-budget-out", { peer: null, reason: `peer 阶段总预算 ${budgetMs}ms 用尽（探针后）`, budgetMs, remaining: ipv4Chain.length + ipv6Chain.length });
+        break;
+      }
+    }
+
     ctx.evt("peer-request", { peer: peer.url, name, model: target, hops: ctx.hops + 1, payload: summarizeRequest(ctx.body), serial: 1, stage });
     if (ctx.plugins?.length) {
       runHook(ctx.plugins, "peer:beforeForward", { reqId: ctx.reqId, peer: peer.url, model: target, hops: ctx.hops + 1 }).catch(() => {});
