@@ -53,6 +53,18 @@ export function parseRateLimitResetMs(bodyText, clock = Date.now) {
   return ms > 0 ? ms : 0;
 }
 
+// 账号级风控封禁：腾讯 workbuddy `403 {"code":11140,"msg":"request illegal",displayMsg:"…restricted due to unusual activity/账号存在异常行为…"}`。
+// 与 auth 失败、额度耗尽、限流都不同：**刷新 token 无效**（2026-10-21 实测：refresh 成功换发新 token 后照样 11140，
+// 且换新 UA/完整客户端头集合同样 11140——判的是账号本体，不是凭据或请求指纹）。
+// 命中即应长冷却该号并如实把 403 透回，绝不进 refresh→重打 的连锁（旧链每个用户请求白烧 号数×2 次上游调用 + 号数 次 refresh）。
+export function isAccountRestricted(status, bodyText) {
+  if (status !== 403) return false;
+  const t = String(bodyText || "");
+  if (/"code"\s*:\s*11140\b/.test(t)) return true;
+  const lower = t.toLowerCase();
+  return lower.includes("request illegal") || lower.includes("restricted due to unusual activity") || t.includes("账号存在异常行为");
+}
+
 export function isAuthError(status, bodyText) {
   if (status === 401 || status === 403) return true;
   const t = String(bodyText || "").toLowerCase();
@@ -86,10 +98,14 @@ export function createAuthService({
     }
     const p = (async () => {
       const url = joinUrl(resolvedBase, "/v2/plugin/auth/token/refresh");
+      // 回退到 2026-10-21 17:09 实测**可用**的旧头形（refresh 成功换发过新 token）：refresh 无活体抓包，
+      // 不赌未验证口径；11140 只打 chat、refresh 不在风控画像主战场。X-Refresh-Token 是 refresh 特有凭据头。
+      // X-Auth-Refresh-Source: "plugin" 是 CLI bundle 三条 refreshSession 逐字共有的真值（@7064132/@7126898/@7144850），补上无副作用。
       const headers = {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
         "X-Refresh-Token": rt,
+        "X-Auth-Refresh-Source": "plugin",
         "X-User-Id": uid,
         "X-Domain": auth.domain || "www.codebuddy.cn",
         "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",

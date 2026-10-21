@@ -1,5 +1,7 @@
 import { joinModelId } from "../model-id.js";
 import { joinUrl } from "../base.js";
+import { isAccountRestricted } from "./auth.js";
+import { buildWorkbuddyConfigHeaders } from "./client-headers.js";
 
 function creditsValue(c) {
   if (!c || !String(c).trim()) return 0;
@@ -28,16 +30,8 @@ export function createModelsService({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`${id} models timed out`)), 15_000);
     try {
-      const headers = {
-        Accept: "application/json",
-        "X-User-Id": useAuth?.uid || "",
-        "X-Domain": useAuth?.domain || "www.codebuddy.cn",
-        "X-Product": "SaaS",
-        "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
-        Origin: "https://www.codebuddy.cn",
-        Referer: "https://www.codebuddy.cn/",
-      };
-      if (useKey) headers["Authorization"] = `Bearer ${useKey}`;
+      // config 端点按活体真值只发 6 头（GET 简头通道，勿套 chat 全量头——2026-10-21 实测回退）。
+      const headers = buildWorkbuddyConfigHeaders(useKey, useAuth);
       const opts = { headers, signal: controller.signal };
       if (dispatcher) opts.dispatcher = dispatcher;
       return await fetchImpl(`${joinUrl(baseUrl, modelsPath)}`, opts);
@@ -65,6 +59,8 @@ export function createModelsService({
         if (!r.ok) {
           let t = "";
           try { t = await r.clone().text(); } catch {}
+          // 封号 11140：refresh 无效（判账号本体），跳过刷新直接换下一个 key，别白烧 refresh 端点。
+          if (isAccountRestricted(r.status, t)) continue;
           if (isAuthError?.(r.status, t)) {
             const newKey = await refreshTokenFor?.(key, auth);
             if (newKey && !tried.has(newKey)) {
@@ -98,16 +94,8 @@ export function createModelsService({
     try {
       const key = getKey ? getKey() : "";
       const auth = getAuth ? getAuth(key) : null;
-      const headers = {
-        Accept: "application/json",
-        "X-User-Id": auth?.uid || "",
-        "X-Domain": auth?.domain || "www.codebuddy.cn",
-        "X-Product": "SaaS",
-        "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
-        Origin: "https://www.codebuddy.cn",
-        Referer: "https://www.codebuddy.cn/",
-      };
-      if (key) headers["Authorization"] = `Bearer ${key}`;
+      // 与 listModels 同一口径：config 简头集（活体真值）。
+      const headers = buildWorkbuddyConfigHeaders(key, auth);
       const opts = { headers };
       if (dispatcher) opts.dispatcher = dispatcher;
       const res = await fetchImpl(joinUrl(baseUrl, modelsPath), opts);

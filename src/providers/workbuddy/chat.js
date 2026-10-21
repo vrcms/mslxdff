@@ -1,5 +1,5 @@
-import { joinUrl } from "../base.js";
-import { isAuthError, isInsufficientStatus, isRateLimitedStatus, parseRateLimitResetMs } from "./auth.js";
+import { joinUrl, envInt } from "../base.js";
+import { isAuthError, isInsufficientStatus, isRateLimitedStatus, parseRateLimitResetMs, isAccountRestricted } from "./auth.js";
 import { appendRotationLog as defaultAppend } from "./rotation-log.js";
 import { createTransport } from "../../transport/index.js";
 import { dispatcherFetch } from "../../upstream-engine/sdk/attempt.js";
@@ -8,21 +8,12 @@ import { attemptOnceSdk } from "./sdk-chat.js";
 import { sanitizeToolSequence } from "./sanitize-tools.js";
 import { rewriteWorkbuddyPayload } from "./payload.js";
 import { resolveEngineMode } from "../../upstream-engine/mode.js";
+import { buildWorkbuddyHeaders } from "./client-headers.js";
 
+// 出站指纹单一真值：官方桌面端口径见 client-headers.js（含每请求随机 conversation/trace id）。
+// 真机 chat 的 Accept 是 application/json（SSE 由 body.stream 协商、非 Accept），故不传 accept 用默认值。
 function buildAuthHeaders(key, auth) {
-  const h = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-    "User-Agent": "CLI/2.115.0 WorkBuddy/2.115.0",
-    Origin: "https://www.codebuddy.cn",
-    Referer: "https://www.codebuddy.cn/",
-    "X-Product": "SaaS",
-  };
-  if (key) h["Authorization"] = `Bearer ${key}`;
-  if (auth?.uid) h["X-User-Id"] = auth.uid;
-  h["X-Domain"] = auth?.domain || "www.codebuddy.cn";
-  if (auth?.enterpriseId) { h["X-Enterprise-Id"] = auth.enterpriseId; h["X-Tenant-Id"] = auth.enterpriseId; }
-  return h;
+  return buildWorkbuddyHeaders(key, auth);
 }
 
 function withUidHeader(res, uid) {
@@ -81,6 +72,12 @@ export function createChatService({
   clock = Date.now,
   cooldownMs = 30_000,
 } = {}) {
+  // 封号 11140 冷却时长（env MSLXDFF_WORKBUDDY_RESTRICTED_COOLDOWN_MS，缺省 15min）：
+  // 腾讯"异常行为"限制可长可短，30s 档太短会反复白烧；15min 内人工申诉/自动解封后再回来。
+  const restrictedCooldownMs = envInt("MSLXDFF_WORKBUDDY_RESTRICTED_COOLDOWN_MS", 900_000);
+  // 最近一次「账号封禁 11140」记账 { at, uids, message }——让冷却期内到达的请求如实回 403
+  // （旧表现：keyring 全冷却 → 笼统 "all API keys are in cooldown" 冒 502，用户/客户端看不出是封号）。
+  let lastRestricted = null;
   const getBalance = balanceCache?.getCachedBalance || (() => null);
   const setBalance = balanceCache?.setCachedBalance || (() => {});
   const doLog = (opts) => {
@@ -132,6 +129,11 @@ export function createChatService({
     if (res.status < 400) return reshapeWorkbuddySse(res);
     let txt = "";
     try { txt = await res.text(); } catch {}
+    // 账号封禁 11140：判账号本体，refresh 无效（2026-10-21 实测刷出新 token 照样 11140），
+    // 原样上抛让 runChat 走「长冷却 + 换号」，绝不进 refresh 连锁白烧上游。
+    if (isAccountRestricted(res.status, txt)) {
+      throw failErr(`workbuddy account restricted (11140) for ${auth?.uid || ""}: ${txt.slice(0, 160)}`, _t0(), clock, { restricted: true, status: res.status });
+    }
     if (!isAuthError(res.status, txt)) return rewrapBody(res, txt);
     const newKey = await authService?.refreshTokenFor?.(key, auth);
     if (!newKey) throw failErr(`workbuddy refresh failed for ${auth?.uid || ""}: ${txt.slice(0, 120)}`, _t0(), clock);
@@ -141,6 +143,10 @@ export function createChatService({
     catch (e2) { throw e2; }
     let stillTxt = "";
     if (res2.status >= 400) { try { stillTxt = await res2.text(); } catch {} }
+    // 刷新后仍被封：同属账号级限制，标记 restricted 供上层长冷却。
+    if (isAccountRestricted(res2.status, stillTxt)) {
+      throw failErr(`workbuddy account restricted (11140) for ${auth?.uid || ""}: ${stillTxt.slice(0, 160)}`, _t0(), clock, { restricted: true, status: res2.status });
+    }
     if (stillTxt) res2 = rewrapBody(res2, stillTxt);
     const stillAuth = isAuthError(res2.status, stillTxt);
     const uid2 = auth2.uid || auth.uid;
@@ -186,6 +192,12 @@ export function createChatService({
         return res;
       } catch (e) {
         e._t = e._t || { attempts: [], waitMs: 0, totalMs: Math.round(nowMs(clock) - t0) };
+        // pin 模式撞封号：长冷却 + 把 403 原文透回（refresh 无效，别冒 502 让客户端以为网关坏了）。
+        if (e?._t?.restricted || e?.restricted) {
+          try { activeRing.onError(key, restrictedCooldownMs); } catch {}
+          doLog({ uid: auth.uid, model: _modelVal, totalMs: Math.round(nowMs(clock) - t0), balanceHit: false, error: String(e.message).slice(0, 160) });
+          return errRes(403, String(e.message), "account-restricted", auth.uid, t0, clock);
+        }
         if (!(e instanceof Error) || !String(e.message).includes("refresh failed")) try { activeRing.onError(key); } catch {}
         throw e;
       }
@@ -197,7 +209,13 @@ export function createChatService({
     for (let triedCount = 0; triedCount < maxTries; triedCount++) {
       const key = activeRing.next();
       if (!key) {
-        if (triedCount === 0) throw failErr(`${id}: all API keys are in cooldown (last error < ${cooldownMs}ms ago) — provider temporarily unavailable`, t0, clock, { cooldownMs });
+        if (triedCount === 0) {
+          // 封号冷却窗口内的重复请求：如实回 403（账号问题），别抛笼统 cooldown 冒成 502。
+          if (lastRestricted && clock() - lastRestricted.at < restrictedCooldownMs) {
+            return errRes(403, `workbuddy: all account(s) restricted (11140): ${String(lastRestricted.message).slice(0, 160)}`, "account-restricted", "", t0, clock);
+          }
+          throw failErr(`${id}: all API keys are in cooldown (last error < ${cooldownMs}ms ago) — provider temporarily unavailable`, t0, clock, { cooldownMs });
+        }
         break;
       }
       const auth = authForKey(key);
@@ -218,7 +236,12 @@ export function createChatService({
       try { res = await withRefresh(url, body, key, auth); }
       catch (e) {
         e._t = e._t || { attempts: [], waitMs: 0, totalMs: Math.round(nowMs(clock) - t0) };
-        try { activeRing.onError(key); } catch {}
+        // 封号 11140：长冷却本号换下一个；冷却档走 restrictedCooldownMs（缺省 15min），别用 30s 短档反复白烧。
+        // restricted 标记挂在 failErr 的 _t 上；SDK 通道对 4xx 抛的 AI_APICallError 带 statusCode/responseBody，一并识别。
+        if (e?._t?.restricted || e?.restricted || isAccountRestricted(e?.statusCode, e?.responseBody)) {
+          lastRestricted = { at: clock(), uid, message: String(e.responseBody || e.message || "").slice(0, 200) };
+          try { activeRing.onError(key, restrictedCooldownMs); } catch {}
+        } else try { activeRing.onError(key); } catch {}
         lastErr = e;
         continue;
       }
@@ -256,7 +279,18 @@ export function createChatService({
       doLog({ uid, model: _modelVal, totalMs: Math.round(nowMs(clock) - t0), balanceHit: false });
       return res;
     }
-    if (lastErr) throw lastErr;
+    if (lastErr) {
+      // 全号皆被封 11140：上游报文带可申诉的 displayMsg/displayTips，透回原文比模糊包装更利于用户自查；
+      // 状态码用上游的 403（旧链是 502，客户端侧像网关坏了，实为账号问题）。
+      if (lastErr._t?.restricted || lastErr.restricted) {
+        lastRestricted = { at: clock(), uid: "", message: String(lastErr.message || "") };
+        const uids = [...tried].filter((x) => x && x.includes("-")).join(",");
+        const reason = `workbuddy all account(s) restricted (11140): ${uids || "n/a"} — ${String(lastErr.message).slice(0, 200)}`;
+        const r = errRes(403, reason, "account-restricted", uids, t0, clock);
+        return r;
+      }
+      throw lastErr;
+    }
     throw failErr(`${id}: all workbuddy accounts exhausted or unavailable`, t0, clock);
   }
 

@@ -167,6 +167,55 @@ test("chat: forced stream true even when body stream false", async () => {
   } finally { await closeSrv(srv); }
 });
 
+test("chat: 403/11140 封号不刷 token、换下一号；全封透回 403 原文", async () => {
+  const calls = [];
+  let refreshHits = 0;
+  const restrictedBody = JSON.stringify({
+    code: 11140,
+    msg: "request illegal",
+    requestId: "r-1",
+    displayMsg: { en: "Your account has been restricted due to unusual activity", zh: "账号存在异常行为，已被限制使用" },
+  });
+  const srv = await stub((req, res) => {
+    if (req.url.includes("/v2/plugin/auth/token/refresh")) { refreshHits++; res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ code: 0, data: { accessToken: "k-new", refreshToken: "rt-new" } })); return; }
+    if (req.url.includes("/v2/chat/completions")) {
+      const uid = req.headers["x-user-id"];
+      calls.push(uid);
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(restrictedBody);
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: 0 }));
+  });
+  try {
+    const { createWorkbuddyProvider } = await import("../src/providers/workbuddy/index.js");
+    const p = createWorkbuddyProvider({
+      baseUrl: urlOf(srv),
+      apiKeys: ["k-a", "k-b"],
+      auths: [
+        { uid: "uid-a", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-a" },
+        { uid: "uid-b", domain: "www.codebuddy.cn", enterpriseId: "", refreshToken: "rt-b" },
+      ],
+      logger: { append() {} },
+    });
+    const res = await p.chat({ model: "hy3", messages: [] });
+    assert.equal(res.status, 403, "全封应透回 403（不再是模糊 502）");
+    assert.deepEqual(calls.sort(), ["uid-a", "uid-b"], "两号各试一次");
+    assert.equal(refreshHits, 0, "封号不得触发 token 刷新（实测刷了也照样 11140，纯白烧）");
+    const txt = await res.text();
+    assert.match(txt, /11140|restricted/i, "错误信息带封号原因");
+    // 冷却期内再来：应直接 403 且不再打上游（长冷却档生效）
+    const before = calls.length;
+    const res2 = await p.chat({ model: "hy3", messages: [] });
+    assert.equal(res2.status, 403);
+    assert.equal(calls.length, before, "冷却期内不应再烧上游");
+    const r2txt = await res2.text();
+    assert.match(r2txt, /restricted|11140/i, "冷却期响应也要如实说封号，不是笼统 cooldown");
+    await p.close();
+  } finally { await closeSrv(srv); }
+});
+
 test("chat: 400 upstream body stays readable after auth-class check", async () => {
   const srv = await stub((req, res) => {
     if (req.url.includes("/v2/chat/completions")) {

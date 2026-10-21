@@ -86,6 +86,26 @@ test("auth: 6004 中文限流报文被判为 rate-limited，且**不是** insuff
   assert.equal(parseRateLimitResetMs(real, () => Date.parse("2026-10-19T00:00:00+08:00")), 0);
 });
 
+test("auth: 11140 账号封禁识别为 restricted，区别于 auth/insufficient/rate", async () => {
+  const { isAccountRestricted, isAuthError, isInsufficientStatus, isRateLimitedStatus } = await import("../src/providers/workbuddy/auth.js");
+  // 2026-10-21 实锤原文（腾讯 workbuddy 国内站，refresh 后仍返回）
+  const real = JSON.stringify({
+    code: 11140,
+    msg: "request illegal",
+    requestId: "99eaf044-00b8-4ac7-bc44-c776d774b047",
+    displayMsg: { en: "Your account has been restricted due to unusual activity", zh: "账号存在异常行为，已被限制使用" },
+  });
+  assert.equal(isAccountRestricted(403, real), true, "403+11140 必须是封禁");
+  assert.equal(isAccountRestricted(429, real), false, "只有 403 才判封禁");
+  assert.equal(isAccountRestricted(403, JSON.stringify({ code: 6004, msg: "频率限制" })), false, "限流不是封禁");
+  assert.equal(isAccountRestricted(403, '{"code":0,"msg":"ok"}'), false);
+  // 中文措辞兜底也能识别
+  assert.equal(isAccountRestricted(403, JSON.stringify({ msg: "x", displayMsg: { zh: "账号存在异常行为，已被限制使用" } })), true);
+  // 关键：封禁不得被并入 insufficient（否则会把号余额标 0、永久跳过 —— 封号解除后就再也回不来）
+  assert.equal(isInsufficientStatus(403, real, { total: 3400 }), false, "封禁不等于额度耗尽");
+  assert.equal(isRateLimitedStatus(403, real), false, "封禁不是限流（限流只认 429）");
+});
+
 test("auth: concurrent same uid dedupes refresh to single fetch", async () => {
   let refreshCalls = 0;
   const srv = await stub((req, res) => {

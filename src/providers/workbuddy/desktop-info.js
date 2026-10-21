@@ -73,6 +73,22 @@ export function readDesktopAccount(fp) {
     accessToken: j.auth.accessToken,
     refreshToken: j.auth.refreshToken || "",
     expiresAt: exp,
-    domain: j.auth.domain || "www.codebuddy.cn",
+    // domain 以 token 的 iss realm 为准（比 auth.domain 更贴近 cop 网关鉴权域）；auth.domain 兜底。
+    // 注：从桌面 info 导入不等于能对话——2026-10-21 一台桌面态 token 对网关直连仍 401（疑似内嵌 CLI 与
+    // 桌面 Electron 双鉴权）；入池正解是设备授权流 `-provider workbuddy login`，本函数只负责解析登录态字段。
+    domain: issDomain(j.auth.accessToken) || j.auth.domain || "www.codebuddy.cn",
   };
+}
+
+// 从 JWT payload.iss（如 https://www.codebuddy.cn/auth/realms/copilot）提取主机名；解析失败返回 ""。
+export function issDomain(token) {
+  try {
+    const payload = String(token || "").split(".")[1];
+    if (!payload) return "";
+    let b = payload.replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    const iss = JSON.parse(Buffer.from(b, "base64").toString("utf8"))?.iss;
+    if (typeof iss !== "string") return "";
+    return new URL(iss).host || "";
+  } catch { return ""; }
 }
