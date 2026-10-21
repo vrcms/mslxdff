@@ -60,6 +60,13 @@ export const customProviders = [
     match: (id, baseUrl) => id === "raccoon" || String(baseUrl).includes("xiaohuanxiong.com"),
     load: () => import("./raccoon/index.js").then((m) => m.createRaccoonProvider),
   },
+  {
+    id: "agentrouter",
+    // 客户端身份白名单（UA 非 opencode/claude-cli 恒 401）+ gpt-6* 只吃 /v1/responses，
+    // generic 的写死 UA 与 models.dev 判定都覆盖不到，故走定制工厂。
+    match: (id, baseUrl) => id === "agentrouter" || String(baseUrl).includes("agentrouter"),
+    load: () => import("./agentrouter.js").then((m) => m.createAgentRouterProvider),
+  },
 ];
 
 // 供 bench/probe 等需要定制化解析模型列表的场景

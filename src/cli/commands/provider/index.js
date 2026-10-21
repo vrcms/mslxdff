@@ -48,7 +48,7 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider zcode quota [--json]          查看套餐/余量（未登录给重登指引）");
     console.error("            mslxdff -provider raccoon login                   Raccoon（商汤小浣熊）扫码登录（终端二维码，免验证码）");
     console.error("            mslxdff -provider raccoon login --password        Raccoon 手机号+密码登录（多号免扫码；密码输入不回显）");
-    console.error("            mslxdff -provider raccoon quota|checkin [--json]   查积分余额 / 领每日登录积分");
+    console.error("            mslxdff -provider raccoon quota|checkin [--json]   查积分余额 / 每日积分结算+补领登录奖励");
     console.error("            mslxdff -provider traework login|checkin|quota [--json]  SOLO 国内号：登录 / 每日签到领积分 / 查签到与积分额度（quota 只读，不烧配额）");
     console.error("            mslxdff -provider openrouter clear                remove all keys");
     process.exit(1);

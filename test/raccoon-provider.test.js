@@ -292,7 +292,12 @@ test("CLI: raccoon checkin 已领过 → 如实显示「每号只有一次」，
     credential: { access_token: "tok-x" },
     fetchImpl: async (url) => {
       urls.push(String(url));
-      return jsonRes({ code: 0, data: { list: [{ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: new Date().toISOString() }] } });
+      // 账单里两样都齐：今天已结算过每日积分 + 历史已领一次性登录奖励 → 两个写端点都不该再打
+      const today = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+      return jsonRes({ code: 0, data: { list: [
+        { biz_type: "daily_grant", event_name: "每日积分发放", points: 500, grant_at: today, created_at: today },
+        { biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: today },
+      ] } });
     },
     log: (m) => lines.push(String(m)),
     exit: (c) => { exited = c; },
@@ -300,9 +305,11 @@ test("CLI: raccoon checkin 已领过 → 如实显示「每号只有一次」，
   assert.equal(ok, true);
   assert.equal(exited, 0, "已领过是常态，不是失败");
   const out = lines.join("\n");
-  assert.ok(out.includes("每号只有一次"), "文案不能再写「明日再来」—— 这家根本没有每日签到");
-  assert.ok(!out.includes("明日再来"));
+  assert.ok(out.includes("每日积分"), "先报每日积分结算态");
+  assert.ok(out.includes("今天已结算过"), "每日积分已结算 → 正常态文案");
+  assert.ok(!out.includes("每号只有一次"), "登录奖励已领过是常态，不再刷屏");
   assert.ok(!urls.some((u) => u.includes("/grant")), "账单已显示领过就不该再打写端点");
+  assert.ok(!urls.some((u) => u.includes("setting_info")), "今天已结算就不该再打结算端点");
 });
 
 test("CLI: 非 raccoon id / 非目标子命令 → 返回 false（不误吞其它 provider）", async () => {

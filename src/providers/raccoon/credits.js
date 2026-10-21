@@ -1,17 +1,24 @@
-// raccoon 积分：余额五分项查询 + 登录奖励领取（幂等，判据只认账单）。
-// 这家是**积分制**，三种积分来源的性质（2026-10-10 账单流水实测 + 参考实现双向取证）：
+// raccoon 积分：余额五分项查询 + 每日积分结算 + 登录奖励领取（幂等，判据只认账单）。
+// 这家是**积分制**，四种积分来源的性质（2026-10-21 账单流水实测，此前 2026-10-10 的结论已被上游改版推翻）：
 //   · 新人注册礼包 3000 —— 注册时服务端自动发，**无端点可领**
-//   · 每日积分发放 300 —— 每天服务端自动发，**当天 23:59:59 清零**（账单里有 `daily_expire`），也**无端点可领**
-//   · 桌面端登录奖励 3000 —— **每号一次性**，走 `POST /desktop/v1/login/points/grant`，唯一需要领的
+//   · 每日积分 500 —— 服务端按天挂账，**当天第一次访问 `/office/v3/setting_info` 才入账**
+//                    （惰性结算，不是签到；入账即有效期到 T+6 的 23:59:59，即官方文案的「登录后延长至 7 天」）
+//   · 桌面端登录奖励 3000 —— **每号一次性**，走 `POST /desktop/v1/login/points/grant`，唯一「领取」式接口
+//   · 充值加油包 —— 用户自购
+// ⚠ 2026-10-10 的旧结论「每日 300、当天 23:59:59 清零、无端点可领」**已过时**：现为 500 分、有效期 7 天、
+//   有明确触发端点。别再照旧注释写代码。
 // ⚠ 上游对「已经领过」的重复请求**照样回 code:0**，但积分一分不到账 —— 所以 `code:0` 绝不能当成功凭据，
-//   必须用账单流水裁决（见 claimRaccoonLoginReward）。谎报成功会让 daemon/CLI 输出假到账，比报错更坏。
+//   必须用账单流水裁决（见 claimRaccoonLoginReward / claimRaccoonDailyPoints）。谎报成功会让 daemon/CLI 输出假到账，比报错更坏。
 import {
+  RACCOON_BILLS_PAGE_LIMIT,
+  RACCOON_DAILY_GRANT_EVENT_NAME,
   RACCOON_LOGIN_REWARD_EVENT_NAME,
   RACCOON_LOGIN_REWARD_POINTS,
   RACCOON_REQUEST_TIMEOUT_MS,
   raccoonBalanceUrl,
   raccoonBillsUrl,
   raccoonLoginGrantUrl,
+  raccoonOfficeSettingUrl,
 } from "./const.js";
 import { raccoonAuthHeaders } from "./headers.js";
 import { confirmRaccoonSession } from "./login.js";
@@ -180,6 +187,99 @@ export function raccoonClaimStatus(r) {
   if (r?.claimed) return "claimed";
   if (r?.alreadyClaimed) return "already";
   if (r?.phantom) return "phantom";
+  if (r?.unverified) return "unverified";
+  return "error";
+}
+
+// —— 每日积分（惰性结算，每日可重复触发；与上面的一次性登录奖励是两件事） ——
+
+/** 从账单里找「今天那笔每日积分发放」，返回 `{ points, at, expireAt }` 或 undefined。 */
+export function findDailyGrantInBills(data, now = Date.now()) {
+  const rows = billsRows(data) || [];
+  const today = localDateKey(now);
+  for (const item of rows) {
+    if (item.biz_type !== "daily_grant") continue;
+    if (item.event_name && item.event_name !== RACCOON_DAILY_GRANT_EVENT_NAME) continue;
+    // 归属日以 grant_at 为准（上游把它固定成当天 00:00），缺失时回落到 created_at
+    const at = billTimeMs({ created_at: item.grant_at ?? item.created_at });
+    if (at === undefined || localDateKey(at) !== today) continue;
+    const expireAt = billTimeMs({ created_at: item.expire_at });
+    return {
+      points: num(item.points) ?? 0,
+      at,
+      ...(expireAt === undefined ? {} : { expireAt }),
+    };
+  }
+  return undefined;
+}
+
+/** 本地日期键 YYYY-MM-DD —— 上游的日界按 +08:00 切，用本机时区判同一天即可。 */
+function localDateKey(ms) {
+  const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 拉当天账单（限量 200：够覆盖一天的重度对话消耗）。失败返回 undefined（判定降级，不抛）。 */
+async function readBillsWide(opts) {
+  try {
+    const envelope = await request(raccoonBillsUrl(RACCOON_BILLS_PAGE_LIMIT), opts);
+    return envelope?.code === 0 ? billsRows(envelope.data) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 结算当日每日积分（可每天重复调用，上游幂等）。
+ *
+ * 机制：`GET /api/web/office/v3/setting_info` 是服务端的惰性结算钩子 ——
+ * 当天第一次访问它，服务端才把当天的每日积分真正挂账，并把有效期延到 T+6。
+ * 不调用的话，`balance.daily_points` 一直是 0、账单里也压根没有 `daily_grant`（2026-10-21 实测）。
+ *
+ * 返回四种非抛错结果之一：
+ * - `{ claimed: true,  points, expireAt }`  本次真结算入账（账单里出现了今天那笔）
+ * - `{ claimed: false, alreadyToday: true, points, expireAt }`  今天已经结算过（正常态，不是失败）
+ * - `{ claimed: false, unverified: true }`  账单查不动，无法确认（不猜、不谎报）
+ * - 结算请求本身失败（业务码非 0 / 网络错误）→ 抛错（如实透出）
+ */
+export async function claimRaccoonDailyPoints({ credential, fetchImpl = fetch, env = process.env, timeoutMs, now = Date.now() } = {}) {
+  const opts = { credential, fetchImpl, env, timeoutMs };
+
+  // 先查账单：今天已经结算过就别再打结算端点（省一次请求，也让日志含义更准确）
+  const before = await readBillsWide(opts);
+  if (before !== undefined) {
+    const hit = findDailyGrantInBills(before, now);
+    if (hit) return { claimed: false, alreadyToday: true, points: hit.points, ...(hit.expireAt === undefined ? {} : { expireAt: hit.expireAt }) };
+  }
+
+  const envelope = await request(raccoonOfficeSettingUrl(), opts);
+  if (envelope?.code !== 0) {
+    const err = new Error(`raccoon: 每日积分结算失败：${raccoonEnvelopeText(envelope, "上游未返回原因")}`);
+    err.code = envelope?.code;
+    err.status = envelope?.status;
+    throw err;
+  }
+
+  // 到账凭据只认账单：上游对已结算的重复请求同样回 code:0，回执不足以证明「这次发了」
+  const after = await readBillsWide(opts);
+  if (after === undefined) return { claimed: false, unverified: true, points: 0 };
+  const landed = findDailyGrantInBills(after, now);
+  if (!landed) {
+    // 连打两次 code:0 都没在账单里看到今天这笔 → 上游改了结算规则或账单口径，如实说未确认，别谎报
+    return { claimed: false, unverified: true, points: 0 };
+  }
+  return { claimed: true, points: landed.points, ...(landed.expireAt === undefined ? {} : { expireAt: landed.expireAt }) };
+}
+
+/**
+ * claimRaccoonDailyPoints 的结果 → 统一状态字（daemon 与 CLI 共用）。
+ * claimed=本次真入账 · already=今天已结算过（正常态） · unverified=账单查不动/没看到这笔，不下结论 · error=真失败。
+ */
+export function raccoonDailyStatus(r) {
+  if (r?.claimed) return "claimed";
+  if (r?.alreadyToday) return "already";
   if (r?.unverified) return "unverified";
   return "error";
 }

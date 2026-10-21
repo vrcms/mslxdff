@@ -85,7 +85,7 @@ test("cline: listModels only returns free array with provider prefix", async () 
   assert.deepEqual(models.map((m) => m.id), ["cline/deepseek/deepseek-v4-flash", "cline/poolside/laguna-s-2.1:free"]);
 });
 
-test("cline: models 401 falls back to bundled free list incl glm-5.3-flash", async () => {
+test("cline: models 401 falls back to bundled free list incl minimax-m3.1-flash", async () => {
   let seenUrl = "";
   async function fetchImpl(url, opts) {
     if (String(url).includes("recommended-models")) {
@@ -98,7 +98,8 @@ test("cline: models 401 falls back to bundled free list incl glm-5.3-flash", asy
   const models = await p.listModels();
   assert.ok(seenUrl.endsWith("/api/v1/ai/cline/recommended-models"), `models url must be normalized, got ${seenUrl}`);
   const ids = models.map((m) => m.id);
-  assert.ok(ids.includes("cline/z-ai/glm-5.3-flash"), "fallback must include glm-5.3-flash");
+  assert.ok(ids.includes("cline/cline-free/minimax-m3.1-flash"), "fallback must include minimax-m3.1-flash");
+  assert.ok(!ids.includes("cline/cline-free/deepseek-v4.1-flash"), "fallback must not carry delisted deepseek-v4.1-flash");
 });
 
 test("cline: refresh URL not doubled when baseUrl already has /api/v1", async () => {
@@ -186,16 +187,17 @@ test("cline: refresh failure cools account and retry hits next", async () => {
   assert.ok(n >= 2, "must retry refresh after first failure");
 });
 
-test("cline: models fallback aligns with upstream free 5 (incl cline-free/*)", async () => {
+test("cline: models fallback aligns with upstream free 6 (2026-10-21 现网)", async () => {
   const p = createClineProvider({ id: "cline", baseUrl: "https://api.cline.bot", apiKeys: [], fetchImpl: async () => new Response("boom", { status: 500 }) });
   const models = await p.listModels();
   const ids = models.map((m) => m.id);
-  assert.equal(ids.length, 5, "fallback must carry 5 entries");
-  assert.ok(ids.includes("cline/cline-free/deepseek-v4.1-flash"), "must include cline-free/deepseek-v4.1-flash");
-  assert.ok(ids.includes("cline/cline-free/muse-spark-1.3-contributor"), "must include cline-free/muse-spark-1.3-contributor");
-  assert.ok(ids.includes("cline/z-ai/glm-5.3-flash"), "must include z-ai/glm-5.3-flash");
-  assert.ok(ids.includes("cline/cline-free/solar-pro4"), "must include cline-free/solar-pro4");
-  assert.ok(ids.includes("cline/poolside/laguna-s-2.1:free"), "must include poolside/laguna-s-2.1:free");
+  assert.equal(ids.length, 6, "fallback must carry 6 entries");
+  assert.ok(ids.includes("cline/cline-free/minimax-m3.1-flash"), "must include cline-free/minimax-m3.1-flash");
+  assert.ok(ids.includes("cline/cline-free/solar-mini4"), "must include cline-free/solar-mini4");
+  assert.ok(ids.includes("cline/cline-free/nemotron-3.5-super-vl"), "must include cline-free/nemotron-3.5-super-vl");
+  assert.ok(ids.includes("cline/reflection/beam-free"), "must include reflection/beam-free");
+  assert.ok(ids.includes("cline/nvidia/nemotron-3.5-lightning-free"), "must include nvidia/nemotron-3.5-lightning-free");
+  assert.ok(ids.includes("cline/poolside/laguna-s-2.1-free"), "must include poolside/laguna-s-2.1-free");
   await p.close();
 });
 

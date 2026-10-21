@@ -37,7 +37,7 @@ export function classifyRaccoonFailure(status, payload) {
 
 const ERROR_MAP = {
   auth: { status: 401, type: "auth_error", text: (f) => `raccoon: 登录态已失效${f.code ? `（code ${f.code}）` : ""}。请运行 mslxdff -provider raccoon login 重新登录` },
-  quota: { status: 429, type: "quota_exhausted", text: (f) => `raccoon: 积分不足${f.message ? `（${f.message}）` : ""}。请运行 mslxdff -provider raccoon checkin 领取每日积分，或更换账号` },
+  quota: { status: 429, type: "quota_exhausted", text: (f) => `raccoon: 积分不足${f.message ? `（${f.message}）` : ""}。请运行 mslxdff -provider raccoon checkin 结算每日积分，或更换账号` },
   rate_limit: { status: 429, type: "rate_limited", text: () => "raccoon: 上游限流（账号冷却中），请稍后重试" },
   server: { status: 502, type: "upstream_error", text: (f) => `raccoon: 上游服务异常${f.code ? `（code ${f.code}）` : ""}${f.message ? `：${f.message}` : ""}` },
   // unknown 只覆盖 4xx（5xx 已被上面分流成 server）：按请求缺陷如实回 400，不谎报成网关故障

@@ -33,6 +33,37 @@ function authDirWith(uid, token, { expiresAt = "4102444800000" } = {}) {
 
 const readState = () => JSON.parse(readFileSync(process.env.MSLXDFF_STATE_FILE, "utf8"));
 
+const TODAY = () => new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+
+/**
+ * 有状态的上游模拟：真实上游是「惰性结算」——账单里的记录在对应的写端点被调用之后才出现。
+ * 用无状态 fake 拼「第几次查账单」会让两个任务的调用次数互相干扰，测出来的东西跟线上不是一回事。
+ */
+function fakeUpstream({ settingFails = false } = {}) {
+  const state = { dailyGranted: false, rewardGranted: false };
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes("setting_info")) {
+      if (settingFails) return jsonRes({ code: 500, message: "boom" }, 500);
+      state.dailyGranted = true;
+      return jsonRes({ code: 0, message: "success", data: {} });
+    }
+    if (u.includes("login/points/grant")) {
+      const already = state.rewardGranted;
+      state.rewardGranted = true;
+      return jsonRes({ code: 0, message: "success", data: { granted: !already, popup: already ? null : { points: 3000 } } });
+    }
+    if (u.includes("/bills")) {
+      const items = [];
+      if (state.dailyGranted) items.push({ biz_type: "daily_grant", event_name: "每日积分发放", points: 500, grant_at: TODAY(), created_at: TODAY() });
+      if (state.rewardGranted) items.push({ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: TODAY() });
+      return jsonRes({ code: 0, data: { items } });
+    }
+    return jsonRes({ code: 0, data: {} });
+  };
+  return { state, fetchImpl };
+}
+
 test("开关：默认开；0/false/off/no 关", () => {
   assert.equal(isCheckinEnabled({}), true);
   assert.equal(isCheckinEnabled({ MSLXDFF_RACCOON_CHECKIN: "1" }), true);
@@ -67,54 +98,80 @@ test("关闭开关 → 不排程、返回 enabled:false", async () => {
   assert.equal(out.enabled, false);
 });
 
-test("签到：有账号 + 账单确认到账 → claimed:true，落盘 raccoonCheckin，事件齐全", async () => {
+test("每日任务：有账号 + 今日结算入账 → daily:claimed，落盘 raccoonCheckin，事件齐全", async () => {
   const dir = authDirWith("u-ok", "tok-ok");
   const events = [];
-  const landed = [{ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000 }];
-  let billsSeen = 0;
+  const { fetchImpl } = fakeUpstream();
   const { runOnce } = await setupRaccoonCheckin({
     env: TEST_ENV,
     dirs: [dir],
     bus: { emit: (e) => events.push(e) },
-    fetchImpl: async (url) => {
-      if (String(url).includes("/bills")) {
-        billsSeen += 1; // 第 1 次=领前（空），第 2 次=领后（出现那笔）→ 才允许判到账
-        return jsonRes({ code: 0, data: { list: billsSeen >= 2 ? landed : [] } });
-      }
-      return jsonRes({ code: 0, data: { points: 3000 } });
-    },
+    fetchImpl,
   });
   const out = await runOnce("test");
   assert.equal(out.ok, true);
-  assert.equal(out.claimed, 1);
+  assert.equal(out.dailyClaimed, 1, "每日积分该入账");
+  assert.equal(out.claimed, 1, "一次性登录奖励该领到");
   assert.equal(out.total, 1);
   const st = readState();
   assert.equal(st.raccoonCheckin.total, 1);
-  assert.equal(st.raccoonCheckin.ok, 1);
-  assert.equal(st.raccoonCheckin.claimed, 1);
-  assert.equal(st.raccoonCheckin.accounts[0].claimed, true);
-  assert.equal(st.raccoonCheckin.accounts[0].status, "claimed");
-  assert.equal(st.raccoonCheckin.accounts[0].points, 3000);
+  assert.equal(st.raccoonCheckin.dailyClaimed, 1);
+  assert.equal(st.raccoonCheckin.dailyDone, 1);
+  assert.equal(st.raccoonCheckin.accounts[0].daily, "claimed");
+  assert.equal(st.raccoonCheckin.accounts[0].dailyPoints, 500);
+  assert.equal(st.raccoonCheckin.accounts[0].reward, "claimed");
+  assert.equal(st.raccoonCheckin.accounts[0].rewardPoints, 3000);
   const types = events.map((e) => e.type);
   assert.ok(types.includes("raccoon-checkin-enabled"));
   assert.ok(types.includes("raccoon-checkin-account"));
   assert.ok(types.includes("raccoon-checkin-done"));
 });
 
-test("幂等：上游把「今日已领」当业务错误 → claimed:false 但 ok:true（不是失败）", async () => {
+test("每日任务：今天已结算过 → daily:already，仍算 ok（正常态不是失败）", async () => {
+  const dir = authDirWith("u-daily-already", "tok-da");
+  const { fetchImpl, state } = fakeUpstream();
+  state.dailyGranted = true; // 今天早些时候已结算过
+  const { runOnce } = await setupRaccoonCheckin({ env: TEST_ENV, dirs: [dir], fetchImpl });
+  const out = await runOnce("test");
+  assert.equal(out.results[0].daily, "already");
+  assert.equal(out.results[0].dailyPoints, 500);
+  assert.equal(out.ok, true, "今天已结算是常态，不该判失败");
+});
+
+test("每日积分结算失败不拖累一次性补领（两件事互不依赖）", async () => {
+  const dir = authDirWith("u-daily-fail", "tok-df");
+  const { fetchImpl } = fakeUpstream({ settingFails: true });
+  const { runOnce } = await setupRaccoonCheckin({ env: TEST_ENV, dirs: [dir], fetchImpl });
+  const out = await runOnce("test");
+  assert.equal(out.results[0].daily, "error", "结算炸了如实报 error");
+  assert.equal(out.results[0].reward, "claimed", "补领照样跑完，不被邻居拖累");
+  assert.equal(out.claimed, 1);
+});
+
+test("幂等：上游把「今日已领」当业务错误 → reward:already，仍算 ok（不是失败）", async () => {
   const dir = authDirWith("u-already", "tok-already");
+  const today = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
   const { runOnce } = await setupRaccoonCheckin({
     env: TEST_ENV,
     dirs: [dir],
     fetchImpl: async (url) => {
-      if (String(url).includes("login/points/grant")) return jsonRes({ code: 400009, message: "今日已领取" });
-      return jsonRes({ code: 0, data: { list: [{ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: new Date().toISOString() }] } });
+      const u = String(url);
+      if (u.includes("login/points/grant")) return jsonRes({ code: 400009, message: "今日已领取" });
+      return jsonRes({
+        code: 0,
+        data: {
+          items: [
+            { biz_type: "daily_grant", event_name: "每日积分发放", points: 500, grant_at: today },
+            { biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000, created_at: today },
+          ],
+        },
+      });
     },
   });
   const out = await runOnce("test");
   assert.equal(out.ok, true, "「今日已领」是常态不是失败");
-  assert.equal(out.results[0].claimed, false);
-  assert.equal(out.results[0].points, 3000);
+  assert.equal(out.results[0].reward, "already");
+  assert.equal(out.results[0].rewardPoints, 3000);
 });
 
 test("无账号 → no-accounts，不报错", async () => {
@@ -127,31 +184,30 @@ test("无账号 → no-accounts，不报错", async () => {
   assert.ok(events.some((e) => e.type === "raccoon-checkin-no-accounts"));
 });
 
-test("上游硬失败 → 该号 status:error 并带原因，不抛（其余号照跑）", async () => {
+test("上游硬失败 → 该号 reward:error 并带原因，不抛（其余号照跑）", async () => {
   const bad = authDirWith("u-bad", "tok-bad");
   const good = authDirWith("u-good2", "tok-good2");
-  const landed = [{ biz_type: "reward_grant", event_name: "桌面端登录奖励", points: 3000 }];
-  let goodBills = 0;
+  const { state, fetchImpl: base } = fakeUpstream();
   const { runOnce } = await setupRaccoonCheckin({
     env: TEST_ENV,
     dirs: [bad, good],
     fetchImpl: async (url, init) => {
       const tok = String(init?.headers?.Authorization || "").replace(/^Bearer /, "");
-      if (String(url).includes("/bills")) {
-        if (tok === "tok-bad") return jsonRes({ code: 0, data: { list: [] } }); // 账查得动、确实没领过
-        goodBills += 1;
-        return jsonRes({ code: 0, data: { list: goodBills >= 2 ? landed : [] } });
+      // 坏号：账单查得动、grant 硬失败。每日结算端点也一起打成 500，免得把好号的状态带过来。
+      if (tok === "tok-bad") {
+        if (String(url).includes("/bills")) return jsonRes({ code: 0, data: { items: [] } });
+        return jsonRes({ code: 500, message: "上游炸了" }, 500);
       }
-      if (tok === "tok-bad") return jsonRes({ code: 500, message: "上游炸了" }, 500);
-      return jsonRes({ code: 0, data: { points: 3000 } });
+      return base(url, init);
     },
   });
   const out = await runOnce("test");
   assert.equal(out.total, 2);
   assert.equal(out.claimed, 1, "好的那个号该照常领到，不被邻居失败拖累");
+  assert.equal(state.rewardGranted, true);
   const failed = out.results.find((r) => r.uid === "u-bad");
   assert.equal(failed.ok, false);
-  assert.equal(failed.status, "error", "账单查得动却没有这笔 = 真失败，不能含糊成 unverified");
+  assert.equal(failed.reward, "error", "账单查得动却没有这笔 = 真失败，不能含糊成 unverified");
   assert.ok(String(failed.msg).length > 0);
 });
 

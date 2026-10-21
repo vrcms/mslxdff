@@ -9,13 +9,16 @@ import { joinUrl } from "../base.js";
 export const FREE_CATALOG_PATH = "/api/v1/ai/cline/recommended-models";
 export const DEFAULT_CLINE_BASE = "https://api.cline.bot";
 
-// 上游不可达时的内置兜底（2026-09-20 实测 5 个；只有 id 与短名，无凭据）
+// 上游不可达时的内置兜底（2026-10-21 实测 6 个；只有 id 与短名，无凭据）。
+// 旧兜底 5 个里 deepseek-v4.1-flash/solar-pro4/muse-spark-1.3-contributor/glm-5.3-flash 已下架或转付费，
+// 现网实测 404 model not found / 402 insufficient_credits，不得再兜。
 export const FALLBACK_FREE = Object.freeze([
-  { id: "cline-free/deepseek-v4.1-flash", name: "deepseek-v4.1-flash" },
-  { id: "cline-free/muse-spark-1.3-contributor", name: "muse-spark-1.3-contributor" },
-  { id: "z-ai/glm-5.3-flash", name: "glm-5.3-flash" },
-  { id: "cline-free/solar-pro4", name: "solar-pro4" },
-  { id: "poolside/laguna-s-2.1:free", name: "laguna-s-2.1:free" },
+  { id: "cline-free/minimax-m3.1-flash", name: "minimax-m3.1-flash" },
+  { id: "cline-free/solar-mini4", name: "solar-mini4" },
+  { id: "cline-free/nemotron-3.5-super-vl", name: "nemotron-3.5-super-vl" },
+  { id: "reflection/beam-free", name: "beam-free" },
+  { id: "nvidia/nemotron-3.5-lightning-free", name: "nemotron-3.5-lightning-free" },
+  { id: "poolside/laguna-s-2.1-free", name: "laguna-s-2.1-free" },
 ]);
 export const FALLBACK_FREE_IDS = FALLBACK_FREE.map((m) => m.id);
 

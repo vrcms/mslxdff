@@ -37,6 +37,28 @@ export const raccoonBillsUrl = (limit = 50) =>
   `${RACCOON_ORIGIN}${RACCOON_POINTS_PREFIX}/bills?paging.limit=${Number(limit) || 50}&paging.offset=0`;
 export const raccoonLoginGrantUrl = () => `${RACCOON_ORIGIN}${RACCOON_DESKTOP_PREFIX}/login/points/grant`;
 
+/**
+ * 每日积分结算触发器：`GET /api/web/office/v3/setting_info`。
+ *
+ * 2026-10-21 账单实测（这家的每日积分是**惰性结算**，不是签到）：
+ *   · 每日积分由服务端按天挂账，**当天第一次访问这个端点时才真正入账**
+ *     （此前账单里连 `daily_grant` 都没有，`balance.daily_points` 恒 0）；
+ *   · 入账后 `expire_at` 直接是 T+6 的 23:59:59 —— 对应官方文案
+ *     「每日积分每天 00:00 发放，默认当日 24:00 清零，**当天登录后有效期延长至 7 天**」；
+ *   · 完全幂等：连打 4 次只有第一次产生账单，其余静默返回（可放心每天重试）。
+ * 官方前端把这个端点挂在登录后拉设置信息的路径上，等价于「登录」这个动作本身。
+ * 端点选型实测：`/auth/v1/setting_info` 404、`/setting/v1/setting_info` 404，只有 office/v3 这条通。
+ */
+export const raccoonOfficeSettingUrl = () => `${RACCOON_ORIGIN}/api/web/office/v3/setting_info`;
+/**
+ * 每日积分账单的 `event_name` 字面量 —— 判「今天结算过没有」只认它（`biz_type` 是 `daily_grant`）。
+ * ⚠ 定位必须先按 biz_type 过滤再比 event_name：重度使用号的账单会被「对话消耗」刷满，
+ *   窗口里根本翻不到那条陈旧的 grant（这是 claimRaccoonLoginReward 注释里踩过的同一个坑）。
+ */
+export const RACCOON_DAILY_GRANT_EVENT_NAME = "每日积分发放";
+/** 账单分页上限实测值：一次 200 条，足够覆盖一天的重度用量（对话消耗）而仍能捞到当天的 grant。 */
+export const RACCOON_BILLS_PAGE_LIMIT = 200;
+
 /** 服务端签发二维码（POST，body 可带 `{ product_codes: [] }`）。 */
 export const raccoonQrCreateUrl = () => `${RACCOON_ORIGIN}${RACCOON_IAM_PREFIX}/auth/mp/qrcode`;
 /** 轮询扫码状态（POST，body `{ qrcode_code }`）。 */

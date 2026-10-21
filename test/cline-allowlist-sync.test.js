@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planMerge, createAllowlistSync, defaultNormalize } from "../src/providers/cline/allowlist-sync.js";
+import { planMerge, planSync, createAllowlistSync, defaultNormalize, isFreeChannelId } from "../src/providers/cline/allowlist-sync.js";
 import { createClineProvider } from "../src/providers/cline/index.js";
 
 function tmpFile(name = "state.json") {
@@ -11,7 +11,69 @@ function tmpFile(name = "state.json") {
   return join(dir, name);
 }
 
-// ---------- 纯函数：planMerge（只增不减） ----------
+// ---------- 纯函数：planSync（双向收敛，范围仅 free 通道） ----------
+
+test("planSync: free 目录下架即移除，非 free 通道原样保留", () => {
+  const cur = [
+    "cline-free/deepseek-v4.1-flash", // 已下架 → 移除
+    "cline-pass/kimi-k3",             // 付费通道，不在 free 目录是正常 → 保留
+    "meta/muse-spark-1.2-contributor",// 手配/别的通道 → 保留
+    "cline-free/solar-mini4",         // 仍在上游 → 保留
+  ];
+  const { next, added, removed } = planSync(cur, ["cline-free/solar-mini4", "cline/reflection/beam-free"], {
+    providerId: "cline",
+  });
+  assert.deepEqual(removed, ["cline-free/deepseek-v4.1-flash"]);
+  assert.deepEqual(added, ["reflection/beam-free"]);
+  assert.deepEqual(next, [
+    "cline-pass/kimi-k3",
+    "meta/muse-spark-1.2-contributor",
+    "cline-free/solar-mini4",
+    "reflection/beam-free",
+  ]);
+});
+
+test("planSync: 非 free 通道绝不被移除（即使不在上游目录）", () => {
+  const cur = ["cline-pass/glm-5.3-flash", "stealth/space-bunny-alpha", "deepseek/deepseek-v4-flash", "z-ai/glm-5.3-flash"];
+  const { next, removed } = planSync(cur, ["cline-free/solar-mini4"], { providerId: "cline" });
+  assert.deepEqual(removed, []);
+  assert.deepEqual(next, [...cur, "cline-free/solar-mini4"], "既有条目顺序不动，新 id 追加尾部");
+});
+
+test("planSync: 下架的 :free / -free 变体也识别为 free 通道", () => {
+  const cur = ["poolside/laguna-s-2.1:free", "nvidia/nemotron-3.5-lightning-free", "meta/muse-spark-1.3-contributor"];
+  const { next, removed } = planSync(cur, ["poolside/laguna-s-2.1-free"], { providerId: "cline" });
+  assert.deepEqual(removed, ["poolside/laguna-s-2.1:free", "nvidia/nemotron-3.5-lightning-free"]);
+  assert.deepEqual(next, ["meta/muse-spark-1.3-contributor", "poolside/laguna-s-2.1-free"]);
+});
+
+test("planSync: 带 provider 前缀的既有条目归一后参与比对", () => {
+  const { next, removed, added } = planSync(["cline/cline-free/gone"], ["cline/cline-free/kept"], { providerId: "cline" });
+  assert.deepEqual(removed, ["cline-free/gone"]);
+  assert.deepEqual(added, ["cline-free/kept"]);
+  assert.deepEqual(next, ["cline-free/kept"]);
+});
+
+test("planSync: 重复项去重且幂等", () => {
+  const r1 = planSync(["cline-free/a", "cline-free/a"], ["cline-free/a", "cline-free/b"], { providerId: "cline" });
+  assert.deepEqual(r1.next, ["cline-free/a", "cline-free/b"]);
+  assert.deepEqual(r1.added, ["cline-free/b"]);
+  const r2 = planSync(r1.next, ["cline-free/a", "cline-free/b"], { providerId: "cline" });
+  assert.deepEqual(r2.added, []);
+  assert.deepEqual(r2.removed, []);
+  assert.deepEqual(r2.next, r1.next);
+});
+
+test("isFreeChannelId: 只认 free 命名空间", () => {
+  for (const id of ["cline-free/x", "poolside/laguna-s-2.1:free", "nvidia/nemotron-3.5-lightning-free"]) {
+    assert.equal(isFreeChannelId(id), true, `${id} 应判 free`);
+  }
+  for (const id of ["cline-pass/kimi-k3", "stealth/space-bunny-alpha", "deepseek/deepseek-v4-flash", ""]) {
+    assert.equal(isFreeChannelId(id), false, `${id} 不应判 free`);
+  }
+});
+
+// ---------- 纯函数：planMerge（历史并集语义，保留兼容） ----------
 
 test("planMerge: 上游新 id 追加，既有条目一个不删", () => {
   const cur = ["cline-free/deepseek-v4.1-flash", "cline-pass/kimi-k3"];
@@ -56,25 +118,55 @@ test("planMerge: 空/非法输入容忍", () => {
 
 // ---------- 同步器：写盘节流与异常隔离 ----------
 
-test("allowlistSync: 无新增时零写盘", () => {
+test("allowlistSync: 仅下架（无新增）也必须写盘", () => {
+  let written = null;
+  const s = createAllowlistSync({
+    providerId: "cline",
+    loadCurrent: () => ["cline-free/gone", "cline-pass/kimi-k3"],
+    persist: (_pid, list) => { written = list; },
+    enabled: true,
+  });
+  const r = s.syncIds([{ id: "cline-free/kept" }]);
+  assert.deepEqual(r.removed, ["cline-free/gone"]);
+  assert.deepEqual(r.added, ["cline-free/kept"]);
+  assert.deepEqual(written, ["cline-pass/kimi-k3", "cline-free/kept"], "下架项被移除且付费通道保留");
+});
+
+test("allowlistSync: 无新增且无下架时零写盘", () => {
   let writes = 0;
   const s = createAllowlistSync({
     providerId: "cline",
-    loadCurrent: () => ["cline-free/x"],
+    loadCurrent: () => ["cline-free/x", "cline-pass/kimi-k3"],
     persist: () => { writes++; },
     enabled: true,
   });
   const r = s.syncIds([{ id: "cline/cline-free/x" }]);
   assert.equal(writes, 0);
   assert.deepEqual(r.added, []);
-  assert.equal(r.total, 1);
+  assert.deepEqual(r.removed, []);
+  assert.equal(r.total, 2);
 });
 
-test("allowlistSync: MSLXDFF_CLINE_AUTOSYNC=0 完全跳过", () => {
+test("allowlistSync: 日志同时点名新增与移除", () => {
+  const logs = [];
+  const s = createAllowlistSync({
+    providerId: "cline",
+    loadCurrent: () => ["cline-free/gone"],
+    persist: () => {},
+    onLog: (m) => logs.push(m),
+    enabled: true,
+  });
+  s.syncIds([{ id: "cline-free/new" }]);
+  const line = logs.find((l) => l.includes("allowlist auto-sync"));
+  assert.ok(line.includes("cline-free/new"), "新增要点名");
+  assert.ok(line.includes("cline-free/gone"), "移除要点名");
+});
+
+test("allowlistSync: MSLXDFF_CLINE_AUTOSYNC=0 完全跳过（含下架移除）", () => {
   let writes = 0;
-  const s = createAllowlistSync({ providerId: "cline", loadCurrent: () => [], persist: () => { writes++; }, enabled: false });
+  const s = createAllowlistSync({ providerId: "cline", loadCurrent: () => ["cline-free/gone"], persist: () => { writes++; }, enabled: false });
   assert.equal(s.syncIds([{ id: "cline/new-model" }]).skipped, "disabled");
-  assert.equal(writes, 0);
+  assert.equal(writes, 0, "关掉后下架项也不能被移除");
 });
 
 test("allowlistSync: persist 抛错只记日志，绝不冒泡", () => {
@@ -140,6 +232,39 @@ test("集成：上游新上架免费模型 → 自动进白名单，不再 block
   assert.equal(cfg.allowAnyModels, false, "allowAnyModels 必须保留（曾因 save 函数重建 cfg 被静默抹掉）");
   assert.deepEqual(cfg.keys, ["sk_legacy_key"], "keys 不受同步影响");
   await p.close?.();
+});
+
+test("集成：上游下架免费模型 → 自动移出白名单，cline-pass 与手配条目不受影响", async () => {
+  const file = tmpFile();
+  writeFileSync(file, JSON.stringify({
+    providerConfigs: {
+      cline: {
+        baseUrl: "https://api.cline.bot",
+        keys: ["sk_legacy_key"],
+        allowAnyModels: false,
+        allowedModels: [
+          "cline-free/delisted-a",       // 下架 → 移除
+          "cline-free/kept-b",           // 仍在上游 → 保留
+          "cline-pass/kimi-k3",          // 付费通道 → 保留
+          "stealth/space-bunny-alpha",   // 手配 → 保留
+        ],
+      },
+    },
+  }));
+  const { fetchImpl } = mockCatalog({ free: [{ id: "cline-free/kept-b" }, { id: "cline-free/new-c" }] });
+
+  const p = createClineProvider({ id: "cline", apiKeys: ["sk_legacy_key"], fetchImpl, file, snapshotPath: tmpFile("cline-free.json") });
+  await p.listModels();
+  await p.close?.();
+
+  const cfg = readClineCfg(file);
+  assert.ok(!cfg.allowedModels.includes("cline-free/delisted-a"), "下架项必须被移除");
+  assert.ok(cfg.allowedModels.includes("cline-free/kept-b"), "仍在目录的保留");
+  assert.ok(cfg.allowedModels.includes("cline-free/new-c"), "新增项并入");
+  assert.ok(cfg.allowedModels.includes("cline-pass/kimi-k3"), "cline-pass 不得被动");
+  assert.ok(cfg.allowedModels.includes("stealth/space-bunny-alpha"), "手配条目不得被动");
+  assert.equal(cfg.allowAnyModels, false);
+  assert.deepEqual(cfg.keys, ["sk_legacy_key"]);
 });
 
 test("集成：allowAnyModels=true 不被 auto-sync 抹回 false", async () => {

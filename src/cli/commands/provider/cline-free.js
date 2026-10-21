@@ -5,6 +5,7 @@
  */
 import { normalizeProviderId } from "../../../providers/model-id.js";
 import { fetchFreeCatalog, FALLBACK_FREE, FREE_CATALOG_PATH } from "../../../providers/cline/free-catalog.js";
+import { planSync } from "../../../providers/cline/allowlist-sync.js";
 
 /** 上游不可达时退回内置兜底目录（标注 source=fallback，供人判断是否该落盘） */
 async function loadCatalog() {
@@ -18,14 +19,18 @@ async function loadCatalog() {
   };
 }
 
+/**
+ * 默认与 daemon auto-sync 同口径：free 通道双向收敛（新增并入、下架移除），
+ * 非 free 通道（cline-pass/*、手配 id）原样保留。
+ * `--keep-extra` 退回历史语义：只增不删，目录外的既有条目全留。
+ */
 function computeNext(current, freeIds, keepExtra) {
-  const next = keepExtra ? [...new Set([...current, ...freeIds])] : [...freeIds];
-  return {
-    next,
-    added: next.filter((m) => !current.includes(m)),
-    removed: current.filter((m) => !next.includes(m)),
-    kept: next.filter((m) => current.includes(m)),
-  };
+  if (keepExtra) {
+    const next = [...new Set([...current, ...freeIds])];
+    return { next, added: next.filter((m) => !current.includes(m)), removed: [], kept: current.length };
+  }
+  const { next, added, removed } = planSync(current, freeIds, { providerId: "cline" });
+  return { next, added, removed, kept: next.filter((m) => current.includes(m)).length };
 }
 
 function renderList(cat, current, next, plan) {
@@ -33,8 +38,13 @@ function renderList(cat, current, next, plan) {
   const w = Math.max(20, ...cat.ids.map((s) => s.length)) + 2;
   for (const m of cat.models) console.log(`   + ${String(m.id).padEnd(w)}${m.name && m.name !== m.id ? m.name : ""}`);
   console.log(`当前 allowlist：${current.length} 个`);
-  for (const id of current) console.log(`   ${next.includes(id) ? "✓" : "-"} ${id}${next.includes(id) ? "" : "          （不在 free 目录）"}`);
-  console.log(`结果：allowlist ${current.length} → ${next.length}（+${plan.added.length} 新增 / -${plan.removed.length} 移除 / ${plan.kept.length} 保留）`);
+  const removed = new Set(plan.removed);
+  for (const id of current) {
+    if (removed.has(id)) console.log(`   ✗ ${id}          （free 通道已下架，将移除）`);
+    else if (next.includes(id)) console.log(`   ✓ ${id}`);
+    else console.log(`   - ${id}          （非 free 通道，保留不动）`);
+  }
+  console.log(`结果：allowlist ${current.length} → ${next.length}（+${plan.added.length} 新增 / -${plan.removed.length} 移除 / ${plan.kept} 保留）`);
 }
 
 export async function handleClineFree(id, sub, rest = [], args = []) {

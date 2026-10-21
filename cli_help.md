@@ -67,8 +67,8 @@
 | `mslxdff -provider <id> bench [--json] [--prompt <text>] [--max-tokens N] [--timeout N]` | `--provider` | 评估该供应商已勾选模型的速度（TTFB/总耗时/TPS/字/秒，仅测 allowlist ∩ 全局 picks 交集；空则探活 `GET /v1/models→/models` 并提示先 `allowlist set`，`--json` 供脚本） | 否 | 否 |
 | `mslxdff -provider <id> bench --via [--include-opencode] [--json] [--samples N] [--timeout N] [--apply]` / `mslxdff -provider bench --via` | `--provider` | **家宽选路**：对比 `direct` vs 经每个在线 `peer` 到同一上游的 `TTFB`（串行省额度，`max_tokens=5 prompt=hi` 轻探针，`--json` 时 `stdout` 纯 JSON `meta/results/advice`、进度走 `stderr`；默认跳过 `opencode` 供应商，需 `--include-opencode` 且 TTY 二次确认 `y/N`，非 TTY 自动跳过；结果不写 `state.json`；空组/全离线空状态引导 ` -group list`；`--apply` 落盘 `via-routes.json` 供网关择路） | 否 | 否 |
 | `mslxdff -provider cline login` | `--provider` | Cline WorkOS 设备授权流：浏览器授权 → 自动拿 `refreshToken` 落盘。此后 `cline` 走 `refresh→workos:token` + Cline 指纹头，`deepseek-v4-flash` 不再 `403`（免费通道强制 stream 聚合） | 是 | 重启生效 |
-| `mslxdff -provider cline free [--json]` | `--provider` | **只读**：直查上游免费模型目录（`GET /api/v1/ai/cline/recommended-models` 的 `free` 数组，当前 5 个）并列出与当前 `allowlist` 的差异，不写任何 state；`--json` 输出 JSON 供脚本 | 否 | 否 |
-| `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `z-ai/glm-5.3-flash`）：**默认 dry-run 预览**，加 `--yes` 才落盘；`--keep-extra` 只增不删。**注意**：本命令是**一次性全量替换**（不带 `--keep-extra` 会清空现有 allowlist，连 auto-sync 并入的 clinePass 一起挤掉）；daemon 运行期的 auto-sync 则是只增不减（见下节）；**上游不可达（走内置兜底）时拒绝写盘**，防把 `FALLBACK_FREE` 落成白名单——与 auto-sync 同一口径：兜底不是上游真相，确需手填改走 `-provider cline allowlist set <id...>` | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
+| `mslxdff -provider cline free [--json]` | `--provider` | **只读**：直查上游免费模型目录（`GET /api/v1/ai/cline/recommended-models` 的 `free` 数组，当前 6 个）并与当前 `allowlist` 三态对比（`✓` 保留 / `✗` free 通道已下架将移除 / `-` 非 free 通道保留不动），不写任何 state；`--json` 输出 JSON 供脚本 | 否 | 否 |
+| `mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]` | `--provider` | 把上游免费目录同步为 `cline` 的 `allowlist`（写入裸 id 如 `cline-free/solar-mini4`）：**默认 dry-run 预览**，加 `--yes` 才落盘；默认**双向收敛**——free 通道新增并入、下架移除，`cline-pass/*` 与手配条目保留不动；`--keep-extra` 退回历史「只增不删」。daemon 运行期 auto-sync 同口径（ADR-0067）；**上游不可达（走内置兜底）时拒绝写盘**，防把 `FALLBACK_FREE` 落成白名单——兜底不是上游真相，确需手填改走 `-provider cline allowlist set <id...>` | 是（`--yes` 时写 `providerConfigs.cline.allowedModels`） | 热更新立即生效 |
 | `mslxdff -provider cline quota [--json] [--account <hash>] [--model <substr>]` | `--provider` | **只读**：聚合 `cline-usage.jsonl` 的账号×模型双口径统计并分组打印：free 走本周期 tokens（+已完成周期/上周期），pass 走近 24h；`--json` 供脚本，`--account/--model` 过滤；空账本给引导 | 否 | 否 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
 | `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
@@ -81,7 +81,7 @@
 | `mslxdff -provider zcode quota [--json]` | `--provider` | 查 ZCode 套餐/余量（`GET /api/v1/zcode-plan/billing/balance?app_version=` 按 plans/balances 分组表格：套餐名/状态/有效期 + 各模型 entitlement 余量）；空套餐给领取指引、401 给重登指引；`--json` 供脚本 | 否（只读） | 立即生效 |
 | `mslxdff -provider raccoon login` | `--provider` | Raccoon（商汤小浣熊）**扫码登录**：请服务端签发二维码（`POST /api/iam/v1/auth/mp/qrcode` 拿 `qrcode_code`+`scan_path`+`expires_in`）→ 终端渲染二维码 + 打印 `https://xiaohuanxiong.com/login/mp?code=…` 深链接（**必须用微信「扫一扫」扫**；浏览器直接打开必 404 —— 站点 SPA 路由表无该路径）→ 轮询至 `success`，落盘 `auths/raccoon-<uid>.json`（0600）+ state keys，并把兜底目录（6 模型，全部读图）只增不减并入 allowlist（开箱可用）；此后 `raccoon/<modelId>` 前缀路由（**OpenAI 兼容网关**，流式逐字节透传、非流式本地聚合；客户端同形头 + `extra_body.thinking`，**不发 `reasoning_effort`**；按响应体形状判流式）；错误分级 登录态（200001/200003/401）→401 重登指引、积分不足→长冷 1h + `quota_exhausted`、限流/服务端→短冷 30s；临期用 `refresh_token` 自动续期；**全程免验证码**；**恒 local-only** 不借出（ADR-0050） | 是（写 `providerConfigs.raccoon`） | 重启生效 |
 | `mslxdff -provider raccoon login --password [--phone <号>] [--nation <码>]` | `--provider` | Raccoon **手机号+密码登录**（多账号免扫码，适合连着批量补号 / 脚本化）。走官方同款 `POST /api/web/auth/v1/login_with_password`，body `{nation_code, phone, password}` 里 **phone/password 必须 AES-128-CFB 加密**（算法与 key 硬编码在前端，见 `crypto.js`）—— 发明文会被判成「手机号或密码不正确」，极易误诊为密码错。TTY 下手机号可见输入、**密码关回显（逐键回显 `*`）**；非 TTY 必须用 `--password=<密码>`（不从管道偷读）。默认 `--nation 86`。失败码表给人话（`200004`→「手机号或密码不正确」），回执回显手机号但**打码**、**绝不回显密码**。落盘/确认/领奖与扫码登录**完全同路**（同一 `auths/raccoon-<uid>.json` + `iam/confirm` + 一次性登录奖励） | 是（写 `providerConfigs.raccoon`） | 重启生效 |
-| `mslxdff -provider raccoon quota [--json]` / `checkin [--json]` | `--provider` | 逐号查积分余额（可用/奖励/每日/月度/充值五分项）与领「桌面端登录奖励」。**这家没有每日签到**：每日 300 与注册礼包 3000 由服务端自动发（无端点；每日 300 当天 23:59:59 清零），唯一要领的登录奖励 3000 是**每号一次性**，且 `login` 成功时已自动领掉（桌面端**无领取按钮**，就是登录自动发），`checkin` 只是补领兜底；判据先认上游 `data.granted`（`false`＝本号已发过，**不是未到账**；官方前端同款），无该字段才回查账单（上游对重复领取照样回 code:0 却不到账），输出区分 `claimed/already/phantom/unverified/error`；未登录给 login 指引、登录态失效给重登指引；`--json` 输出 `{accounts:[…]}`；daemon 每日 09:00 兜底扫描未领过的号（`MSLXDFF_RACCOON_CHECKIN=0` 关，`_CHECKIN_HOUR` 改点，启动补扫，结果落 `state.raccoonCheckin`） | 否（只读）/ 是（checkin 领积分） | 立即生效 |
+| `mslxdff -provider raccoon quota [--json]` / `checkin [--json]` | `--provider` | 逐号查积分余额（可用/奖励/每日/月度/充值五分项）与每日积分结算 + 一次性登录奖励补领。**每日积分是惰性结算**（2026-10-21 账单实测）：服务端每天 00:00 挂账（当前档位 500 分），**当天第一次访问 `GET /api/web/office/v3/setting_info` 才真正入账**（入账即有效期到 T+6 的 23:59:59，即官方文案「当天登录后延长至 7 天」），不访问则当天 `daily_points` 恒 0；`checkin` 就先打这个端点触发结算（幂等，可每天重复），再补一次性「桌面端登录奖励 3000」（每号一次性，`login` 时已自动领）。判据一律走账单：结算认「今天那笔 `daily_grant`」、登录奖励先认上游 `data.granted`（`false`＝本号已发过，**不是未到账**）再回查账单（上游对重复领取照样回 code:0 却不到账），每日结算输出 `claimed/already/unverified/error`、登录奖励 `claimed/already/phantom/unverified/error`；未登录给 login 指引、登录态失效给重登指引；`--json` 输出 `{accounts:[…]}`；daemon 每日 09:00 跑同一套（`MSLXDFF_RACCOON_CHECKIN=0` 关，`_CHECKIN_HOUR` 改点，启动补扫，结果落 `state.raccoonCheckin`） | 否（只读）/ 是（checkin 触发每日结算 + 补领） | 立即生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -706,27 +706,27 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -provider cline free [--json]                              # 只读：列上游 free 目录 + 与当前 allowlist 的差异
   mslxdff -provider cline free sync [--yes] [--json] [--keep-extra]  # 写：把 free 目录同步为 allowlist（默认 dry-run）
   ```
-- **数据源**：`GET https://api.cline.bot/api/v1/ai/cline/recommended-models`（公开免鉴权）返回 `free` / `recommended` / `clinePass` / `clineCloud` 四类，**只取 `free`**（当前 5 个：`z-ai/glm-5.3-flash`、`cline-free/deepseek-v4.1-flash`、`cline-free/muse-spark-1.3-contributor`、`cline-free/solar-pro4`、`poolside/laguna-s-2.1:free`）。与聚合目录/daemon 启动自检同源（`logDir/cline-free.json` 快照）。
-- **`free`（只读）**：打印 free 目录 + 与当前 `allowlist` 的差异（目录有而名单没有 / 名单有而目录没有），**不写任何 state**；`--json` 输出 JSON 供脚本。
-- **`free sync`（写）**：把 `allowlist` 置为上游 free 集合，**默认 dry-run 只预览**（末行提示 `预览模式，未写入。执行：mslxdff -provider cline free sync --yes`），加 `--yes` 才落盘 `providerConfigs.cline.allowedModels`（只重建名单，保留 baseUrl/keys/auths/端点）；`--keep-extra` 只增不删（保留名单里不在目录的条目）。写入的是**裸 id**（如 `z-ai/glm-5.3-flash`），对外 id 仍是 `cline/z-ai/glm-5.3-flash`。
-- **自动同步 (2026-09-24)**：daemon 运行期每次成功读取 `recommended-models` 后，把 free+clinePass 自动并入 `providerConfigs.cline.allowedModels`（只增不减、幂等零写盘）。新上架免费模型 (gemini-3.8-flash/space-bunny-alpha/mimo-v2.6-flash) 不再被误拦；通道切换 (`cline-pass/mimo`→`cline-free/mimo`) 两通道并存。关闭用 `MSLXDFF_CLINE_AUTOSYNC=0`（退回纯静态白名单）。观测：终端输出 `[cline] allowlist auto-sync: +N → M total (...)`。
+- **数据源**：`GET https://api.cline.bot/api/v1/ai/cline/recommended-models`（公开免鉴权）返回 `free` / `recommended` / `clinePass` / `clineCloud` 四类，**只取 `free`**（当前 6 个：`cline-free/minimax-m3.1-flash`、`cline-free/solar-mini4`、`cline-free/nemotron-3.5-super-vl`、`reflection/beam-free`、`nvidia/nemotron-3.5-lightning-free`、`poolside/laguna-s-2.1-free`）。与聚合目录/daemon 启动自检同源（`logDir/cline-free.json` 快照）。
+- **`free`（只读）**：打印 free 目录 + 与当前 `allowlist` 的差异，**不写任何 state**；`--json` 输出 JSON 供脚本。每个既有条目标注三态：`✓` 仍在目录、`✗` free 通道已下架（将移除）、`-` 非 free 通道（保留不动）。
+- **`free sync`（写）**：默认**双向收敛**——free 通道新增并入、下架移除；`cline-pass/*` 与手配条目保留不动（因为目录接口本来就只返回 free）。**默认 dry-run 只预览**（末行提示 `预览模式，未写入。执行：mslxdff -provider cline free sync --yes`），加 `--yes` 才落盘 `providerConfigs.cline.allowedModels`（只重建名单，保留 baseUrl/keys/auths/端点）；`--keep-extra` 退回历史语义：只增不删。写入的是**裸 id**（如 `cline-free/solar-mini4`），对外 id 仍是 `cline/cline-free/solar-mini4`。
+- **自动同步 (2026-10-21 双向)**：daemon 运行期每次成功读取 `recommended-models` 后，按 free 目录双向收敛 `providerConfigs.cline.allowedModels`——新增并入、**free 通道下架条目自动移除**，`cline-pass/*` 与手配 id 不动（ADR-0067，取代 ADR-0033 的只增不减）。无变化零写盘；关闭用 `MSLXDFF_CLINE_AUTOSYNC=0`（退回纯静态白名单）。观测：终端输出 `[cline] allowlist auto-sync: +N/-M → K total (added: ...) (removed: ...)`。
 - **额度说明**：该接口只回**目录**、不回余额；免费额度用尽只能由上游 `429`（`Try again in Xh Ym Zs`）反推并进冷却。
 - **输出（示例）**：
   ```
-  cline free 目录（GET /api/v1/ai/cline/recommended-models → free）：5 个
-    z-ai/glm-5.3-flash
-    cline-free/deepseek-v4.1-flash
+  cline free 目录（GET /api/v1/ai/cline/recommended-models → free）：6 个
+    cline-free/minimax-m3.1-flash       Minimax M3.1 Flash
     ...
-  当前 allowlist：8 个
-    deepseek/deepseek-v4-flash          （不在 free 目录）
-    meta/muse-spark-1.3-contributor     （不在 free 目录）
-  结果：allowlist 8 → 5（0 新增 / 3 移除 / 5 保留）
+  当前 allowlist：27 个
+    ✓ cline-free/solar-mini4
+    ✗ poolside/laguna-s-2.1:free          （free 通道已下架，将移除）
+    - cline-pass/kimi-k3                  （非 free 通道，保留不动）
+  结果：allowlist 27 → 26（+0 新增 / -1 移除 / 26 保留）
   预览模式，未写入。执行：mslxdff -provider cline free sync --yes
   ```
 - **示例**：
   ```bash
-  mslxdff -provider cline free                      # 5 个 free + 与 allowlist 的差异
-  mslxdff -provider cline free sync                 # 预览：8 → 5
+  mslxdff -provider cline free                      # 6 个 free + 与 allowlist 的三态差异
+  mslxdff -provider cline free sync                 # 预览：27 → 26
   mslxdff -provider cline free sync --yes            # 落盘
   mslxdff -provider cline free sync --yes --keep-extra
   ```
@@ -1341,7 +1341,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_RACCOON_THINKING` | 开 | raccoon 思考开关默认（`off`/`0`/`false`/`no`/`disabled` 关，其余含未设=开）；优先级：请求体 `extra_body.thinking.type` ＞ 调用方 `effort` ＞ 本 env ＞ 开 |
 | `MSLXDFF_RACCOON_COOLDOWN_MS` / `_QUOTA_COOLDOWN_MS` / `_TIMEOUT_MS` | `30000` / `3600000` / `300000` | raccoon 短冷却（登录态/限流/服务端）/ 积分不足长冷却（按天回血）/ 上游整请求超时 |
 | `MSLXDFF_RACCOON_AUTH_DIR` | `<state 目录>/auths` | raccoon 账号文档目录（`raccoon-<uid>.json`，`0600`；读取时兼容 `cwd/auths` 兜底） |
-| `MSLXDFF_RACCOON_CHECKIN` | `1` | raccoon 登录奖励的 daemon 兜底扫描开关（`0` 关；开则每天本地时 `_CHECKIN_HOUR` 扫一遍各号，**只补领历史上没领过的那一次**（每号一次性），已领过的号仅查一次账单、不打写端点；access_token 过期的号直接跳过并提示重扫，且绝不抢在网关前续期（refresh_token 一次性，抢着消费会烧号），落盘 `state.raccoonCheckin`） |
+| `MSLXDFF_RACCOON_CHECKIN` | `1` | raccoon 每日任务的 daemon 定时开关（`0` 关；开则每天本地时 `_CHECKIN_HOUR` 扫一遍各号）：① **每日积分结算**——当天第一次访问 `GET /api/web/office/v3/setting_info` 触发服务端惰性入账（幂等，今天已结算的号只查账单、不打结算端点）；② 一次性登录奖励补领（每号一次性，已领过的号仅查账单、不打写端点）；access_token 过期的号直接跳过并提示重扫，且绝不抢在网关前续期（refresh_token 一次性，抢着消费会烧号），落盘 `state.raccoonCheckin`（`dailyClaimed/dailyDone/claimed/already`） |
 | `MSLXDFF_RACCOON_CHECKIN_HOUR` | `9` | raccoon 自动签到小时（`0~23` 本地时，非法回退 9） |
 | `MSLXDFF_QWENWORK_COOLDOWN_MS` | `30000` | qwenwork 多号冷却（401/403/429/5xx 与 fetch 异常；额度错走 `MSLXDFF_QWENWORK_QUOTA_COOLDOWN_MS` 长冷却，400 等业务错不冷却） |
 | `MSLXDFF_QWENWORK_QUOTA_COOLDOWN_MS` | `3600000` (1h) | qwenwork 额度耗尽号冷却（code 14018/中英额度措辞命中；额度按天恢复，短冷却等于反复撞死号） |
