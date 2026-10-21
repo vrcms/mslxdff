@@ -1,16 +1,20 @@
-// AgentRouter 定制供应商：OpenAI 兼容聚合网关，有三道硬门槛（2026-10-21 现网 curl 实测）：
+// AgentRouter 定制供应商：OpenAI 兼容聚合网关，有四道硬门槛（2026-10-21 现网 curl 实测）：
 //   ① 客户端身份白名单 —— UA 为 `mslxdff`/`curl`/浏览器一律 401 `unauthorized client detected`，
 //      只放行 `opencode/*` 与 `claude-cli/<ver> (external…)`；
 //   ② 模型分端点 —— `deepseek-v4-flash` 吃 /v1/chat/completions，`gpt-6.1-sol`/`gpt-6-astra`
 //      对该端点回 400「请改用 /v1/responses」，只在 responses 通道可用；
 //   ③ 内容闸 —— 正文含 `x-anthropic` 字样稳定 500 `sensitive words detected`（连 user 消息也拦，
-//      与 workbuddy 只扫 system/assistant 不同），见 stripAgentRouterSensitive。
+//      与 workbuddy 只扫 system/assistant 不同），见 stripAgentRouterSensitive；
+//   ④ 传输层 —— 上游对 Node/undici 的**新建 TCP 连接**选择性丢包（现网对照：undici 0/4~0/6
+//      全 connect 超时，curl 同刻 100% 200，走系统代理亦不稳）⇒ 本家 fetchImpl 缺省换
+//      curl-fetch 子进程通道（`MSLXDFF_AGENTROUTER_FETCH=undici` 可切回）。
 // 故不复用 generic（其 UA 写死 `mslxdff`、responses 判定只认 models.dev npm 索引），这里自组装，
 // 底层仍复用 base.js 的 runner 与 responses-channel 的协议互转。
 import { createKeyRing } from "./keyring.js";
 import { loadProviderBaseUrl, loadProviderKeys } from "../state.js";
 import { createChatRunner, createAgent, envInt, getUndici, joinUrl, collectApiKeysGeneric } from "./base.js";
 import { createResponsesChannel, resolveResponsesPath } from "./responses-channel.js";
+import { createCurlFetch } from "./curl-fetch.js";
 import { compatFetch } from "../compat.js";
 import { opencodeUa } from "../opencode-identity.js";
 import { joinModelId } from "./model-id.js";
@@ -80,7 +84,10 @@ export function createAgentRouterProvider({
 } = {}) {
   if (id !== "agentrouter") throw new Error(`agentrouter provider id mismatch: ${id}`);
   const resolvedBase = resolveAgentRouterBase(baseUrl);
-  if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
+  // 传输层缺省走 curl 子进程（见文件头门槛④）：上游对 undici 新建连接选择性丢包，
+  // 实测 curl 同刻稳定。`MSLXDFF_AGENTROUTER_FETCH=undici` 切回 undici（配好上游修复后或对照排查用）。
+  const useCurl = !fetchImpl && String(process.env.MSLXDFF_AGENTROUTER_FETCH || "curl").toLowerCase() !== "undici";
+  if (!fetchImpl) fetchImpl = useCurl ? createCurlFetch() : (UndiciFetch || compatFetch);
 
   const ring = createKeyRing(
     collectApiKeysGeneric(id, apiKeys, apiKey, (pid) => loadProviderKeys(pid, file ? { file } : {})),
