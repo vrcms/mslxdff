@@ -40,9 +40,22 @@ export function cleanToolSchema(schema) {
 function cleanSchemaInner(schema, isRoot) {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
   const out = { ...schema };
+  // 删 $schema 元字段（JSON Schema draft 声明）：它不是 OpenAI function parameters 的字段；
+  // agentrouter 实测 2026-10-21——带 `$schema: draft/2020-12` 的空参数工具（Claude Code 内建
+  // CronList 等）被其 new_api 内核按更严的校验语义判 `null is not of type "array"`（400），
+  // 去掉 $schema 即 200。嵌套层同样可能出现，逐层删。
+  delete out.$schema;
   const missingType = isRoot && !("type" in out);
   if (missingType) out.type = "object";
   if (missingType && !("properties" in out)) out.properties = {};
+  // 根层 properties 存在但缺 required 时补 `required: []`：agentrouter 实测 2026-10-21——其
+  // new_api 后端异构副本里部分实例把缺省 required 归一成 null 再按 array 校验，随机报
+  // `Invalid schema for function 'X': null is not of type "array"`（400）。现网 A/B 各 10 发：
+  // 缺失版 200×5/400×3/500×2，补 required:[] 版 200×10——显式空数组即无从归一 null，
+  // 且 required:[] 对 OpenAI/Anthropic 均合法，属通用正确形状（不止为一家打补丁）。
+  if (isRoot && out.properties && typeof out.properties === "object" && !Array.isArray(out.properties) && !("required" in out)) {
+    out.required = [];
+  }
   if (out.format === "uri") delete out.format;
   if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
     const props = {};

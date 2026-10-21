@@ -119,8 +119,13 @@ export function createAgentRouterProvider({
     return h;
   }
 
+  // 网络重试：agentrouter 只有 1 把 key，任何一次瞬时连接抖动（现网实测 ECONNRESET 偶发，
+  // 上游高频时会触发）若直接 onError，= 立刻冷却 30s、把后续请求全挡成
+  // "all keys in cooldown"。补 attempts=2（对齐 generic/cline/workbuddy），让网络层重试先扛一下。
+  const chatRetry = { network: { attempts: 2, delayMs: 300 }, 429: { attempts: 1, delayMs: 100 }, 502: { attempts: 1, delayMs: 100 }, 503: { attempts: 1, delayMs: 100 }, 504: { attempts: 1, delayMs: 100 } };
+
   const { runChat } = createChatRunner({
-    id, ring, cooldownMs, fetchImpl, dispatcher, buildHeaders,
+    id, ring, cooldownMs, retry: chatRetry, fetchImpl, dispatcher, buildHeaders,
     getUrl: () => joinUrl(resolvedBase, CHAT_PATH),
     connectTimeoutMs,
     // 非流式走原生（SDK 通道只服务 opencode zen 的形状），responses 另走专用通道
@@ -132,6 +137,7 @@ export function createAgentRouterProvider({
     url: joinUrl(resolvedBase, resolveResponsesPath(id, RESPONSES_PATH)),
     connectTimeoutMs,
     cooldownMs,
+    retry: chatRetry,
     // 关 SDK：其缺省会强塞 include:["reasoning.encrypted_content"] / store:false，agentrouter 未验证支持
     sdkEnabled: false,
     buildHeaders,
@@ -151,7 +157,7 @@ export function createAgentRouterProvider({
     const clean = stripAgentRouterSensitive(body);
     if (isAgentRouterResponsesModel(clean?.model)) return responses.run(normalizeResponsesBody(clean), tmp, "shared provider keys", opts);
     const scoped = createChatRunner({
-      id, ring: tmp, cooldownMs, fetchImpl, dispatcher, buildHeaders,
+      id, ring: tmp, cooldownMs, retry: chatRetry, fetchImpl, dispatcher, buildHeaders,
       getUrl: () => joinUrl(resolvedBase, CHAT_PATH),
       connectTimeoutMs,
       sdkDispatch: { enabled: false },

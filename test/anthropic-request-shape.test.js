@@ -18,11 +18,36 @@ test("request-shape：剥 system 开头计费头（只剥首行、含其后的�
 });
 
 test("request-shape：clean_schema 补根 type/properties、删 format:uri、不改入参", () => {
-  assert.deepEqual(cleanToolSchema({}), { type: "object", properties: {} });
+  assert.deepEqual(cleanToolSchema({}), { type: "object", properties: {}, required: [] });
   const src = { properties: { u: { type: "string", format: "uri" } }, items: { format: "uri", type: "string" } };
   const out = cleanToolSchema(src);
-  assert.deepEqual(out, { type: "object", properties: { u: { type: "string" } }, items: { type: "string" } });
+  assert.deepEqual(out, { type: "object", properties: { u: { type: "string" } }, items: { type: "string" }, required: [] });
   assert.deepEqual(src, { properties: { u: { type: "string", format: "uri" } }, items: { format: "uri", type: "string" } }); // 入参未被改
+});
+
+// agentrouter 实测 2026-10-21：带 $schema 的空参数工具（Claude Code 内建 CronList 等）被判
+// `null is not of type "array"`（400）。$schema 是 JSON-Schema 元字段，非 OpenAI parameters 字段，逐层删。
+test("request-shape：clean_schema 逐层删 $schema 元字段", () => {
+  const src = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      nested: { $schema: "http://draft-07", type: "object", properties: { x: { type: "number" } } },
+      list: { type: "array", items: { $schema: "x", type: "string" } },
+    },
+  };
+  const out = cleanToolSchema(src);
+  assert.equal("$schema" in out, false, "根 $schema 应删");
+  assert.equal("$schema" in out.properties.nested, false, "嵌套层 $schema 应删");
+  assert.equal("$schema" in out.properties.list.items, false, "items $schema 应删");
+  assert.equal("$schema" in src, true, "入参不得被污染");
+    // 空参数工具（CronList 形状）：删 $schema + 补 required:[] 后剩合法 OpenAI parameters
+  const empty = cleanToolSchema({ $schema: "https://json-schema.org/draft/2020-12/schema", additionalProperties: false, properties: {}, type: "object" });
+  assert.deepEqual(empty, { additionalProperties: false, properties: {}, type: "object", required: [] });
+  // 已有 required 的工具不得被塞 []
+  const withReq = cleanToolSchema({ type: "object", properties: { path: { type: "string" } }, required: ["path"] });
+  assert.deepEqual(withReq.required, ["path"]);
 });
 
 test("request-shape：o 系列判定（带供应商前缀也认，末段匹配）", () => {
@@ -63,7 +88,7 @@ test("messagesToChatBody：tools 过滤 BatchTool、description 缺省不写、s
     ],
   });
   assert.deepEqual(b.tools.map((t) => t.function.name), ["keep", "nodesc", "urischema"]);
-  assert.deepEqual(b.tools[0].function.parameters, { type: "object", properties: {} });
+  assert.deepEqual(b.tools[0].function.parameters, { type: "object", properties: {}, required: [] });
   assert.equal("description" in b.tools[0].function, false);
   assert.equal("description" in b.tools[1].function, false);
   assert.equal(b.tools[2].function.description, "有描述");

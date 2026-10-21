@@ -177,4 +177,32 @@ describe("agentrouter：工厂行为", () => {
       await p.close();
     } finally { await teardown(); }
   });
+
+  // 单 key 供应商的网络抖动防线：瞬时连接错误必须重试（attempts=2），不能一次就把唯一 key 打进
+  // 冷却（否则一次抖动 = 接下来 30s 全部 "all keys in cooldown"，现网 12:16 连锁 502 即此因）。
+  test("网络抖动：瞬时错误重试后成功，唯一 key 不被冷却", async () => {
+    await setup();
+    try {
+      // 独立 stub：前 2 次连接级失败，第 3 次 200
+      const { createServer } = await import("node:http");
+      let hits = 0;
+      const srv2 = createServer((req, res) => {
+        req.resume();
+        hits++;
+        if (hits <= 2) { req.socket.destroy(); return; } // 模拟 ECONNRESET
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] }));
+      });
+      await new Promise((r) => srv2.listen(0, "127.0.0.1", r));
+      const url2 = `http://127.0.0.1:${srv2.address().port}`;
+      const p = createAgentRouterProvider({ baseUrl: url2, apiKeys: ["sk-test"] });
+      const res = await p.chat({ model: "deepseek-v4-flash", stream: false, messages: [{ role: "user", content: "hi" }] });
+      assert.equal(res.status, 200, "网络错误应被重试扛过");
+      assert.equal(hits, 3, "应共尝试 3 次（2 失败 + 1 成功）");
+      const ring = p.keyRing;
+      assert.equal(ring.available(), ring.size, "唯一 key 不得进入冷却");
+      await p.close();
+      await new Promise((r) => srv2.close(r));
+    } finally { await teardown(); }
+  });
 });

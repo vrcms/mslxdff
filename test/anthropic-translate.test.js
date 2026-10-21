@@ -131,7 +131,7 @@ describe("messagesToChatBody — 请求映射", () => {
       tools: [{ name: "Read", description: "读文件", input_schema: { type: "object", properties: {} }, strict: true, defer_loading: true, cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: "hi" }],
     });
-    assert.deepEqual(b.tools, [{ type: "function", function: { name: "Read", description: "读文件", parameters: { type: "object", properties: {} } } }]);
+        assert.deepEqual(b.tools, [{ type: "function", function: { name: "Read", description: "读文件", parameters: { type: "object", properties: {}, required: [] } } }]);
   });
 
   test("tool_choice 四种取值", () => {
