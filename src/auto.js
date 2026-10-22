@@ -176,13 +176,21 @@ export function createAutoSelector({
 
   async function candidatesFor(requested) {
     if (!requested) return candidates();
+    // 分段计时取证（2026-10-22：真机 candidatesFor 烧 20-26s，源码只 await loadList 与 persistPicks
+    // 两口——不测还是猜。>500ms 才留痕，正常毫秒级零噪音）。
+    const tL = Date.now();
     const list = await loadList();
+    const loadMs = Date.now() - tL;
     // 显式指定某模型 = 认可它，自动加入勾选集（仅当它是真实上游 free 模型时，避免垃圾 id 污染）
     const picks = loadPicks();
+    const tP = Date.now();
     if (list.includes(requested) && !picks.includes(requested) && persistPicks) {
       await persistPicks([...picks, requested]);
     }
+    const persistMs = Date.now() - tP;
+    if (loadMs > 500 || persistMs > 500) console.log(`[auto-slow] candidatesFor model=${requested} loadList=${loadMs}ms persistPicks=${persistMs}ms listSize=${list.length}`);
     const all = list.includes(requested) ? list : [requested, ...list];
+    const tR = Date.now();
     const others = rankModels(all.filter((id) => id !== requested), lastErrorAt, {
       now: now(),
       cooldownMs,
@@ -190,6 +198,8 @@ export function createAutoSelector({
       latencies,
       preferred: getPreferredModel({ file: file ?? undefined }),
     });
+    const rankMs = Date.now() - tR;
+    if (rankMs > 500) console.log(`[auto-slow] candidatesFor.rank model=${requested} rank=${rankMs}ms`);
     // 显式指定模型：严格优先，永不因冷却被挤到最后（原设计：A deepseek 失败 → B/D deepseek 并发 → 都失败才 fallback）
     // 冷却仅影响 auto 的择优，不影响指定模型的“很难被更改”语义
     return [requested, ...others];

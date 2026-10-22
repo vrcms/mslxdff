@@ -1,7 +1,7 @@
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_REFRESH_MS = 2 * 60 * 60 * 1000;
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { compatFetch } from "./compat.js";
 
@@ -28,7 +28,21 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
   if (providers?.length) {
     let aggregate = null;
     let aggFetchedAt = 0;
+    let aggInflight = null;
+    let aggTimer = null;
     let lastAllowlistKey = "";
+    // 冷启动预热：读上一次 persist 的磁盘目录当首值（真机取证：全目录拉取烧 20-26s，
+    // 首个 candidatesFor 冷等全程）。aggFetchedAt 用磁盘记录的真实时间；get 对
+    // 「有旧值」的情形一律 stale-while-revalidate（立即返回 + 后台刷），主请求零等待。
+    if (cacheFile) {
+      try {
+        const raw = JSON.parse(readFileSync(cacheFile, "utf8"));
+        if (Array.isArray(raw?.data)) {
+          aggregate = { object: "list", data: raw.data };
+          aggFetchedAt = Number(raw.cachedAt) || 0;
+        }
+      } catch { /* 无缓存/坏档：按冷处理 */ }
+    }
     async function currentAllowlistKey() {
       try {
         const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
@@ -42,6 +56,15 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
     }
     async function aggLoad() {
       const all = [];
+      // 单供应商拉取失败时沿用旧缓存里它的段（取证教训：此前失败=整段消失，
+      // 且 2h TTL 内无人再拉（startAutoRefresh 曾是空函数），目录会长期缺一大块）。
+      const prevByProvider = new Map();
+      for (const m of aggregate?.data || []) {
+        const pid = typeof m?.id === "string" ? m.id.split("/")[0] : "";
+        if (!pid) continue;
+        if (!prevByProvider.has(pid)) prevByProvider.set(pid, []);
+        prevByProvider.get(pid).push(m);
+      }
       for (const p of providers) {
         try {
           let list = (await p.listModels?.()) ?? [];
@@ -66,7 +89,9 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
           } catch {}
           all.push(...list);
         } catch {
-          // 单供应商取数失败不拖垮整体
+          // 单供应商取数失败不拖垮整体：有旧数据则保留旧数据
+          const prev = prevByProvider.get(p.id);
+          if (prev?.length) all.push(...prev);
         }
       }
       aggregate = { object: "list", data: all };
@@ -76,42 +101,84 @@ export function createModelsService({ baseUrl, headers, ttlMs = CACHE_TTL_MS, re
       if (cacheFile) persistModels(aggregate, cacheFile);
       return aggregate;
     }
+    // 对当前 aggregate（含磁盘 stale 值）做白名单二次过滤后返回；过滤失败回原值。
+    async function aggSnapshot() {
+      try {
+        const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
+        const { splitModelId } = await import("./providers/model-id.js");
+        const filteredData = aggregate.data.filter((m) => {
+          if (!m || !m.id) return false;
+          const { provider, raw } = splitModelId(m.id, providers.map((x) => x.id));
+          const allowed = loadProviderAllowedModels(provider);
+          const allowAny = loadProviderAllowAnyModels(provider);
+          if (!allowed.length && !allowAny) return false;
+          if (!allowed.length) return true;
+          return allowed.includes(String(raw || "").trim());
+        });
+        if (filteredData.length !== aggregate.data.length) return { ...aggregate, data: filteredData };
+        return aggregate;
+      } catch {
+        return aggregate;
+      }
+    }
+    function aggRefreshInBackground() {
+      void aggLoadShared().then(() => { aggFetchedAt = Date.now(); }).catch(() => {});
+    }
     async function get() {
       const now = Date.now();
-      if (aggregate && now - aggFetchedAt < ttlMs) {
+      const fresh = aggregate && now - aggFetchedAt < ttlMs;
+      if (fresh) {
         // 热更新白名单：allowlist 变化时，即使命中 TTL 也要重载（否则 clear 后仍返回旧过滤结果）
         try {
           const curKey = await currentAllowlistKey();
           if (curKey !== lastAllowlistKey) {
-            const out = await aggLoad();
+            const out = await aggLoadShared();
             aggFetchedAt = Date.now();
             return out;
           }
         } catch {}
-        // 否则尝试在缓存上二次过滤（处理 allowlist 从空变非空等未触发重载的场景）
-        try {
-          const { loadProviderAllowedModels, loadProviderAllowAnyModels } = await import("./state.js");
-          const { splitModelId } = await import("./providers/model-id.js");
-          const filteredData = aggregate.data.filter((m) => {
-            if (!m || !m.id) return false;
-            const { provider, raw } = splitModelId(m.id, providers.map((x) => x.id));
-            const allowed = loadProviderAllowedModels(provider);
-            const allowAny = loadProviderAllowAnyModels(provider);
-            if (!allowed.length && !allowAny) return false;
-            if (!allowed.length) return true;
-            return allowed.includes(String(raw || "").trim());
-          });
-          if (filteredData.length !== aggregate.data.length) return { ...aggregate, data: filteredData };
-          return aggregate;
-        } catch {
-          return aggregate;
-        }
+        return aggSnapshot();
       }
-      const out = await aggLoad();
+      // 有旧值（含冷启动磁盘 stale）：立即返回 + 后台刷新，主请求零等待。
+      // 取证教训：全目录拉取 20-26s，此前冷路径同步阻塞整个首请求。
+      if (aggregate) {
+        aggRefreshInBackground();
+        return aggSnapshot();
+      }
+      // 完全无值（首次冷跑）：只能等这一趟。
+      const out = await aggLoadShared();
       aggFetchedAt = Date.now();
       return out;
     }
-    return { get, startAutoRefresh: () => {}, stopAutoRefresh: () => {} };
+    // 并发去重：aggLoad 要遍历全部供应商拉目录（真机实测 20-26s），
+    // 无去重时赛马/后台任务并发触发就各烧各的（真机日志实证同窗口重复 3 次）。
+    function aggLoadShared() {
+      if (aggInflight) return aggInflight;
+      aggInflight = (async () => {
+        try {
+          return await aggLoad();
+        } catch (e) {
+          // 失败保旧：有旧聚合就回退旧值，绝不让半次刷新把目录清空
+          if (aggregate) return aggregate;
+          throw e;
+        } finally {
+          aggInflight = null;
+        }
+      })();
+      return aggInflight;
+    }
+    function aggStartAutoRefresh(intervalMs = refreshMs) {
+      if (aggTimer) return aggStopAutoRefresh;
+      aggTimer = setInterval(() => {
+        void aggLoadShared().then(() => { aggFetchedAt = Date.now(); }).catch(() => {});
+      }, intervalMs);
+      aggTimer.unref?.();
+      return aggStopAutoRefresh;
+    }
+    function aggStopAutoRefresh() {
+      if (aggTimer) { clearInterval(aggTimer); aggTimer = null; }
+    }
+    return { get, startAutoRefresh: aggStartAutoRefresh, stopAutoRefresh: aggStopAutoRefresh };
   }
   let cache = null;
   let fetchedAt = 0;

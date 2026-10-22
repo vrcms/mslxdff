@@ -104,9 +104,13 @@ test("model trace: 决定类事件只渲染登记字段，不落 payload/detail"
 
 test("model trace: upstreamEcho 认回显头，无头返回空（其它供应商零变化）", () => {
   const q = new Response("", { headers: { "x-mslxdff-upstream": "api1.qoder.sh", "x-mslxdff-qoder-region": "global", "x-mslxdff-qoder-account": "sticky", "x-mslxdff-qoder-cooldown": "429" } });
-  assert.deepEqual(upstreamEcho(q), { upstream: "api1.qoder.sh", account: "global", pick: "sticky", cooled: "429", queued: null });
-  const qq = new Response("", { headers: { "x-mslxdff-qoder-queued": "1" } });
+  // verdict/login/nocapacity/qoderRetry（2026-10-22 补）：qoder 判决定点日志字段——
+  // 排查 403 盲飞必须能从日志分辨「login 误伤/queue 漏检/压根没命中」，缺了只能靠猜。
+  assert.deepEqual(upstreamEcho(q), { upstream: "api1.qoder.sh", account: "global", pick: "sticky", cooled: "429", queued: null, login: null, nocapacity: null, verdict: null, qoderRetry: null });
+  const qq = new Response("", { headers: { "x-mslxdff-qoder-queued": "1", "x-mslxdff-qoder-verdict": "queue-nocapacity", "x-mslxdff-qoder-retry-after": "30" } });
   assert.equal(upstreamEcho(qq).queued, "1", "排队旗标要能被管线取到（ADR-0044）");
+  assert.equal(upstreamEcho(qq).verdict, "queue-nocapacity", "判决定点字段要能取到（排障第一眼）");
+  assert.equal(upstreamEcho(qq).qoderRetry, "30");
   const wb = new Response("", { headers: { "x-mslxdff-workbuddy-uid": "u1" } });
   assert.equal(upstreamEcho(wb).account, "u1", "workbuddy 账号走同一字段");
   assert.deepEqual(upstreamEcho(null), {}, "非 Response 不炸");

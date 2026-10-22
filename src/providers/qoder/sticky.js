@@ -15,7 +15,7 @@ export function createStickyPicker({ pick, isCooling = () => false, now = Date.n
 
   // onDecision（可选）：把"这次为什么选它"回报给调用方 —— 决定必须可观测。
   // sticky=同请求复用 / new=新请求轮转选中 / switch=上次的号在冷却(或 TTL 过期)故换 / rr=无 scope 退回轮转
-  return function pickSticky(scope, onDecision) {
+  function pickSticky(scope, onDecision) {
     if (!scope) {
       onDecision?.("rr");
       return pick();
@@ -34,5 +34,8 @@ export function createStickyPicker({ pick, isCooling = () => false, now = Date.n
       if (seen.size > maxEntries) evict();
     }
     return key;
-  };
+  }
+  // forget：丢弃 scope 的粘号记录（令牌刷新换了 key 后必须丢弃，否则同请求重试还粘旧 key）
+  pickSticky.forget = (scope) => { seen.delete(scope); };
+  return pickSticky;
 }

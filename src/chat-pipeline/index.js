@@ -94,8 +94,18 @@ export function createChatPipeline({ upstream, auto, logs, peers, groups, bus, t
       // 指定模型 = 死锁单模型：额度耗尽只换组员/组长（同模型换机器），**绝不换模型**。
       // candidatesFor 的持久化副作用（把显式指定的模型加入勾选集，供日后 auto 用）必须保留——
       // 见 auto.js:180「显式指定某模型 = 认可它，自动加入勾选集」，历史上删它会丢勾选记录。
+      // 但**不 await**（2026-10-22 日志定罪：loadList 拉全量模型目录烧 24s，写盘 persistPicks 仅 0ms）。
+      // 此路径 order 已定死 [requested]，candidatesFor 返回值根本不被消费，只为触发"加入勾选集"副作用——
+      // 为副作用让主请求干等 24s 是自伤。改后台 fire-and-forget：勾选照样持久化，主请求零阻塞。
       if (auto && requested) {
-        try { await auto.candidatesFor(requested); } catch {}
+        const tCf = performance.now();
+        Promise.resolve()
+          .then(() => auto.candidatesFor(requested))
+          .catch(() => {})
+          .finally(() => {
+            const ms = Math.round(performance.now() - tCf);
+            if (ms > 5000) console.log(`[pipeline-bg] candidatesFor 后台耗时 model=${requested} ms=${ms}（未阻塞主请求）`);
+          });
       }
       order = [requested];
     }

@@ -54,18 +54,27 @@ export function dailyCheckinClaim({ deviceToken, region, fetchImpl = compatFetch
   return call(fetchImpl, region, EP_CHECKIN_CLAIM, { method: "POST", deviceToken, body: {}, timeoutMs });
 }
 
-// 余额：/api/v2/quota/usage → userQuota{total,used,remaining,unit} + isQuotaExceeded
+// 余额：/api/v2/quota/usage → 基础池 userQuota + 奖励池 addOnQuota（签到/活动领的额度）。
+// ⚠ 取证教训（2026-10-22）：旧版只读 userQuota，漏了 addOnQuota —— Free 号 userQuota 恒 0/0，
+// 但领过签到奖励的号 addOnQuota.remaining=100 仍有额度，被误报成「已耗尽」。
+// exhausted 以接口综合判断 isQuotaExceeded 为权威（两池都用完才 true），不自行推断。
 export async function fetchQuota({ deviceToken, region, fetchImpl = compatFetch, timeoutMs } = {}) {
   const r = await call(fetchImpl, region, EP_QUOTA, { deviceToken, timeoutMs });
   if (r.status !== 200) return { ok: false, status: r.status, error: r.error || r.text.slice(0, 160) };
-  const q = r.json?.userQuota || {};
+  const num = (v) => Number(v) || 0;
+  const q = r.json?.userQuota;
+  const add = r.json?.addOnQuota;
+  const base = { total: num(q?.total), used: num(q?.used), remaining: num(q?.remaining) };
+  const addOn = add ? { total: num(add.total), used: num(add.used), remaining: num(add.remaining) } : null;
   return {
     ok: true,
-    total: Number(q.total) || 0,
-    used: Number(q.used) || 0,
-    remaining: Number(q.remaining) || 0,
-    unit: String(q.unit || "credits"),
+    total: base.total + (addOn?.total ?? 0),
+    used: base.used + (addOn?.used ?? 0),
+    remaining: base.remaining + (addOn?.remaining ?? 0),
+    unit: String(q?.unit || add?.unit || "credits"),
     exhausted: Boolean(r.json?.isQuotaExceeded),
+    base,
+    addOn,
   };
 }
 
@@ -102,15 +111,19 @@ export async function runCheckin({ deviceToken, region, fetchImpl = compatFetch,
   }
   if (st.status === 401) { r.message = `device token 失效（HTTP 401）：请重新 mslxdff -provider qoder login`; return r; }
 
-  // 干跑：只报状态，不发任何 claim 请求
-  if (probeOnly && st.status === 200 && st.json?.status) {
+  // 取证教训（2026-10-22）：上游 cn 老入口 daily-check-in 已 DISABLED，但字段还在返回。
+  // 旧代码把 DISABLED 当活跃态去 claim，拿到 409 就报「今日已领取」直接 return ——
+  // 永远走不到 campaigns 兜底，天天错过真积分活动（act-20261020-993，每日 10:00 UTC+8 刷新）。
+  // 修法：DISABLED 唯一豁免——不碰老入口直接落 campaigns；其余状态保持原行为（试领，409=已领）。
+  const legacy = st.status === 200 ? String(st.json?.status || "") : "";
+  const legacyActive = st.status === 200 && st.json?.status && legacy !== "DISABLED";
+  if (probeOnly && legacyActive) {
     r.ok = true;
-    r.status = st.json.status === "CLAIMED" ? "already" : "claimable";
-    r.message = `干跑：status=${st.json.status} 每日奖励 ${r.reward}`;
+    r.status = legacy === "CLAIMED" ? "already" : "claimable";
+    r.message = `干跑：status=${legacy} 每日奖励 ${r.reward}`;
     return r;
   }
-  // 主流程：daily-check-in（国内站）
-  if (st.status === 200 && st.json?.status) {
+  if (legacyActive) {
     const claim = await dailyCheckinClaim({ deviceToken, region: reg, fetchImpl, timeoutMs });
     if (claim.status === 409) { r.ok = true; r.status = "already"; r.message = "今日已领取"; return r; }
     if (claim.status === 200) {

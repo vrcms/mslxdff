@@ -96,6 +96,24 @@ export async function saveQoderAccount({ uid, deviceToken, refreshToken = "", re
   return { file: fp, accounts: st.keys.length, updated: st.updated > 0 };
 }
 
+// 刷新成功后按 uid 原位更新令牌对（deviceToken 时效短，105 过期即刷）。
+// auth 文档保留原 region/name；state 行按 uid 覆盖（persistAccounts 命中既有 uid 行即替换）。
+export async function updateQoderAccountTokens({ uid, deviceToken, refreshToken, file } = {}) {
+  if (!uid || !deviceToken) throw new Error("updateQoderAccountTokens: 缺少 uid/deviceToken");
+  const docs = listAccountDocs();
+  const found = docs.find((d) => String(d.uid) === String(uid));
+  const a = found?.doc?.auth || {};
+  const acc = found?.doc?.account || {};
+  writeAccountFile({
+    uid, deviceToken, refreshToken,
+    region: a.region || "global",
+    name: acc.name || "", email: acc.email || "", userType: acc.userType || "personal_standard",
+    organizationId: acc.organizationId || "", organizationName: acc.organizationName || "",
+  });
+  await persistAccounts([{ uid, deviceToken, refreshToken, region: a.region || "global", name: acc.name || "", domain: "qoder.com" }], file);
+  return { updated: Boolean(found) };
+}
+
 // 重建 provider 的行级 auth：由 keys[i] blob + auths[i] 还原 deviceToken。
 export function accountFromBlob(blob) {
   try {

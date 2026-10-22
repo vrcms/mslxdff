@@ -41,38 +41,54 @@ export function raccoonFallbackModels() {
   return RACCOON_FALLBACK_MODELS.map((m) => ({ ...m }));
 }
 
-/** 单条目录条目：字段名容错（缺字段即省略，不猜、不填假值）。 */
+/**
+ * 单条目录条目：字段名容错（缺字段即省略，不猜、不填假值）。
+ *
+ * 上游真实字段（2026-10-22 `GET /api/web/llm/v2/model_catalog` 实测）：
+ *   `name`=模型 id（请求体 `model` 用的就是它）、`description`=展示名（如 `DeepSeek-V4.1-Flash`）、
+ *   `visible: false`=上游对自己隐藏的内部模型、`params.context_window` / `params.max_tokens`、
+ *   `billing_multiplier` / `billing_effective_multiplier`。
+ * ⚠ **id 绝不能取 `description`**：旧`pickString(["modelName","name","displayName","description"])`
+ * 把 id 与展示名混在一串里，一旦上游条目的 `name` 缺失就会拿展示名当 id 去发请求（必 404/400）。
+ */
 function parseRaccoonModelEntry(raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  // 上游用 visible:false 表示「我这边不展示」，这类内部模型不进目录
+  if (raw.visible === false) return null;
   const id = pickString(raw, ["id", "modelId", "model_id", "modelName", "name"]);
   if (!id) return null;
   const model = { id };
-  const name = pickString(raw, ["modelName", "name", "displayName", "description"]);
-  if (name) model.name = name;
-  const ctx = pickNumber(raw, ["contextWindow", "context_window", "contextLength", "context_length"]);
+  // 展示名单独取，且排除与 id 同值的情况（否则列表会出现「xxx · xxx」）
+  const name = pickString(raw, ["description", "displayName", "modelName", "name"]);
+  if (name && name !== id) model.name = name;
+  const params = raw.params && typeof raw.params === "object" ? raw.params : {};
+  const ctx = pickNumber(raw, ["contextWindow", "context_window", "contextLength", "context_length"]) ?? pickNumber(params, ["context_window", "contextWindow"]);
   if (ctx !== undefined && ctx > 0) model.contextWindow = ctx;
-  const maxTokens = pickNumber(raw, ["maxTokens", "max_tokens", "maxCompletionTokens"]);
+  const maxTokens = pickNumber(raw, ["maxTokens", "max_tokens", "maxCompletionTokens"]) ?? pickNumber(params, ["max_tokens", "maxTokens"]);
   if (maxTokens !== undefined && maxTokens > 0) model.maxTokens = maxTokens;
   const img = pickBool(raw, ["supportsImage", "supports_image", "supportsVision"]);
   if (img !== undefined) model.supportsImage = img;
-  const eff = pickNumber(raw, ["effectiveMultiplier", "effective_multiplier", "multiplier", "costMultiplier"]);
+  const eff = pickNumber(raw, ["effectiveMultiplier", "effective_multiplier", "billing_effective_multiplier", "multiplier", "costMultiplier"]);
   if (eff !== undefined && eff >= 0) model.multiplier = eff;
-  const base = pickNumber(raw, ["baseMultiplier", "base_multiplier"]);
+  const base = pickNumber(raw, ["baseMultiplier", "base_multiplier", "billing_multiplier"]);
   if (base !== undefined && base > 0) model.baseMultiplier = base;
   return model;
 }
 
-/** 目录信封 → 条目数组。兼容 `data` 为数组、`data.models`、`data.list`、`data.items` 四种形状。 */
+/**
+ * 目录信封 → 条目数组。
+ *
+ * ⚠ **主形状是 `data.categories[]`，只有 `type: "chat"` 那组才是可路由模型**（2026-10-22 上游实测）。
+ * 旧实现只认 `data` 为数组 / `data.models` / `data.list` / `data.items` 四种，而真实报文是
+ * `{data:{categories:[...]}}` —— 结果每次都解析出 0 条、静默回落静态兜底表，症状是
+ * 「上游新上架的模型（如 `sn-deepseek-v4-1-flash-1017`）在网关里永远看不见」。
+ * 另外两条判据同样来自实测：`name` 才是模型 id（`description` 是展示名）、`visible: false`
+ * 是上游对自己隐藏的内部模型（`raccoon-*`），不该进目录。
+ *
+ * 四种旧形状继续兼容（上游改版/其他信封时兜底），按顺序取第一个非空的。
+ */
 export function parseRaccoonCatalog(data) {
-  const list = Array.isArray(data)
-    ? data
-    : Array.isArray(data?.models)
-      ? data.models
-      : Array.isArray(data?.list)
-        ? data.list
-        : Array.isArray(data?.items)
-          ? data.items
-          : [];
+  const list = pickCatalogList(data);
   const out = [];
   const seen = new Set();
   for (const raw of list) {
@@ -82,6 +98,19 @@ export function parseRaccoonCatalog(data) {
     out.push(m);
   }
   return out;
+}
+
+function pickCatalogList(data) {
+  const arr = (v) => (Array.isArray(v) ? v : null);
+  // 真实形状：{ data: { categories: [{ type: "chat", models: [...] }] } }
+  const root = data && typeof data === "object" && !Array.isArray(data) ? data : null;
+  const categories = arr(root?.categories) ?? arr(root?.data?.categories);
+  if (categories) {
+    const chat = categories.find((c) => c && typeof c === "object" && c.type === "chat");
+    const chatModels = arr(chat?.models);
+    if (chatModels) return chatModels;
+  }
+  return arr(data) ?? arr(root?.models) ?? arr(root?.list) ?? arr(root?.items) ?? [];
 }
 
 /** 倍率文案：0 → 免费；促销 → `x基→x实`；其余 → `x实`（含 x1）。 */
@@ -141,6 +170,28 @@ export function seedRaccoonAllowlist({ ids, file } = {}) {
   const added = target.filter((m) => !cur.includes(m));
   if (added.length) saveProviderAllowedModels("raccoon", [...cur, ...added], opts);
   return { allowed: [...cur, ...added], added };
+}
+
+/**
+ * 把**上游目录**的模型 id 只增不减并入 allowlist。
+ *
+ * 为什么需要：白名单此前只在登录时按**静态兜底表**播种一次，上游后来上架的模型
+ * （如 2026-10 的 `sn-deepseek-v4-1-flash-1017`）就永远进不来 —— dispatcher 拿白名单
+ * 过滤 `listModels()`，模型看得见列表却选不到、调用直接被挡。上游目录才是这家唯一真相
+ * （积分制，模型 id 全由上游定义），故每次成功拉到目录就同步一次。
+ *
+ * **为什么只增不减**：目录是**按账号**下发的（套餐不同可见模型数不同），某次拉到一份
+ * 较短的目录不代表模型下架；双向收敛会在换号/降级套餐时把白名单越缩越小、把能用的模型删掉。
+ * 真要下架的模型留着只会 404，代价远小于误删。对齐 cline 的 `planMerge` 保守口径（ADR-0067）。
+ */
+export function mergeRaccoonCatalogIntoAllowlist(models, { file } = {}) {
+  const ids = (Array.isArray(models) ? models : []).map((m) => String(m?.id || "").trim()).filter(Boolean);
+  if (!ids.length) return { added: [] };
+  const opts = file ? { file } : {};
+  const cur = loadProviderAllowedModels("raccoon", opts);
+  const added = ids.filter((m) => !cur.includes(m));
+  if (added.length) saveProviderAllowedModels("raccoon", [...cur, ...added], opts);
+  return { added };
 }
 
 /** 对外目录条目（`/v1/models` 与 CLI models 共用形状）。 */

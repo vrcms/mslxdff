@@ -6,7 +6,12 @@ import { cosyEncode } from "./encode.js";
 import { newUUID, unixSec } from "./fingerprint.js";
 
 export const APP_CODE = "cosy";
-export const VERSION = "1.0.10";
+// 身份版本（对齐外部参考 dsh-qoder-connect wire/cosy.ts 的 CLI 口径 1.1.47；env 可覆盖以便上游升版）
+export const VERSION = process.env.MSLXDFF_QODER_CLI_VERSION || "1.1.47";
+export const CLI_UA = `qoder/${VERSION}`;
+const MACHINE_OS = process.platform === "win32"
+  ? (process.arch === "arm64" ? "aarch64_windows" : "x86_64_windows")
+  : (process.arch === "arm64" ? "aarch64_linux" : "x86_64_linux");
 // base64("war, war never changes")
 const SECRET_B64 = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw==";
 
@@ -106,30 +111,41 @@ export function pathSigFrom(url) {
   }
 }
 
-// 构造请求头
-export function buildCosyHeaders(sess, pathSig, bodyStr, accept) {
+// 构造请求头（身份对齐 qodercli 参考实现：UA=qoder/<ver>、补 bodyhash/sigpath/machineos/x-request-id，
+// 摘掉 IDE 伪装头 cosy-scene/business-*——上游按请求头指纹分级，IDE+Go UA 是排队重灾区）
+// correlation: { requestId, sessionId } —— 队列探活与推理必须携带同一对 id 才能关联。
+export function buildCosyHeaders(sess, pathSig, bodyStr, accept, correlation) {
   const payloadB64 = buildPayloadB64(sess.info);
   const date = String(unixSec());
-  const sig = signRequest(payloadB64, sess.cosyKey, date, bodyStr || "", pathSig);
+  const body = bodyStr || "";
+  const sig = signRequest(payloadB64, sess.cosyKey, date, body, pathSig);
   const bearer = composeBearer(payloadB64, sig);
+  const bodyHash = createHash("md5").update(body).digest("hex");
   return {
-    "cosy-data-policy": "agree",
+    "cosy-data-policy": "disagree",
     "content-type": "application/json",
     "cosy-machinetype": sess.machineType,
+    "cosy-machinetoken": sess.machineToken,
+    "cosy-machineos": MACHINE_OS,
     "cosy-clienttype": "5",
+    "cosy-clientip": "127.0.0.1",
+    "cosy-bodyhash": bodyHash,
+    "cosy-bodylength": String(Buffer.byteLength(body)),
+    "cosy-sigpath": pathSig,
+    "cosy-organization-id": sess.identity?.organizationId || "",
+    "cosy-organization-tags": "",
     "cosy-date": date,
     "cosy-user": sess.identity.uid,
     "cosy-key": sess.cosyKey,
     "cache-control": "no-cache",
     "accept": accept || "application/json",
+    "accept-encoding": "identity",
     "authorization": bearer,
     "cosy-version": VERSION,
     "cosy-machineid": sess.machineId,
-    "cosy-machinetoken": sess.machineToken,
     "login-version": "v2",
-    "user-agent": "Go-http-client/2.0",
-    "cosy-scene": "assistant",
-    "cosy-business-product": "ide",
-    "cosy-business-type": "agent",
+    "user-agent": CLI_UA,
+    "x-request-id": correlation?.requestId || newUUID(),
+    ...(correlation?.sessionId ? { "x-session-id": String(correlation.sessionId) } : {}),
   };
 }

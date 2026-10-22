@@ -147,7 +147,21 @@ export function raccoonUserAgent(env = process.env) {
 export const RACCOON_EFFORT_ON = "on";
 export const RACCOON_EFFORT_OFF = "off";
 export const RACCOON_EFFORTS = [RACCOON_EFFORT_ON, RACCOON_EFFORT_OFF];
-export const RACCOON_DEFAULT_EFFORT = RACCOON_EFFORT_ON;
+/**
+ * 默认**关思考**（2026-10-22 本机实测改判，旧值 on）。
+ *
+ * 上游开着思考时，reasoning 与正文抢同一份 `max_tokens`，且推理极慢，两件事叠加正好
+ * 把这家变成「看起来通、实际用不了」：
+ *   · sn-deepseek-v4-1-flash：max_tokens=2000 时 2000 个 completion token **全是 reasoning**，
+ *     正文 0 字、finish=length（talkfull 15:49:35 实录）；
+ *   · Claude Code 形态的请求（system + tools）TTFT 实测 26~84 秒，网关 300s 流闸门、
+ *     客户端首字节耐心全在这段时间里耗着；
+ *   · sn-sensenova-6-8-flash 更绝：连 `thinking.type=disabled` 都压不住，仍产出 980
+ *     reasoning token / 1024 上限 → 正文 80 字即被截断。
+ * 关掉思考后同一请求 TTFT 降到 0.9~4.5 秒、正文完整，这是**可用性**问题不是偏好问题，
+ * 故默认值取 off；要思考的调用方显式传档位（`effort`/请求体 thinking）仍照传，不拦。
+ */
+export const RACCOON_DEFAULT_EFFORT = RACCOON_EFFORT_OFF;
 
 /**
  * 思考档位 → 出站 `thinking.type`。
@@ -158,12 +172,15 @@ export function raccoonThinkingType(effort) {
 }
 
 /**
- * 思考开关的环境默认：`MSLXDFF_RACCOON_THINKING=off|0|false|no|disabled` 关，其余（含未设）=开。
- * 优先级见 `chat.js` 的 `buildRaccoonWireBody`（请求体显式声明 > effort 参数 > 本 env > 默认开）。
+ * 思考开关的环境默认：`MSLXDFF_RACCOON_THINKING=on|1|true|yes|enabled` 开，其余（含未设）=关。
+ * 优先级见 `chat.js` 的 `buildRaccoonWireBody`（请求体显式声明 > effort 参数 > 本 env > 默认关）。
+ * ⚠ 与旧实现相反（旧为「非 off 即开」）：默认值改关的原因见 `RACCOON_DEFAULT_EFFORT`。
  */
 export function raccoonEffortFromEnv(env = process.env) {
   const raw = typeof env?.MSLXDFF_RACCOON_THINKING === "string" ? env.MSLXDFF_RACCOON_THINKING.trim().toLowerCase() : "";
-  return raw === "off" || raw === "0" || raw === "false" || raw === "no" || raw === "disabled" ? RACCOON_EFFORT_OFF : RACCOON_EFFORT_ON;
+  return raw === "on" || raw === "1" || raw === "true" || raw === "yes" || raw === "enabled"
+    ? RACCOON_EFFORT_ON
+    : RACCOON_EFFORT_OFF;
 }
 
 /** 冷却档位（对齐 qoder/zcode 先例：限流短冷、额度长冷）。 */

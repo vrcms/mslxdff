@@ -29,7 +29,7 @@ const PEEK_MAX_BYTES = 8192;
  * 出站请求体：剥 `raccoon/` 前缀 + 注入 `extra_body.thinking`。
  * 思考取值优先级：**请求体声明的档位**（`extra_body.thinking.type` / `reasoning_effort` / `reasoningEffort`
  * / `effort` / `thinking.type`，经 src/thinking-effort.js 归一，关断值最高优先）＞ 构造/调用方 `effort`
- * ＞ env `MSLXDFF_RACCOON_THINKING` ＞ 默认「开」。
+ * ＞ env `MSLXDFF_RACCOON_THINKING` ＞ 默认「关」（见 const.js 的 RACCOON_DEFAULT_EFFORT）。
  * **绝不发 `reasoning_effort`**：上游不认该参数（实测传与不传无可测差异），发了只会多一处形态差异。
  * 客户端声明的通用档位字段消费后一律剥除，出站只留本家原生形状 `extra_body.thinking.type`。
  */

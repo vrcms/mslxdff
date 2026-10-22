@@ -14,6 +14,8 @@ import { newSession } from "./session.js";
 import { createChatService } from "./chat.js";
 import { createStickyPicker } from "./sticky.js";
 import { createModelsService } from "./models.js";
+import { refreshDeviceToken } from "./oauth.js";
+import { updateQoderAccountTokens } from "./account-store.js";
 import { compatFetch } from "../../compat.js";
 
 function buildSessionFor(cred) {
@@ -41,6 +43,8 @@ export function createQoderProvider({
   // 排队（10605/isQueued）单独一档：队列没放行前反复送回就是白烧（实测跨小时不恢复），默认 5min。
   // 上游口播的 retryAfterSeconds=30 只当参考值，不当本档上限——按 30s 回池等于回到旧行为。
   queueCooldownMs = envInt("MSLXDFF_QODER_QUEUE_COOLDOWN_MS", 300_000),
+  // 登录过期且 refresh 也作废 = 只能人肉重登：短冷却等于每 30s 拿死 refresh 再撞一次，默认 1h。
+  authGoneCooldownMs = envInt("MSLXDFF_QODER_AUTHGONE_COOLDOWN_MS", 3600_000),
   connectTimeoutMs = Number(process.env.MSLXDFF_QODER_TIMEOUT_MS) || 120_000,
 } = {}) {
   const keys = (() => {
@@ -107,6 +111,38 @@ export function createQoderProvider({
   // 额度错在 provider 内直接换号重发（不依赖外层空转重试链路：那条链路在非流式路径不触发）。
   // 收口只认「每个号都被上游明确判过额度」；排队/限流等非额度冷却不得谎称没额度
   // Note: 判定收紧（全号才报 quota_exhausted，其余如实返回/报冷却中）— 见 .agents/notes/implemented/bug-fix/2026-09-28-qoder-quota-cooldown-switch.md
+  // 登录过期（105）不冷却换号轮询：deviceToken 时效短，官方 CLI 临期即刷——
+  // 刷成功 = 用新 token 对原地重发（uid 不变、region 不变）；刷失败（refresh 也作废）才长冷却该号并如实报错。
+  // 全池过期时逐号刷新（每号各刷各的），全部刷不动才给「重登」终态。
+  const refreshedUids = new Set(); // 本进程已刷过的 uid：防同号反复撞刷新端点（refresh 一次性，失败即真死）
+  async function refreshAndRetry(stripped, picked, pickedKey, scope) {
+    const blob = accountFromBlob(pickedKey);
+    const auth = authList.find((a) => String(a?.uid || "") === String(picked.sess?.identity?.uid || ""));
+    const uid = picked.sess?.identity?.uid || auth?.uid || "";
+    const rt = blob?.refreshToken || auth?.refreshToken || "";
+    if (!uid || refreshedUids.has(`${uid}`)) return null; // 已刷过仍 105 → refresh 作废，交给冷却路径
+    refreshedUids.add(String(uid));
+    try {
+      const pair = await refreshDeviceToken({ region: picked.region, refreshToken: rt, fetchImpl });
+      const newBlob = JSON.stringify({ device_token: pair.deviceToken, refresh_token: pair.refreshToken });
+      ring.replace(pickedKey, newBlob);
+      // auths 行的 refreshToken 同步（authList 是本进程缓存）
+      if (auth) auth.refreshToken = pair.refreshToken;
+      // 落盘失败不连累已成功的刷新（ring.replace 已在内存生效，本次重发用新 token）——
+      // 进程内即时自愈；只是没写穿 auths 文档/state，重启后会退回旧 blob（那时再撞 105 再刷）。
+      await updateQoderAccountTokens({ uid, deviceToken: pair.deviceToken, refreshToken: pair.refreshToken }).catch(() => {});
+      pickKey.forget(scope); // 旧 key 已被 replace：粘号表里的旧 blob 引用必须丢弃
+      // 原地重建会话并重发一次（新号 = 新 identity token）
+      const sess2 = buildSessionFor({ ...pair, uid, name: auth?.name || "", region: picked.region });
+      return await chatSvc.runChat(stripped, sess2, picked.region, "refreshed");
+    } catch (e) {
+      // 刷新不可重试（refresh 作废/返回不完整）→ 长冷却该号；可重试（网络）→ 短冷却交外层
+      const coolMs = e?.retryable ? cooldownMs : authGoneCooldownMs;
+      try { ring.onError(pickedKey, coolMs); } catch {}
+      return null;
+    }
+  }
+
   async function chat(body, opts) {
     // scope=reqId：同一次客户端请求的多次上游调用（空转重试）粘同一个号
     const scope = opts?.reqId ? `req:${opts.reqId}` : null;
@@ -141,6 +177,32 @@ export function createQoderProvider({
       const ust = Number(res?.headers?.get?.("x-mslxdff-qoder-upstream-status")) || 0;
       const isQuota = res?.headers?.get?.("x-mslxdff-qoder-quota") === "1";
       const isQueued = res?.headers?.get?.("x-mslxdff-qoder-queued") === "1";
+      const isLogin = res?.headers?.get?.("x-mslxdff-qoder-login") === "1";
+      const isNoCapacity = res?.headers?.get?.("x-mslxdff-qoder-nocapacity") === "1";
+      // 判决出口无条件留痕（2026-10-22 用户实证「没多打日志→排查全靠猜」）：只要任一判决旗标挂上，
+      // 就把「门面实际拿到的 res.status + 各旗标」打到 daemon 控制台。离线复现 429 与真机 403 的落差，
+      // 只有这一行能一锤定音——是 provider 真没返回 429，还是返回了却被下游 relay 改回原状态。
+      // 只在有判决时打（正常成功流零噪音），量极小。
+      if (isQuota || isQueued || isLogin || isNoCapacity) {
+        console.log(`[qoder-facade] hop=${hop} status=${res?.status} ust=${ust} quota=${isQuota} queued=${isQueued} login=${isLogin} nocap=${isNoCapacity} retryAfter=${res?.headers?.get?.("x-mslxdff-qoder-retry-after") ?? "-"}`);
+      }
+      // 无容量（10605 + queueCount:0 + serviceAvailable:false）：整池同档共享同一个 p3 队列，
+      // 换号 = 把整池对同一堵墙各撞一遍（实测 5.4s 白烧 + 客户端仍收 403）。冷却本号防下一请求立刻
+      // 再选它，但**不换号轮询**，带 Retry-After 的判决如实透给客户端按秒重试（对齐 magpie 503 语义）。
+      if (isNoCapacity) {
+        try { ring.onError(pickedKey, queueCooldownMs); } catch {}
+        lastRes = res;
+        break;
+      }
+      // 登录过期（105）：先刷新令牌原地重发，绝不当普通 401 冷却换号（否则把整池过期号轮一遍、
+      // 每号还叠空转重试白烧）。刷成功带出新响应直接返回；刷失败已在 refreshAndRetry 内冷却该号，换下号。
+      if (isLogin) {
+        const retried = await refreshAndRetry(stripped, picked, pickedKey, scope);
+        if (retried) return retried;
+        lastRes = res;
+        if (ring.available() > 0) continue;
+        break;
+      }
       const bad = badAuth(st) ? st : (badAuth(ust) ? ust : 0);
       // 冷却三档：额度（按天重置，最长）> 排队（队列没放行前别再送回，默认 5min）> 其它（普通短冷却）。
       // 排队单独成档的依据：现网 31h 窗口 global 区 176 发被判决 129 发且跨小时不复现恢复，

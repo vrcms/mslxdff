@@ -1,20 +1,25 @@
 // qoder 上游请求装配（纯函数，无网络）：OpenAI body → COSY 签名请求（url/headers/bodyStr）。
 // 从 chat.js 拆出，使真流式/聚合两条管线共享同一装配口（单一来源，防两处签名漂移）。
+// MSLXDFF_QODER_LEGACY_WIRE=1 → 回退旧形状（模板注入历史 + OpenAI messages 原样）。
 import { getEndpoints, normalizeRegion } from "./constants.js";
 import { buildCosyHeaders, pathSigFrom } from "./session.js";
 import { cosyEncode } from "./encode.js";
 import { buildQoderBody, mapModel } from "./payload.js";
 
-export function buildUpstreamRequest({ sess, region, model, messages, tools, maxTokens, isReasoning }) {
+export function buildUpstreamRequest({ sess, region, model, messages, tools, maxTokens, isReasoning, meta, effort }) {
   const upstreamModel = mapModel(model);
   const { body, mcSource } = buildQoderBody({
     template: undefined,
+    userId: sess?.identity?.uid,
     userType: sess?.identity?.userType,
     model: upstreamModel,
     messages,
     tools,
     maxTokens,
     isReasoning,
+    meta,
+    effort,
+    preserveTemplateHistory: process.env.MSLXDFF_QODER_LEGACY_WIRE === "1",
   });
   const ep = getEndpoints(normalizeRegion(region));
   const url = ep.chatStreamURL;
@@ -23,5 +28,5 @@ export function buildUpstreamRequest({ sess, region, model, messages, tools, max
   headers["x-model-key"] = upstreamModel;
   headers["x-model-source"] = mcSource;
   headers["accept"] = "text/event-stream";
-  return { url, headers, bodyStr, upstreamModel, mcSource };
+  return { url, headers, bodyStr, upstreamModel, mcSource, requestSetId: body.request_set_id, sessionId: body.session_id, modelKey: upstreamModel };
 }

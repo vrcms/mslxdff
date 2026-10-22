@@ -14,7 +14,8 @@ const { createRaccoonProvider } = await import("../src/providers/raccoon/index.j
 const { raccoonThinkingType } = await import("../src/providers/raccoon/const.js");
 const { getCustomProviderFactory } = await import("../src/providers/registry.js");
 const { shouldEnableCustomProvider, AUTH_DOC_PROVIDER_IDS } = await import("../src/runtime/provider-gate.js");
-const { parseRaccoonCatalog, raccoonMultiplierLabel, raccoonDisplayName, seedRaccoonAllowlist } = await import("../src/providers/raccoon/models.js");
+const { parseRaccoonCatalog, raccoonMultiplierLabel, raccoonDisplayName, seedRaccoonAllowlist, mergeRaccoonCatalogIntoAllowlist } = await import("../src/providers/raccoon/models.js");
+const raccoonModels = { parseRaccoonCatalog, raccoonMultiplierLabel, raccoonDisplayName, seedRaccoonAllowlist, mergeRaccoonCatalogIntoAllowlist };
 
 const fakeRes = (body, { status = 200, contentType = "application/json", stream = "STREAM" } = {}) => ({
   ok: status < 400,
@@ -28,6 +29,7 @@ const fakeRes = (body, { status = 200, contentType = "application/json", stream 
 test("wire body: 剥 raccoon/ 前缀 + 注入 extra_body.thinking，且绝不发 reasoning_effort", () => {
   const w = buildRaccoonWireBody({ model: "raccoon/sn-kimi-k3", messages: [], reasoning_effort: "high" });
   assert.equal(w.model, "sn-kimi-k3");
+  // 客户端显式声明档位仍照传（默认关只影响"没声明"的情况）
   assert.equal(w.extra_body.thinking.type, "enabled");
   assert.ok(!("reasoning_effort" in w), "不得向上游发送 reasoning_effort");
   const off = buildRaccoonWireBody({ model: "sn-glm-5-3" }, { effort: "off" });
@@ -35,10 +37,26 @@ test("wire body: 剥 raccoon/ 前缀 + 注入 extra_body.thinking，且绝不发
   assert.equal(off.model, "sn-glm-5-3");
 });
 
+test("wire body: 客户端没声明档位时默认关思考（思考会吃满 max_tokens，2026-10-22 实测改判）", () => {
+  const w = buildRaccoonWireBody({ model: "sn-deepseek-v4-1-flash", messages: [] });
+  assert.equal(w.extra_body.thinking.type, "disabled", "未声明时必须关思考，否则 reasoning 吃满额度、正文为零");
+  // env 显式开仍生效
+  assert.equal(
+    buildRaccoonWireBody({ model: "sn-glm-5-3", messages: [] }, { env: { MSLXDFF_RACCOON_THINKING: "on" } }).extra_body.thinking.type,
+    "enabled",
+  );
+  // 请求体显式声明优先级高于 env 默认
+  assert.equal(
+    buildRaccoonWireBody({ model: "sn-glm-5-3", messages: [], thinking: { type: "enabled" } }, { env: { MSLXDFF_RACCOON_THINKING: "off" } }).extra_body.thinking.type,
+    "enabled",
+  );
+});
+
 test("思考档位: 只有开/关两档，非本家档位归一为「开」", () => {
   assert.equal(raccoonThinkingType("on"), "enabled");
   assert.equal(raccoonThinkingType("off"), "disabled");
   assert.equal(raccoonThinkingType("none"), "disabled");
+  // undefined（未声明）走调用方的默认，本函数本身不做默认决策
   assert.equal(raccoonThinkingType(undefined), "enabled");
   for (const lvl of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
     assert.equal(raccoonThinkingType(lvl), "enabled", `${lvl} 应归一为 enabled`);
@@ -181,4 +199,38 @@ test("目录: 解析容错 + 倍率文案（免费/x1/促销）+ 兜底目录补
   assert.deepEqual(seeded.added, ["sn-kimi-k3", "sn-glm-5-3"]);
   const again = seedRaccoonAllowlist({ ids: ["sn-kimi-k3"] });
   assert.deepEqual(again.added, [], "只增不减：已有项不再重复添加");
+});
+
+test("目录: 真实信封 data.categories[type=chat].models 必须解析出模型（旧实现恒 0 条 → 静默回落兜底表）", () => {
+  // 2026-10-22 上游实测报文结构；旧解析器只认 data 数组/data.models/data.list/data.items，
+  // 对这种信封恒返回 0 条，症状是上游新上架模型（如 …-1017）在网关里永远看不见。
+  const models = parseRaccoonCatalog({
+    categories: [
+      { type: "chat", models: [
+        { name: "sn-deepseek-v4-1-flash", description: "DeepSeek-V4.1-Flash", visible: true, params: { context_window: 1000000, max_tokens: 100000 }, billing_multiplier: 0.25, billing_effective_multiplier: 0.25 },
+        { name: "sn-deepseek-v4-1-flash-1017", description: "DeepSeek-V4.1-Flash-1017", visible: true, params: { context_window: 1000000, max_tokens: 100000 }, billing_multiplier: 0.25, billing_effective_multiplier: 0 },
+        { name: "raccoon-8c4485", description: "Raccoon-Work", visible: false, params: { context_window: 1000000, max_tokens: 100000 } },
+      ] },
+      { type: "embedding", models: [{ name: "should-not-appear" }] },
+    ],
+  });
+  const ids = models.map((m) => m.id);
+  assert.deepEqual(ids, ["sn-deepseek-v4-1-flash", "sn-deepseek-v4-1-flash-1017"], "只取 chat 分类、跳过 visible:false");
+  assert.equal(models[0].name, "DeepSeek-V4.1-Flash", "description 是展示名");
+  assert.equal(models[0].contextWindow, 1000000, "上下文在 params.context_window");
+  assert.equal(models[0].maxTokens, 100000, "上限在 params.max_tokens");
+  assert.equal(raccoonMultiplierLabel(models[1]), "免费", "实付倍率为 0 即免费（促销原价显示只对非零生效）");
+});
+
+test("目录并入 allowlist: 上游新模型只增不减地补进白名单", () => {
+  const { mergeRaccoonCatalogIntoAllowlist } = raccoonModels;
+  const before = seedRaccoonAllowlist({ ids: ["sn-glm-5-3"] });
+  assert.ok(before.allowed.includes("sn-glm-5-3"));
+  const { added } = mergeRaccoonCatalogIntoAllowlist([{ id: "sn-deepseek-v4-1-flash-1017" }]);
+  assert.deepEqual(added, ["sn-deepseek-v4-1-flash-1017"], "上游目录里的新模型必须并入白名单");
+  const again = mergeRaccoonCatalogIntoAllowlist([{ id: "sn-deepseek-v4-1-flash-1017" }]);
+  assert.deepEqual(again.added, [], "幂等：已在白名单不重复写");
+  // 目录比白名单短时绝不删除（按账号下发，换号会变短）
+  mergeRaccoonCatalogIntoAllowlist([{ id: "sn-glm-5-3" }]);
+  assert.ok(seedRaccoonAllowlist({ ids: [] }).allowed.includes("sn-deepseek-v4-1-flash-1017"), "缺失项不得被移除");
 });

@@ -45,6 +45,30 @@ export const MAX_STREAM_MS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 0;
 })();
 
+// 上游判决头白名单透传：provider 层（qoder no-capacity/login/quota）把结论钉在响应头上，
+// relay 这一层若只回 status 不回这些头，客户端就拿不到"该重试还是该换号"的判决。
+// 只放白名单，绝不整包 upRes.headers（避免把上游内部头/日期等杂讯透给客户端）。
+// 取证教训：真机 429 响应没带 Retry-After，就是因为这里丢头（见 qoder chat.js withNoCapacity）。
+const DECISION_HEADERS = [
+  "retry-after",
+  "x-mslxdff-qoder-verdict",
+  "x-mslxdff-qoder-nocapacity",
+  "x-mslxdff-qoder-retry-after",
+  "x-mslxdff-qoder-login",
+  "x-mslxdff-workbuddy-uid",
+  "x-mslxdff-workbuddy-reason",
+  "x-mslxdff-allowlist",
+  "x-mslxdff-upstream-engine",
+];
+function propagateDecisionHeaders(res, upRes) {
+  try {
+    for (const name of DECISION_HEADERS) {
+      const v = upRes.headers.get(name);
+      if (v != null && v !== "") res.setHeader(name, v);
+    }
+  } catch {}
+}
+
 export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort, streamTimeoutMs = STREAM_TIMEOUT_MS, keepaliveMs = KEEPALIVE_MS, fallback, attemptStartMs } = {}) {
   const t0 = performance.now();
   // 上报锚点偏移：只加给「上报用时长」（usage 行），闸门计时仍从上面的 t0 起算，两者不得混用
@@ -56,17 +80,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   // 此时 statusCode 与自定义头都不可再设，否则 setHeader 抛 ERR_HTTP_HEADERS_SENT，重拉直接炸在半路
   if (!res.headersSent) {
     res.statusCode = upRes.status;
-    // propagate workbuddy uid / allowlist headers
-    try {
-      const uid = upRes.headers.get("x-mslxdff-workbuddy-uid");
-      if (uid) res.setHeader("x-mslxdff-workbuddy-uid", uid);
-      const reason = upRes.headers.get("x-mslxdff-workbuddy-reason");
-      if (reason) res.setHeader("x-mslxdff-workbuddy-reason", reason);
-      const allow = upRes.headers.get("x-mslxdff-allowlist");
-      if (allow) res.setHeader("x-mslxdff-allowlist", allow);
-      const engine = upRes.headers.get("x-mslxdff-upstream-engine");
-      if (engine) res.setHeader("x-mslxdff-upstream-engine", engine);
-    } catch {}
+    // propagate decision headers（workbuddy uid/allowlist + qoder 判决 + Retry-After）
+    propagateDecisionHeaders(res, upRes);
     if (fallback) applyFallbackHeaders(res, fallback);
   }
 
@@ -335,6 +350,8 @@ export async function relay(res, upRes, body, { onFirstChunk, onDownstreamAbort,
   }
   detail.wrotePayload = true; // 真写下去了：从此撤不回，也不再判空轮
   const nsTotalMs = Math.round(performance.now() - t0);
+  // 非流路径同样透判决头（429+Retry-After 此前只在这条路上丢过——真机 curl 实测）
+  if (!res.headersSent) propagateDecisionHeaders(res, upRes);
   if (enriched !== null) {
     json(res, upRes.status, enriched);
   } else {

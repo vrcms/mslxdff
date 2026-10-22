@@ -5,7 +5,7 @@ import { envInt } from "../base.js";
 import { createKeyRing } from "../keyring.js";
 import { loadProviderKeys } from "../../state.js";
 import { forwardRaccoonChat } from "./chat.js";
-import { buildRaccoonModelList, listRaccoonModels } from "./models.js";
+import { buildRaccoonModelList, listRaccoonModels, mergeRaccoonCatalogIntoAllowlist } from "./models.js";
 import { applyRaccoonRefresh, listRaccoonAccountDocs, raccoonCredentialFromDoc, readRaccoonAccountDoc, syncRaccoonKeys, writeRaccoonAccountFile } from "./account-store.js";
 import { refreshRaccoonCredential } from "./login.js";
 import { isRaccoonExpiringSoon, raccoonTokenFingerprint } from "./auth.js";
@@ -178,12 +178,25 @@ export function createRaccoonProvider({
     return allCoolingResponse();
   }
 
+  let catalogMergeTried = false;
   async function listModels() {
     let token = ring.keys[0];
     // 内存号已不在文档里（重登换号）时先对齐，否则目录撞 401 后静默回落内置表，表现为「列表不是最新的」
     if (token && !accountFor(token)) token = (await healKeyFromDocs(token)) || token;
     if (!token) return [];
-    const { models } = await listRaccoonModels({ credential: credentialFor(token), fetchImpl });
+    const { models, source } = await listRaccoonModels({ credential: credentialFor(token), fetchImpl });
+    // 上游目录是这家唯一真相（模型 id 全由上游定义、按账号下发）：每进程首次成功拉到就只增不减
+    // 并入 allowlist，否则 dispatcher 会拿登录时播种的静态白名单把新上架模型（如 …-1017）挡掉。
+    // 只在 source=upstream 时做：回落兜底表时并入的仍是静态 id，没有意义还会白写盘。
+    if (source === "upstream" && !catalogMergeTried) {
+      catalogMergeTried = true;
+      try {
+        const { added } = mergeRaccoonCatalogIntoAllowlist(models, file ? { file } : {});
+        if (added.length) console.error(`[raccoon] 上游目录新模型并入白名单: ${added.join(", ")}`);
+      } catch (e) {
+        console.error(`[raccoon] 目录并入白名单失败（列表照常返回）: ${String(e?.message || e).slice(0, 160)}`);
+      }
+    }
     return buildRaccoonModelList({ id, models });
   }
 
