@@ -1340,6 +1340,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_RACCOON_CLIENT_VERSION` | `v1.0.35` | raccoon 客户端版本（`X-Client-Version` 与 UA `Raccoon Work/<ver> (Windows)`）；上游按版本做风控判断，硬编码会随官方发版失效 |
 | `MSLXDFF_RACCOON_THINKING` | 关 | raccoon 思考开关默认（**2026-10-22 起默认关**：开着会把请求拖成 30~84s 首字节甚至「思考吃满、正文为零」）；只有 `on`/`1`/`true`/`yes`/`enabled` 开，其余含未设=关；优先级：请求体 `extra_body.thinking.type` ＞ 调用方 `effort` ＞ 本 env ＞ 关 |
 | `MSLXDFF_RACCOON_COOLDOWN_MS` / `_QUOTA_COOLDOWN_MS` / `_TIMEOUT_MS` | `30000` / `3600000` / `300000` | raccoon 短冷却（登录态/限流/服务端）/ 积分不足长冷却（按天回血）/ 上游整请求超时 |
+| `MSLXDFF_RACCOON_STICKY_MS` | `1800000`（30 分钟） | raccoon **会话粘号** TTL：同一段对话（`opts.sessionId`，`/v1/messages` 由 `x-session-id`/`x-session-affinity`/`metadata` 里的 Claude 会话 id 派生）固定用同一个号，换会话才轮到下一个号——积分按会话均摊，不再逐轮打散；该号进冷却（401/403/429/5xx、积分不足）才在本次请求内换号并粘住新号。无会话标识时退到「同请求粘号」（`reqId`），两者都无则退回每次调用 round-robin；`0`=关（退回逐调用轮转） |
 | `MSLXDFF_RACCOON_AUTH_DIR` | `<state 目录>/auths` | raccoon 账号文档目录（`raccoon-<uid>.json`，`0600`；读取时兼容 `cwd/auths` 兜底） |
 | `MSLXDFF_RACCOON_CHECKIN` | `1` | raccoon 每日任务的 daemon 定时开关（`0` 关；开则每天本地时 `_CHECKIN_HOUR` 扫一遍各号）：① **每日积分结算**——当天第一次访问 `GET /api/web/office/v3/setting_info` 触发服务端惰性入账（幂等，今天已结算的号只查账单、不打结算端点）；② 一次性登录奖励补领（每号一次性，已领过的号仅查账单、不打写端点）；access_token 过期的号直接跳过并提示重扫，且绝不抢在网关前续期（refresh_token 一次性，抢着消费会烧号），落盘 `state.raccoonCheckin`（`dailyClaimed/dailyDone/claimed/already`） |
 | `MSLXDFF_RACCOON_CHECKIN_HOUR` | `9` | raccoon 自动签到小时（`0~23` 本地时，非法回退 9） |

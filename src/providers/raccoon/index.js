@@ -3,6 +3,7 @@
 import { compatFetch } from "../../compat.js";
 import { envInt } from "../base.js";
 import { createKeyRing } from "../keyring.js";
+import { createStickyPicker } from "./sticky.js";
 import { loadProviderKeys } from "../../state.js";
 import { forwardRaccoonChat } from "./chat.js";
 import { buildRaccoonModelList, listRaccoonModels, mergeRaccoonCatalogIntoAllowlist } from "./models.js";
@@ -13,6 +14,14 @@ import { RACCOON_DEFAULT_COOLDOWN_MS, RACCOON_DEFAULT_QUOTA_COOLDOWN_MS } from "
 
 /** kind → 冷却档位。auth 走短冷（重登指引已由响应体给出）；quota 走长冷（按天回血）。 */
 const COOLDOWN_BY_KIND = { auth: "short", rate_limit: "short", server: "short", quota: "long" };
+
+/** 会话粘号 TTL：允 0（=关，退回每次调用轮转），故不能用只收正数的 envInt。 */
+function stickyMsFromEnv(env = process.env) {
+  const raw = env?.MSLXDFF_RACCOON_STICKY_MS;
+  if (raw === undefined || String(raw).trim() === "") return 1_800_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1_800_000;
+}
 
 function notLoggedInResponse() {
   return new Response(
@@ -63,6 +72,17 @@ export function createRaccoonProvider({
   }
   const ring = createKeyRing(keys, { cooldownMs });
 
+  // 会话粘号：同一段对话（opts.sessionId）固定用同一个号，换会话才轮转到下一个号。
+  // 为什么不是每次调用轮转：积分按号均摊靠「会话之间」轮换就够了，而同一会话逐轮换号会丢掉上游
+  // 的 prompt 缓存亲和，也让排障时分不清「这个号到底好不好」。无会话标识时退回 reqId（同请求重试不换号）
+  // 与纯轮转，行为与旧版一致。TTL 内每次命中续期；`MSLXDFF_RACCOON_STICKY_MS=0` 关掉退回逐调用轮转。
+  const pickKey = createStickyPicker({
+    pick: () => ring.next(),
+    // 被 replace() 换掉的旧 token 已不在 ring 里 → 同样视为不可用，会话会前进到新号而不是粘住废 token
+    isCooling: (k) => !ring.keys.includes(k) || ring.isCooling(k),
+    ttlMs: stickyMsFromEnv(),
+  });
+
   // access_token → 账号文档（office_identity / device_id / refresh_token 跟号走，取自 auths/raccoon-<uid>.json）
   // 缓存**可失效**：重登与续期都会换盘上的 token，只建一次会让本进程永远停在旧号（见 healKeyFromDocs）
   let docCache = null;
@@ -103,7 +123,7 @@ export function createRaccoonProvider({
   const inflightRefresh = new Map();
 
   /** 临期即续期；续期成功把新 token 回写账号文档并替换 keyring 里的旧键。失败不阻断（让上游如实报）。 */
-  async function ensureFresh(token) {
+  async function ensureFresh(token, scope) {
     const credential = credentialFor(token);
     if (!credential.refresh_token || !isRaccoonExpiringSoon(credential)) return credential;
     const pending = inflightRefresh.get(token);
@@ -114,6 +134,8 @@ export function createRaccoonProvider({
         if (next.access_token !== token) {
           ring.replace(token, next.access_token);
           docCache?.delete(token);
+          // 粘号表跟着换 token：否则该会话下一轮会认为旧 token 不可用而漂到别的号（同一账号被拆成两半）
+          pickKey.remember(scope, next.access_token);
         }
         // ⚠ 同 token 也必须刷新到期时间：否则 docCache 永远停在旧 expires_at，每个请求都会重复调一次 refresh
         docCache?.set(next.access_token, { ...credential, accessToken: next.access_token, refreshToken: next.refresh_token, expiresAt: next.expires_at || "" });
@@ -153,12 +175,18 @@ export function createRaccoonProvider({
   async function chat(body, opts = {}) {
     const total = ring.keys.length;
     if (!total) return notLoggedInResponse();
+    // 会话优先：一段对话固定一个号（积分按会话轮换均摊）；没有会话标识时才退到「同请求粘号」
+    const scope = opts?.sessionId ? `sess:${opts.sessionId}` : opts?.reqId ? `req:${opts.reqId}` : null;
     let lastRes = null;
     let healed = false; // 一次请求内只自愈一次：防重试风暴，也防「文档里那份同样不可用」时打旋
     for (let hop = 0; hop <= total + 1; hop++) {
-      const key = ring.next();
+      let pick = "rr";
+      const key = pickKey(scope, (d) => { pick = d; });
       if (!key) break;
-      const credential = await ensureFresh(key);
+      if (pick !== "sticky" && pick !== "rr") {
+        console.error(`[raccoon] 会话选号 pick=${pick} account=${raccoonTokenFingerprint(key)} ${scope || ""}`);
+      }
+      const credential = await ensureFresh(key, scope);
       const res = await forwardRaccoonChat({ body, credential, fetchImpl, timeoutMs, effort: opts?.effort ?? effort });
       const kind = res.headers.get("x-mslxdff-raccoon-kind");
       if (!kind) return res; // 成功或未分类：直接交出去
@@ -166,7 +194,11 @@ export function createRaccoonProvider({
       if (kind === "auth" && !healed) {
         healed = true;
         // 自愈成功就换号重试；不给失效号记冷却（ring.replace 也不把冷却带给新号）
-        if (await healKeyFromDocs(key)) continue;
+        const healedKey = await healKeyFromDocs(key);
+        if (healedKey) {
+          pickKey.remember(scope, healedKey); // 本会话钉到救回来的号，别在下一轮又漂走
+          continue;
+        }
       }
       const mode = COOLDOWN_BY_KIND[kind] || "none";
       if (mode === "long") ring.onError(key, quotaCooldownMs);
