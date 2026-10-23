@@ -68,8 +68,11 @@ export async function serialTryPeers({ candidates, v6Candidates = [], ctx, tried
   // 两段链：先 IPv4（组长→组员延迟升序），IPv4 全败才进 IPv6（同样组长优先 + hasV6 过滤）。
   // 只保留本次还没试过的。
   const fresh = (list) => list.filter((p) => !tried.has(p.url));
-  const ipv4Chain = filterSlow(fresh(candidates));
-  const ipv6Chain = filterSlow(fresh(v6Candidates));
+  // 指定模型 5xx 场景只要 1 个节点：peerMaxPeers=1 时 IPv4 链截断、IPv6 阶段直接跳过。
+  // 缺省 Infinity = 现有行为（整链 + v6 阶段）。
+  const maxPeers = Number(ctx.peerMaxPeers) > 0 ? Math.floor(Number(ctx.peerMaxPeers)) : Infinity;
+  const ipv4Chain = filterSlow(fresh(candidates)).slice(0, maxPeers);
+  const ipv6Chain = Number.isFinite(maxPeers) ? [] : filterSlow(fresh(v6Candidates));
 
   // —— 预取 + 探针（用户 2026-10-20 口径）——
   // 「某个节点当备选的时候打一个 hi，准备轮到它了也打一个 hi；hi 都回不来就当它不行，直接换。」

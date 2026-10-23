@@ -10,6 +10,9 @@ import { join } from "node:path";
 
 // 组合路径会触达 savePreferredModel / recordModelStats —— 指向 tmp 隔离，不碰真实 state
 process.env.MSLXDFF_STATE_FILE = join(mkdtempSync(join(tmpdir(), "mslxdff-test-compose-")), "state.json");
+// 本文件测管线形状（500 直传等），不测 5xx 退避：关掉 5s×3，避免每条 500 用例多等 15s。
+// 新策略覆盖在 test/pinned-5xx-retry.test.js。
+process.env.MSLXDFF_5XX_RETRIES = "0";
 
 function withGateway({ upstream, auto, headers, model, stream = false }) {
   const gw = createChatGateway({ upstream, auto, logs: null, peers: null, maxHops: 3, groups: null, bus: new EventEmitter(), token: "tok", plugins: [] });

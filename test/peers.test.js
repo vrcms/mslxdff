@@ -13,6 +13,11 @@ import { createServer } from "node:http";
 
 const TOKEN = "a".repeat(64);
 
+// 本文件测「本机失败 → 组员选路」，不测 5xx 退避：关掉新的 5s×3 重试，
+// 否则每条模拟 500 的用例多等 15s，且「只换 1 个节点」会把多节点选路语义带偏。
+// 新策略的覆盖在 test/pinned-5xx-retry.test.js。
+process.env.MSLXDFF_5XX_RETRIES = "0";
+
 function tmpStateFile() {
   const dir = mkdtempSync(join(tmpdir(), "mslxdff-peers-"));
   return join(dir, "state.json");

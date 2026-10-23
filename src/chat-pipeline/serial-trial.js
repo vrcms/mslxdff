@@ -15,6 +15,7 @@ import { isEmptyTurnError } from "../routes/chat/relay-pipeline.js";
 import { emptyRetryCfg, emptyRaiseCap, withRaisedMaxTokens, withOutputFloor, emptyNudgeCfg, withEmptyNudge, computeNextDelay, emptyTurnBudgetMs, emptyTurnMinRaiseTo } from "./empty-turn.js";
 import { classifyTerminalUpstream, readVerdictText, terminalShortcircuitOff } from "./terminal-verdict.js";
 import { forwardOrGuard } from "./context-forward.js";
+import { chatWith5xxRetry, http5xxRetryCfg } from "./upstream-5xx-retry.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -111,7 +112,14 @@ export async function runSerialTrial(ctx, deps = {}) {
       const tUp = performance.now();
       evt("upstream-try", { reqId, model, attempt: idx + 1, emptyRetry: emptyRetried, payload: summarizeRequest(forwarded) });
       try {
-        upRes = await upstream.chat(forwarded, chatOptsArg);
+        // 指定模型：5xx 先原地等 5s 重试（默认 3 次），仍 5xx 才交给上层换 1 个节点；auto 原样直发。
+        // 见 upstream-5xx-retry.js（用户口径 2026-10-23）。
+        upRes = await chatWith5xxRetry({
+          call: () => upstream.chat(forwarded, chatOptsArg),
+          singleModel: !useAuto,
+          evt, reqId, model,
+          isClosed: () => Boolean(res?.destroyed || res?.writableEnded),
+        });
         evt("upstream-done", { reqId, model, ok: !(upRes instanceof Error) && upRes.status < 400, status: upRes instanceof Error ? null : upRes.status, timing: upRes._t ?? null, error: null, ...upstreamEcho(upRes) });
       } catch (err) {
         if (auto) await auto.recordError(model, { message: errMsg(err) });
@@ -258,16 +266,21 @@ export async function runSerialTrial(ctx, deps = {}) {
     }
     // 转发闸门（详见 context-forward.js）：被拦即收场，不许换路重试——同一份大上下文换个目标照样撑爆。
     const gc = { res, body, order, handlerCtx, evt, logCall, logError, mark, perf0, stages, done, requested, useAuto, model, exhaustedLocal };
+    // 指定模型 5xx 重试耗尽后：只换 1 个节点（同模型换机器），该节点仍失败就直接收场，不再走宽带。
+    // 429 不在此列——额度按出口 IP 计，等待无意义，仍按原逻辑逐个问节点。
+    // retries=0 是整套功能的逃生阀：连「只换一个节点」一起关，回到旧的 5xx 全节点路径。
+    const pinned5xx = !useAuto && http5xxRetryCfg().retries > 0 && Number(lastErr?.status) >= 500;
+    const peerCtx = pinned5xx ? { ...handlerCtx, singlePeer: true } : handlerCtx;
     if (canForwardPeers) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (peer)` });
       } else {
-        const fr = await forwardOrGuard(() => peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx, evt, logCall, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res }), gc);
+        const fr = await forwardOrGuard(() => peerRelay({ model, body, lastErr, requested, useAuto, lockModel, auto, peers, handlerCtx: peerCtx, evt, logCall, mark, perf0, attemptStartMs: performance.now(), stages, startedAt, plugins, res }), gc);
         if (fr.done) return fr;
         lastErr = fr.lastErr ?? lastErr;
       }
     }
-    if (groups) {
+    if (groups && !pinned5xx) {
       if (!shouldUseGroupForModel(model)) {
         evt("group-skip", { reqId, model, reason: `${groupSkipReason(model)} (broadband)` });
       } else {

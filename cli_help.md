@@ -1385,6 +1385,7 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_LAST_CANDIDATE_TIMEOUT_MS` | `120000` | 末位/唯一候选与借道（via-route）的耐心档：首块未到才放弃（`0`=不限，慢上游可调大） |
 | `MSLXDFF_SDK_HEADERS_TIMEOUT_MS` | `120000` (2m) | AI SDK 通道 headers 超时：`doStream` 到点仍未返回响应头即判挂死并抛错（由调用方回退/换路；`0`=关闭）；防上游连接半死导致请求永不返回，**错误文案不含 "timed out"**（否则 cline runChat 会按文案重试 3 次放大挂死） |
 | `MSLXDFF_STALL_TIMEOUT_MS` | `0`（关闭） | 相邻 chunk 间隔 stall 阈值（仅作质量分） |
+| `MSLXDFF_5XX_RETRIES` / `MSLXDFF_5XX_RETRY_DELAY_MS` | `3` / `5000` | **指定模型 5xx 原地重试**（ADR-0068）：非 auto 模型撞 5xx 后等 `DELAY_MS` 同模型重拉，连续 `RETRIES` 次；仍 5xx 才换 1 个节点（不再全节点 fan-out、不走宽带）。`RETRIES=0`=整套关闭（含单节点，回旧路径）；`DELAY=0`=不等待；429/4xx 与 auto 不适用 |
  | `MSLXDFF_EMPTY_TURN_RETRIES` | 跟随阶梯档数（默认 `3`） | 空转 200（模型零正文）同模型自动重试次数（`0`=关闭回旧行为；仅 `EMPTY_MODEL_RESPONSE`，429/403/500 与 fetch 异常不重试）。结局事件必留痕：`empty-turn-retry`（暂停重拉，带 `step/delayMs/waitedMs`）/`empty-turn-recovered`（救回）/`empty-turn-exhausted`（用尽） |
  | `MSLXDFF_EMPTY_TURN_RETRY_STEPS` | `[2000,8000,30000]` | **空转重试阶梯**（JSON 数组，单位 ms）：第 N 次重拉按第 N 档暂停，超出档数取模复用。默认 2s→8s→30s 是给差网/限流用的（实测固定 2s 撞 `retryAfterSeconds=30` 会连空到死）；上游报了 `retryAfterSeconds` 时本次等待自动抬到不低于该窗口；非法值每进程告警一次并回落默认阶梯（绝不因手滑把重试清零）；显式 `[]`=逃生阀，回退旧式固定延迟 |
  | `MSLXDFF_EMPTY_TURN_RETRY_DELAY_MS` | `2000` | 旧式固定延迟档，**仅当 `MSLXDFF_EMPTY_TURN_RETRY_STEPS=[]` 时生效**（回退路径；阶梯模式下由 STEPS 接管） |

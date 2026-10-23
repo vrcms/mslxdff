@@ -30,10 +30,20 @@ export async function handlePeerRelay({
   const peerErrors = [];
   // 三批共享同一 peer 阶段总预算（同 hedge：旧行为是每批各吃满一次等头超时，串行叠加到 90s+）
   const pctx = peerStageCtx({ ...handlerCtx, peerErrors });
-  const win =
-    (await race(peers.ordered(), pctx)) ||
-    (await race(peers.orderedByLastError(), pctx)) ||
-    (await race(peers.coolingByLastError(), pctx));
+  // singlePeer：指定模型 5xx 重试耗尽后只换 1 个节点，该节点仍失败就交回上层收场。
+  // 选人仍按「组长第一 → 延迟升序」，只是取链头一个；三批候选不叠加，也不进 IPv6 阶段。
+  const singlePeer = handlerCtx?.singlePeer === true;
+  let win = null;
+  if (singlePeer) {
+    pctx.peerMaxPeers = 1;
+    const pick = peers.ordered()[0] || peers.orderedByLastError?.()?.[0] || peers.coolingByLastError?.()?.[0] || null;
+    win = pick ? await race([pick], pctx) : null;
+  } else {
+    win =
+      (await race(peers.ordered(), pctx)) ||
+      (await race(peers.orderedByLastError(), pctx)) ||
+      (await race(peers.coolingByLastError(), pctx));
+  }
   if (!win) {
     evt("peer-race-lose", { reqId: handlerCtx.reqId, model });
     // 组员全失败：把每个组员的真实返回汇总给调用者（否则只剩一个无信息的 429/502）
