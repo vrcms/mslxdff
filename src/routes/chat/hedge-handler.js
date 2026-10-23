@@ -74,7 +74,8 @@ export async function handleHedge({
       if (hedged.winner === "peer" && hedged.peerInfo) {
         const win = hedged.peerInfo;
         evt("peer-race-win", { reqId: handlerCtx.reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs, hedged: true, ttfMs: hedged.ttfMs });
-        await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
+        // 同 peer-handler：此处只拿到响应头，先记 provisional；送达后（r.handled）再记真正的成功。
+        await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target, provisional: true });
         const bufferedPeerRes = { ...win.res, body: hedged.bufferedBody, headers: win.res.headers, status: win.res.status, _t: win.res._t };
         const pipeline = createPipeline({
           relay,
@@ -107,6 +108,8 @@ export async function handleHedge({
           startedAt,
         });
         if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
+        // 真正送达才算这个节点成功转发一次（口径见 peers.js bumpWins 注释）
+        await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
         return { handled: true };
       }
     }

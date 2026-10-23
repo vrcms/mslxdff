@@ -54,7 +54,9 @@ export async function handlePeerRelay({
     return { handled: false, lastErr: { model, upstream: null, status: allLimit ? 429 : 502, message: `peers failed: ${detail}` } };
   }
   evt("peer-race-win", { reqId: handlerCtx.reqId, model, winPeer: win.peer.url, winTarget: win.target, latencyMs: win.latencyMs });
-  await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
+  // 这里只拿到**响应头**，pipeline 后面还可能超时/空轮。故先记 provisional（只暖热缓存、参与选路），
+  // 真正的成功计数等 pipeline 报 handled:true 再记——否则"收到 200 但零正文"也被算成转发成功。
+  await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target, provisional: true });
 
   const pipeline = createPipeline({
     relay,
@@ -88,5 +90,7 @@ export async function handlePeerRelay({
   });
   // Note: 超时/失败必须把 handled:false 交回上层换候选（丢弃 → 响应永不 end）— 见 .agents/notes/implemented/bug-fix/2026-09-17-relay-first-chunk-gate-real-cancel.md
   if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
+  // 真正送达才算这个节点成功转发一次（口径见 peers.js 的 bumpWins 注释）
+  await peers.recordResult(win.peer.url, { ok: true, latencyMs: win.latencyMs, model: win.target });
   return { handled: true };
 }

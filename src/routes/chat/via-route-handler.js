@@ -116,8 +116,8 @@ export async function handleViaRoute({
     // 502/429 等可 fallback 到 direct
     return { handled: false, lastErr: { model, upstream: upRes, status, message: msg } };
   }
-  // 成功：记录并走 pipeline 中继（复用 peer 的 streaming 逻辑）
-  try { await peers.recordResult(peer.url, { ok: true, latencyMs: 0, model }); } catch {}
+  // 成功：只拿到响应头，先记 provisional（只暖热缓存）；送达后（r.handled）再记真正的成功
+  try { await peers.recordResult(peer.url, { ok: true, latencyMs: 0, model, provisional: true }); } catch {}
   evt("via-route-win", { reqId: handlerCtx.reqId, peer: peer.url, model });
   const pipeline = createRelayPipeline({
     relay,
@@ -152,5 +152,7 @@ export async function handleViaRoute({
     streamTimeoutMs: LAST_CANDIDATE_TIMEOUT_MS,
   });
   if (!r.handled) return { handled: false, upRes: null, lastErr: r.lastErr };
+  // 真正送达才算这个节点成功转发一次（口径见 peers.js bumpWins 注释）
+  try { await peers.recordResult(peer.url, { ok: true, latencyMs: 0, model }); } catch {}
   return { handled: true };
 }

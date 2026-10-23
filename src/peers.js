@@ -263,10 +263,39 @@ export function createPeersService({
     return avail[cursor++];
   }
 
+  // ——— 累计计数（排障读数，不参与选路） ———
+  // 为什么单列而不是复用 fails/okAt：那两个是**瞬时**量（成功把 fails 清零、失败把 okAt 晾着），
+  // 用来判"现在好不好用"；而"这个节点一共替我扛了多少次"必须只增不减，否则永远读不出分布。
+  // day 分桶让「今天是不是某节点突然不干活了」一眼可见，历史桶只留 DAY_KEEP 天。
+  const DAY_KEEP = 14;
+
+  function todayKey() {
+    const d = new Date(now());
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  // 只在 acc（{wins,failTotal,days}）上加计数，不碰 stats[url]：
+  // recordResult 的成功分支会**整体重建**该节点条目，早先那种"先写进 stats 再重建"
+  // 的写法会把刚累加的计数直接抹掉（成功一次 = 归零一次，统计恒为 0）。
+  function accOf(prev) {
+    return { wins: prev.wins || 0, failTotal: prev.failTotal || 0, days: prev.days || {} };
+  }
+
+  function bumpDayInto(acc, field) {
+    const days = { ...acc.days };
+    const k = todayKey();
+    const cur = days[k] || { ok: 0, fail: 0 };
+    days[k] = { ok: cur.ok || 0, fail: cur.fail || 0, [field]: (cur[field] || 0) + 1 };
+    const keys = Object.keys(days).sort();
+    for (const old of keys.slice(0, Math.max(0, keys.length - DAY_KEEP))) delete days[old];
+    acc.days = days;
+  }
+
   // Long-lived error memory: a peer keeps its last-error timestamp until a
   // subsequent success resets it (success clears the failure record) or the
   // error is no longer in the persist store on next load.
-  async function recordError(url, { status, message } = {}) {
+  async function recordError(url, { status, message } = { }) {
     if (!url) return;
     lastErrorAt[url] = now();
     await persistErrors({ ...lastErrorAt });
@@ -287,7 +316,10 @@ export function createPeersService({
   // Outcome of a forwarded request: ok updates the hot-cache (EMA latency,
   // last successful model) and clears the error memory; failures keep the
   // error timestamp so the retry pass can order by recovery time.
-  async function recordResult(url, { ok, latencyMs, model } = {}) {
+  // 累计计数（用户 2026-10-23）：okAt/fails 是**瞬时**状态（成功清 fails、失败清 okAt），
+  // 看不出「这个节点一共替我扛了多少次」。故另立只增不减的 wins/failTotal 与今日分桶，
+  // 用于回答「各节点成功转发次数是否合理」——它是排障读数，不参与选路打分。
+  async function recordResult(url, { ok, latencyMs, model, provisional = false } = {}) {
     if (!url) return;
     if (ok) {
       if (lastErrorAt[url] != null) {
@@ -295,6 +327,9 @@ export function createPeersService({
         await persistErrors({ ...lastErrorAt });
       }
       const prev = stats[url] || {};
+      // ⚠ 成功分支用 next **整体重建**该节点条目（清 fails/streak429/deadFails 等瞬时量），
+      // 所以累计量 wins/failTotal/days 必须经 acc 显式带回去——早先"先写 stats 再重建"的
+      // 写法等于每次成功把累计抹掉（成功一次归零一次，统计恒为 0）。
       const next = {
         okAt: now(),
         latencyMs: prev.latencyMs != null && typeof latencyMs === "number"
@@ -307,11 +342,19 @@ export function createPeersService({
       };
       // 探测死亡标记：请求成功 = 节点活着，冷却窗口立即解除。
       // next 本身不含 probeDeadAt 键，天然清除；这里只兜底确保没有残留。
-      stats[url] = next;
+      const acc = accOf(prev);
+      if (!provisional) {
+        acc.wins += 1;
+        bumpDayInto(acc, "ok");
+      }
+      stats[url] = { ...next, ...acc };
       delete stats[url].probeDeadAt;
     } else {
       const prev = stats[url] || {};
-      stats[url] = { ...prev, fails: (prev.fails || 0) + 1 };
+      const acc = accOf(prev);
+      acc.failTotal += 1;
+      bumpDayInto(acc, "fail");
+      stats[url] = { ...prev, fails: (prev.fails || 0) + 1, ...acc };
     }
     await persistStats({ ...stats });
   }
@@ -341,5 +384,6 @@ export function createPeersService({
     }, isHot, stat, ordered, orderedByLastError, coolingByLastError, available, next,
     standbyChain, nextStandby, isLeaderPeer,
     recordError, recordResult, recordProbeDead, recordProbeOk, errors: () => ({ ...lastErrorAt }), stats: () => ({ ...stats }),
+    todayKey,
   };
 }

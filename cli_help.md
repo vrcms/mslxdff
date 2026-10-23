@@ -41,7 +41,7 @@
 |---|---|---|---|---|
 | `mslxdff` | — | 无参：daemon 已在且版本 ≥ 本地→直接显示 status+help（**只升不降**，低版本不会覆盖高版本）；否则以后台 daemon 启动并退出（npx 友好） | 否 | 否 |
 | `mslxdff -d` | `--daemon` | 以 detached 后台进程启动 daemon，同裸跑有“只升不降”保护（高版本已在跑时不会被低版本覆盖） | 否 | 否 |
-| `mslxdff -status` | `--status`, `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（free 缓存/preferred/picks + 体检表 avg首字/tps/啰嗦/p95）、autostart/plugins、群组/failover、recent calls(含 ttfb/tps/tok)、last error | 否 | 否（未运行时也打印，health 显示 fail） |
+| `mslxdff -status` | `--status`, `-s` | 打印 daemon/health/port/config、upstream providers（启用/key/baseUrl/allowlist/共享）、models（free 缓存/preferred/picks + 体检表 avg首字/tps/啰嗦/p95、failover 目标含各节点「N 成功 / 今天 X成Y败」转发计数）、autostart/plugins、群组/failover、recent calls(含 ttfb/tps/tok)、last error | 否 | 否（未运行时也打印，health 显示 fail） |
 | `mslxdff -log [N]` | `--log`, `-logs`, `--logs` | 显示最近 N 条事件（默认 10）+ `timeline.log` 人读时间线（直连/组员/重试/最终结果/总耗时），并提示其他日志路径（按模型链路日志 `<provider>-<model>.log`、calls/errors/daemon） | 否 | 否 |
 | `mslxdff -debug` | `--debug` | 停掉后台 daemon，前台运行并实时打印事件流；Ctrl+C 恢复后台 | 清空旧日志 | 会停旧 daemon |
 | `mslxdff -plugins` | `--plugins` | 列出插件目录与已识别插件及其 hooks，不启动 daemon | 否 | 否 |

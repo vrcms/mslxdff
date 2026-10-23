@@ -229,6 +229,9 @@ export async function printStatus(VERSION) {
       const s = peers.stat(p.url);
       if (s?.latencyMs != null) tags.push(`${s.latencyMs}ms`);
       if (s?.fails) tags.push(`${s.fails} fail(s)`);
+      if (s?.wins) tags.push(`${s.wins} 成功`);
+      const today = s?.days?.[peers.todayKey()];
+      if (today && (today.ok || today.fail)) tags.push(`今天 ${today.ok || 0}成/${today.fail || 0}败`);
       const tag = tags.length ? `  [${tags.join(", ")}]` : "";
       console.log(`  ${p.name || p.url}  ${p.url}${tag}`);
     }
