@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startServer, resolvePort } from "../server.js";
 import { createRouter } from "../routes.js";
 import { createEventBus } from "../events.js";
@@ -6,6 +9,25 @@ import { effectiveHost, maxHopsValue } from "../cli/policy.js";
 import { fmtEvent } from "../cli/format.js";
 import { writePid } from "../daemon.js";
 import { underSystemd } from "./proc-info.js";
+
+/**
+ * 由**独立进程**完成 autostart 接管，而不是 daemon 自己。
+ * 为什么：`enableAutostart()` 的语义是「停掉裸 daemon，把端口让给 systemd」—— 调用者恰好就是
+ * 那个裸 daemon 时，这条语义等于自杀（0.1.236 真机：daemon 启动 4~5 秒后消失、errors.log 记
+ * unexplained-kill、daemon.alive 停在 uptimeMs:0、user unit 永远停在 disabled，下次裸跑继续循环）。
+ * helper 是普通进程：杀掉 daemon（此时是父进程）不伤自己，`systemctl --user start` 也能跑完。
+ */
+function spawnAutostartHelper() {
+  const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "mslxdff.js");
+  const child = spawn(process.execPath, [entry, "-enable-autostart"], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, MSLXDFF_DAEMON: "", MSLXDFF_NO_AUTOSTART: "1" },
+  });
+  child.unref();
+  return child;
+}
 
 /**
  * 服务生命周期 — router 装配 → server 创建/ready-EADDRINUSE 自愈 →
@@ -180,21 +202,23 @@ export async function startServerLifecycle({ VERSION, token, created, upstream, 
   //    unit 托管的 daemon 查它必然得 enabled=false ⇒ 走 enableAutostart() ⇒ linuxEnable() ⇒ stopDaemon()。
   //    那条路径里 pid 文件写的就是**本进程**，过去等于每 2.5s 自杀一次（见 daemon.js 的自杀护栏）。
   // systemd 会给被管进程注入 INVOCATION_ID / JOURNAL_STREAM，判据可靠、无需用户配置。
+  // **接管动作必须由独立进程做**：enableAutostart() 的语义就是「停掉裸 daemon、把端口让给 systemd」，
+  // 由那个裸 daemon 自己调用 = 举手自杀（0.1.236 真机把自己杀掉后 unit 永远 disabled）。
   if (process.platform === "linux" && !process.env.MSLXDFF_NO_AUTOSTART && !underSystemd()) {
     setTimeout(async () => {
       try {
-        const { getAutostartStatus, enableAutostart } = await import("../autostart.js");
+        const { getAutostartStatus } = await import("../autostart.js");
         const st = await getAutostartStatus();
-        if (!st.enabled) {
-          const r = await enableAutostart();
-          if (r.ok) {
-            console.log(`autostart auto-enabled: ${r.method}${r.linger ? ` linger=${r.linger}` : ""}`);
-            try { bus?.emit({ ts: Date.now(), type: "autostart-auto-enabled", method: r.method }); } catch {}
-            try { logs.appendEvent({ ts: Date.now(), type: "autostart-auto-enabled", method: r.method }); } catch {}
-          } else {
-            console.log(`autostart auto-enable failed: ${r.error || "unknown"} (run mslxdff -enable-autostart manually)`);
-          }
+        if (st.enabled) return;
+        // 只派生 helper，不在本进程里调 enableAutostart（见 spawnAutostartHelper 注释）
+        const helper = spawnAutostartHelper();
+        if (!helper.pid) {
+          console.log("autostart 未启用且接管进程未启动：请手动运行 mslxdff -enable-autostart");
+          return;
         }
+        console.log(`autostart 未启用：已派出接管进程 (pid ${helper.pid})，daemon 稍后交给 systemd；不想要就设 MSLXDFF_NO_AUTOSTART=1`);
+        try { logs.appendEvent({ ts: Date.now(), type: "autostart-takeover-spawned", pid: helper.pid }); } catch {}
+        try { bus?.emit({ ts: Date.now(), type: "autostart-takeover-spawned", pid: helper.pid }); } catch {}
       } catch {}
     }, 2500).unref?.();
   }

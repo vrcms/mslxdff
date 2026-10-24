@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node
 import { homedir, userInfo } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { daemonDir, readPid } from "./daemon.js";
+import { daemonDir, readPid, isPidAlive } from "./daemon.js";
 import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
 
 const TASK_NAME = "mslxdff";
@@ -139,7 +139,47 @@ WantedBy=default.target
 `;
 }
 
+
+/**
+ * 从 pid 文件原文算出「要不要等某个裸 daemon 退出」；null = 不等。
+ * 自杀护栏①：pid 文件写的就是**本进程**时（daemon 自己 `writePid(process.pid)`），
+ * 等它退出、再补一发 SIGKILL，就是等自己死 + 补自己一刀 —— 0.1.236 真机的死法之一。
+ */
+export function pickBareDaemonPid(raw, self = process.pid, isAlive = isPidAlive) {
+  const n = Number(String(raw ?? "").trim().split("\n")[0]);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  if (n === self) return null;
+  return isAlive(n) ? n : null;
+}
+
+/**
+ * 把「端口持有者集合」拆成「可以杀的」+「自己也是持有者吗」—— 自杀护栏②的判据。
+ * 为什么需要：`ss -lptn 'sport = :<port>'` 对本用户自己的进程会显示 pid，集合里必然有 self。
+ * 旧代码第一圈 `continue` 跳过自己、第二圈**无差别 SIGKILL** ⇒ daemon 启动 4~5 秒后杀掉自己
+ * （0.1.236 真机：errors.log 记 unexplained-kill、daemon.alive 停在 uptimeMs:0、
+ * systemd unit 永远停在 disabled，下次裸跑继续循环）。
+ * 返回的 selfWasHolder 供调用方决定要不要跑 `fuser -k <port>/tcp`：它按端口无差别杀，绕不过 self。
+ */
+export function partitionKillTargets(pids, self = process.pid) {
+  const set = new Set();
+  for (const p of pids || []) {
+    const n = Number(p);
+    if (Number.isInteger(n) && n > 0) set.add(n);
+  }
+  const selfWasHolder = set.has(self);
+  set.delete(self);
+  return { targets: [...set], selfWasHolder };
+}
 async function linuxEnable() {
+  // systemd --user 不可用时**什么都不清理**：先杀掉还能用的裸 daemon、再发现 systemd 起不来，
+  // 等于用一次失败把服务弄死。只在 Linux 探测（macOS 也走本函数但没有 systemd，行为保持原样）。
+  if (process.platform === "linux") {
+    const probe = await execAsync("systemctl", ["--user", "show-environment"]);
+    if (probe.err) {
+      const why = (probe.stderr || probe.stdout || probe.err.message || "").slice(0, 200);
+      return { ok: false, error: `systemd --user 不可用（${why || "systemctl 失败"}）：未做任何清理，裸 daemon 继续运行` };
+    }
+  }
   const unit = systemdUnitPath();
   try {
     mkdirSync(dirname(unit), { recursive: true });
@@ -158,35 +198,43 @@ async function linuxEnable() {
       lingerRes = lr.err ? (lr.stderr || lr.stdout || lr.err.message || "").slice(0, 200) : "ok";
     }
   } catch {}
+  // 先 daemon-reload + enable，再清理裸 daemon：顺序反过来，一旦清理途中进程没了（旧版就是「杀自己」），
+  // unit 会永远停在 disabled，下一次裸跑又走进来 —— 这正是 0.1.236 的自我循环。
+  let r = await execAsync("systemctl", ["--user", "daemon-reload"]);
+  if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
+  r = await execAsync("systemctl", ["--user", "enable", SERVICE_NAME]);
+  if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
   // stop bare detached daemon that may hold the port, let systemd take over (best-effort, wait for port free)
   try {
     // 路径相对**本文件**解析：本文件在 src/ 下，daemon.js 与 server.js 都在 src/ 内。
     // 旧写的 `../daemon.js` / `../server.js` 从 src/ 出发指向仓库根 —— 两处都不存在，
     // 整个「停裸 daemon → 等端口释放 → 让 systemd 接管」的分支被后面的 catch {} 静默吞掉、从未执行过。
-    const { isPidAlive, stopDaemon } = await import("./daemon.js");
+    const { stopDaemon } = await import("./daemon.js");
     const { resolvePort } = await import("./server.js");
     const port = resolvePort();
-    const pidFile = join(homedir(), ".config", "mslxdff", "daemon.pid");
+    const pidFile = join(daemonDir(), "daemon.pid"); // 权威路径，尊重 MSLXDFF_DAEMON_DIR（旧代码硬编码 ~/.config ⇒ 清错 pid 文件）
     const { existsSync: exists2, readFileSync: read2 } = await import("node:fs");
     let pidToWait = null;
     try {
       if (exists2(pidFile)) {
-        const raw = read2(pidFile, "utf8").trim().split("\n")[0];
-        const n = Number(raw);
-        if (Number.isInteger(n) && n > 0 && isPidAlive(n)) pidToWait = n;
+        const raw = read2(pidFile, "utf8");
+        // 自杀护栏①：pid 文件写的就是本进程时（daemon 自己 writePid）既不能等、更不能杀
+        pidToWait = pickBareDaemonPid(raw);
       }
     } catch {}
     try { stopDaemon(); } catch {}
     // ensure bare daemon really exits (SIGTERM -> SIGKILL)
     for (let i = 0; i < 15; i++) {
-      if (pidToWait && isPidAlive(pidToWait)) {
-        if (i === 7) try { process.kill(pidToWait, "SIGKILL"); } catch {}
+      if (pidToWait && pidToWait !== process.pid && isPidAlive(pidToWait)) {
+        if (i === 7 && pidToWait !== process.pid) try { process.kill(pidToWait, "SIGKILL"); } catch {}
         await new Promise((r2) => setTimeout(r2, 200));
       } else break;
     }
     // robust: scan ss for any holder of :port (covers stale pidFile, fuser not installed)
     const killHolders = async () => {
       let killed = 0;
+      // 自己是不是端口持有者（决定要不要跑 fuser -k）；探测失败时按「是」处理，宁可不杀
+      let selfWasHolder = false;
       try {
         const r = await execAsync("ss", ["-lptn", `sport = :${port}`]);
         const out = r.stdout || "";
@@ -206,18 +254,21 @@ async function linuxEnable() {
             while ((m2 = re2.exec(line))) pids.add(Number(m2[1]));
           }
         }
+        // 自杀护栏②：ss 会把自己报成端口持有者 ⇒ 剔除 self，SIGKILL/fuser 一律不打自己
+        const part = partitionKillTargets(pids, process.pid);
+        selfWasHolder = part.selfWasHolder;
         for (const p of pids) {
           if (p === process.pid) continue;
           if (p === readPid()) { try { writeExitMarker(daemonDir(), { reason: "autostart-cleanup", prevPid: p, prevVersion: null, byPid: process.pid }); } catch {} }
           try { process.kill(p, "SIGTERM"); killed++; } catch {}
         }
         if (killed) await new Promise((r2) => setTimeout(r2, 400));
-        for (const p of pids) {
+        for (const p of part.targets) {
           try { if (isPidAlive(p)) process.kill(p, "SIGKILL"); } catch {}
         }
-      } catch {}
+      } catch { selfWasHolder = true; } // ss 探测失败 ⇒ 谁占着端口不清楚，fuser 一律不开火
       // fuser as extra best-effort (may not exist)
-      try { await execAsync("fuser", ["-k", `${port}/tcp`]); } catch {}
+      if (!selfWasHolder) { try { await execAsync("fuser", ["-k", `${port}/tcp`]); } catch {} }
       return killed;
     };
     await killHolders();
@@ -231,10 +282,6 @@ async function linuxEnable() {
       await new Promise((r2) => setTimeout(r2, 250));
     }
   } catch {}
-  let r = await execAsync("systemctl", ["--user", "daemon-reload"]);
-  if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
-  r = await execAsync("systemctl", ["--user", "enable", SERVICE_NAME]);
-  if (r.err) return { ok: false, error: (r.stderr || r.stdout).slice(0, 500) };
   r = await execAsync("systemctl", ["--user", "start", SERVICE_NAME]);
   // Verify actually active; if not, surface journal hint
   const chk = await execAsync("systemctl", ["--user", "is-active", SERVICE_NAME]);
