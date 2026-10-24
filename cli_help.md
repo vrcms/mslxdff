@@ -519,6 +519,11 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   ```bash
   mslxdff -provider openrouter sk-or-v1-aaa sk-or-v1-bbb sk-or-v1-ccc
   ```
+- **写盘前的三道闸**（`src/cli/commands/provider/keys-guard.js`）：这条命令是**整组覆盖**，参数写错等于当场废号，故任一命中即 `exit 1` 且**配置一字不改**——
+  1. **保留 verb 闸**：`help`/`usage`/`quota`/`models`/`checkin`/`login`/`allowlist`… 这类子命令词（`RESERVED_PROVIDER_SUBS`）绝不当 key。事故原型：2026-10-15 `-provider traework quota`、2026-10-24 `-provider codearts help`（后者把 2 条真凭据覆盖成字符串 `help`）。
+  2. **auth 号型闸**：`workbuddy`/`traework`/`qoder`/`qwenwork`/`globalqwenwork`/`raccoon` 六家的 keys 由 login 落盘、与 `auths[]` 按位序成对，手填必错 ⇒ 只留 `--force`。
+  3. **长度闸**（`MIN_KEY_CHARS = 11`）：任一候选 token 去空后 **< 11 字符**即拒。真 key 都远长于此（openrouter ~73、traework accessToken 实测 1004、codearts 凭据 blob 上千），而 ≤10 字符的裸词几乎必然是打错位置的子命令/模型名/文件名。
+- **逃生阀**：确需短 key（自建桩服务）→ 末尾加 `--force` 重跑；或改走**只追加、不覆盖**的 `-provider <id> add <key>`（`add` 不受这三道闸约束）。
 
 #### `mslxdff -provider <id> add <key>`（追加单 key）
 
