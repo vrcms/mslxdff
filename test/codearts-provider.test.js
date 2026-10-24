@@ -10,6 +10,7 @@ import { createServer } from "node:http";
 import { createCodeartsProvider } from "../src/providers/codearts.js";
 import { buildUpstreamBody } from "../src/providers/codearts/chat.js";
 import { newDpopPrivateJwk } from "../src/providers/codearts/dpop.js";
+import { createCatalog, mergeModels } from "../src/providers/codearts/models.js";
 
 function stub() {
   let handler = () => {};
@@ -271,14 +272,76 @@ describe("codearts provider 端到端", () => {
     await p.close();
   });
 
-  test("冷目录（未预热）：福利种子 deepseek-v4.1-flash 也按福利路由（带 maas_type）", async () => {
+  test("冷目录（未预热）：仍属福利种的 deepseek-v4-flash-0731 按福利路由（带 maas_type）", async () => {
+    const p = makeProvider(makeBlob());
+    srv.hits.length = 0;
+    const res = await p.chat({ model: "codearts/deepseek-v4-flash-0731", messages: [{ role: "user", content: "hi" }], stream: true });
+    assert.equal(res.status, 200);
+    const hit = srv.hits.find((h) => h.url === "/api/v2/chat/completions");
+    assert.equal(hit.headers["maas_type"], "benefit"); // 目录还没发现 → 种子兜底（冷启动也要按福利路由）
+    assert.equal(JSON.parse(hit.body).model, "deepseek-v4-flash-0731");
+    await p.close();
+  });
+
+  // 现网取证 2026-10-24（重新登录后直连上游 A/B）：deepseek-v4.1-flash 已从福利位转成 builtin 正式模型。
+  // 同一无关它带福利头 → InferHub.4004.200 benefit not found，不带 → HTTP 200。
+  // 故冷启动也不能再凭旧种子把它当福利模型；否则 preheat 未回来那一段必然 400。
+  test("冷目录：已转正的 deepseek-v4.1-flash 不带 maas_type（带上反而 benefit not found）", async () => {
     const p = makeProvider(makeBlob());
     srv.hits.length = 0;
     const res = await p.chat({ model: "codearts/deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }], stream: true });
     assert.equal(res.status, 200);
     const hit = srv.hits.find((h) => h.url === "/api/v2/chat/completions");
-    assert.equal(hit.headers["maas_type"], "benefit"); // 目录还没发现 → 种子兜底（冷启动也要按福利路由）
+    assert.equal(hit.headers["maas_type"], undefined);
     assert.equal(JSON.parse(hit.body).model, "deepseek-v4.1-flash");
+    await p.close();
+  });
+
+  // 三路里只有 builtin / 福利网关带真 model_id；agent-center 带的是 model_name（展示名）。
+  // 拿展示名当 id 发上游 = InferHub.002002009.404 The model is not registered（现网 2026-10-24 实测）。
+  test("目录 id 必须出自真 model_id：agent-center 的展示名不得顶包", async () => {
+    srv.set((req, res) => {
+      const send = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+      if (req.method === "GET" && req.url === "/v1/model/builtin") {
+        return send(200, { builtinModels: [
+          { model_id: "deepseek-v4.1-flash", model_name: "DeepSeek-V4.1-Flash", context_window: 1048576 },
+          { model_id: "GLM-5.2", model_name: "GLM-5.2", context_window: 1048576 },
+        ] });
+      }
+      if (req.method === "GET" && req.url.startsWith("/v1/agent-center/agents/useragents")) {
+        return send(200, { agents: [{ agent_name: "CodeAgent", alias: { alias_zh_cn: "智能体" }, show_in_ide: true, agent_id: "ag-1" }] });
+      }
+      if (req.method === "GET" && req.url.startsWith("/v1/agent-center/agents/detail")) {
+        return send(200, { gpts: { models: [
+          { model_name: "DeepSeek-V4.1-Flash", model_parameters: { context_window: 1048576 } },
+          { model_name: "GLM-5.2", model_parameters: { context_window: 1048576 } },
+        ] } });
+      }
+      if (req.method === "POST" && req.url === "/api/v1/benefit/claim") return send(200, { error_code: "0000" });
+      if (req.method === "GET" && req.url === "/api/v1/gateway/config") return send(200, { error_code: "0000", result: { models: [] } });
+      if (req.method === "POST" && req.url === "/api/v2/chat/completions") {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(sse(CHAT_SSE));
+        return;
+      }
+      res.writeHead(404); res.end("{}");
+    });
+    const p = makeProvider(makeBlob());
+    const list = await p.listModels();
+    const ids = list.map((m) => m.id);
+    assert.ok(ids.includes("codearts/deepseek-v4.1-flash"), "id 用 builtin 真 model_id");
+    assert.ok(!ids.includes("codearts/DeepSeek-V4.1-Flash"), "展示名不得成为 id");
+    const shown = list.find((m) => m.id === "codearts/deepseek-v4.1-flash");
+    assert.equal(shown.name, "DeepSeek-V4.1-Flash", "展示名留在 name，UI 照旧可见");
+    assert.ok(ids.includes("codearts/GLM-5.2"), "真 model_id 本身就是混合大小写时不得被抹成小写");
+
+    // 客户端照 agent-center 的展示名来问（用户在 IDE 里看到的就是这个），也要归一成真 id 再发上游
+    srv.hits.length = 0;
+    const res = await p.chat({ model: "codearts/DeepSeek-V4.1-Flash", messages: [{ role: "user", content: "hi" }], stream: false });
+    assert.equal(res.status, 200);
+    const hit = srv.hits.find((h) => h.url === "/api/v2/chat/completions");
+    assert.equal(JSON.parse(hit.body).model, "deepseek-v4.1-flash");
+    assert.equal(hit.headers["maas_type"], undefined);
     await p.close();
   });
 
@@ -334,5 +397,39 @@ describe("codearts provider 端到端", () => {
     assert.equal(out.reasoning_effort, "low");
     const both = buildUpstreamBody({ max_tokens: 64000, max_completion_tokens: 131072, messages: [] }, { chatId: "0".repeat(32), upstreamModel: "glm-5.3-flash" });
     assert.equal(both.max_tokens, 64000, "显式 max_tokens 优先，不被映射覆盖");
+  });
+});
+
+describe("codearts 目录 id 权威性（真 model_id > 展示名）", () => {
+  test("mergeModels：真 model_id 优先于展示名，与到达顺序无关", () => {
+    const display = { id: "DeepSeek-V4.1-Flash", name: "DeepSeek-V4.1-Flash", byModelId: false, contextWindow: 0 };
+    const real = { id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash", byModelId: true, contextWindow: 1048576 };
+    for (const [a, b] of [[display, real], [real, display]]) {
+      const merged = mergeModels([[a], [b]]);
+      assert.equal(merged.length, 1);
+      assert.equal(merged[0].id, "deepseek-v4.1-flash", "无论谁先到，都保留真 model_id");
+      assert.equal(merged[0].contextWindow, 1048576, "参数仍取并集");
+    }
+    // 真 model_id 本身是混合大小写时（GLM-5.2）不得被抹成小写
+    const glmReal = { id: "GLM-5.2", name: "GLM-5.2", byModelId: true, contextWindow: 1048576 };
+    const glmLower = { id: "glm-5.2", name: "glm-5.2", byModelId: false, contextWindow: 0 };
+    assert.equal(mergeModels([[glmReal], [glmLower]])[0].id, "GLM-5.2");
+    // 两份都没有真 model_id：沿用旧规则（精确大小写优先）
+    assert.equal(
+      mergeModels([[{ id: "GLM-5.2", byModelId: false }], [{ id: "glm-5.2", byModelId: false }]])[0].id,
+      "GLM-5.2",
+    );
+  });
+
+  test("createCatalog：先只见展示名、后发现真 model_id 时可覆盖（跨账号不被污染）", () => {
+    const cat = createCatalog();
+    cat.setAccount("u1", [{ id: "DeepSeek-V4.1-Flash", name: "DeepSeek-V4.1-Flash", byModelId: false }]);
+    assert.equal(cat.canonical("deepseek-v4.1-flash"), "DeepSeek-V4.1-Flash"); // 没有真 id 时只能用它
+    cat.setAccount("u2", [{ id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash", byModelId: true }]);
+    assert.equal(cat.canonical("DeepSeek-V4.1-Flash"), "deepseek-v4.1-flash", "真 model_id 一到即覆盖");
+    assert.equal(cat.canonical("deepseek-v4.1-flash"), "deepseek-v4.1-flash");
+    assert.equal(cat.isBenefit("u2", "deepseek-v4.1-flash"), false, "builtin 目录没标福利 → 不带福利头");
+    // 种子（byModelId=false）永远盖不掉已发现的真 id
+    assert.equal(cat.canonical("deepseek-v4.1-flash"), "deepseek-v4.1-flash");
   });
 });

@@ -14,8 +14,19 @@ const lower = (s) => String(s || "").trim().toLowerCase();
 
 export function createCatalog() {
   const known = new Map(); // lower → 精确 ID（种子 + 已发现，大小写归一单点）
+  const knownReal = new Set(); // 该精确 ID 出自上游真正的 model_id（不是展示名兜底）
+
+  // id 权威性：真正的 model_id > 展示名（agent-center 无 model_id 时拿 model_name 顶包，
+  // 发上去必 InferHub.002002009.404）；同级才用历史规则「非小写的精确大小写覆盖小写」。
+  function noteKnown(key, id, byModelId) {
+    if (!known.has(key)) { known.set(key, id); if (byModelId) knownReal.add(key); return; }
+    if (byModelId && !knownReal.has(key)) { known.set(key, id); knownReal.add(key); return; }
+    if (!!byModelId === knownReal.has(key) && id !== key && known.get(key) === key) known.set(key, id);
+  }
+
   for (const id of [...SEED_KNOWN_MODELS, ...SEED_BENEFIT_MODELS]) {
-    if (!known.has(lower(id))) known.set(lower(id), id);
+    const key = lower(id);
+    if (key) noteKnown(key, id, false); // 种子按展示名记账：真 model_id 一发现就覆盖它
   }
   const accounts = new Map(); // userId → {models, benefit:Set, knows:Set, lastBenefit:Map, fetched}
 
@@ -28,7 +39,7 @@ export function createCatalog() {
       const key = lower(m.id);
       ac.knows.add(key);
       if (m.benefit) { ac.benefit.add(key); ac.lastBenefit.set(key, m); }
-      if (!known.has(key) || m.id !== key) known.set(key, m.id);
+      noteKnown(key, m.id, m.byModelId);
       ac.models.push(m);
     }
     if (keepBenefit) {
@@ -38,7 +49,7 @@ export function createCatalog() {
         ac.benefit.add(key);
         ac.knows.add(key);
         ac.models.push(mi);
-        if (!known.has(key) || mi.id !== key) known.set(key, mi.id);
+        noteKnown(key, mi.id, mi.byModelId);
       }
       ac.models.sort((a, b) => (lower(a.id) < lower(b.id) ? -1 : lower(a.id) > lower(b.id) ? 1 : (a.id < b.id ? -1 : 1)));
     }
@@ -72,7 +83,7 @@ export function createCatalog() {
   return { setAccount, isBenefit, canonical, accountModels, isStale };
 }
 
-/** 多路合并：按小写 ID 去重，福利标记取或，参数更全/精确大小写优先，按小写 ID 排序。 */
+/** 多路合并：按小写 ID 去重，福利标记取或，真 model_id 优先 > 参数更全 > 精确大小写，按小写 ID 排序。 */
 export function mergeModels(sets) {
   const merged = new Map();
   for (const set of sets || []) {
@@ -81,7 +92,11 @@ export function mergeModels(sets) {
       const key = lower(m.id);
       const cur = merged.get(key);
       if (!cur) { merged.set(key, { ...m }); continue; }
-      const keep = (m.contextWindow > 0 && !cur.contextWindow) || (m.id !== lower(m.id) && cur.id === lower(cur.id)) ? m : cur;
+      // 上游真正的 model_id 优先于展示名：agent-center 那份只有 model_name（DeepSeek-V4.1-Flash），
+      // builtin 那份才是可请求的 id（deepseek-v4.1-flash）；发错大小写 = InferHub.002002009.404。
+      const keep = !!m.byModelId !== !!cur.byModelId
+        ? (m.byModelId ? m : cur)
+        : ((m.contextWindow > 0 && !cur.contextWindow) || (m.id !== lower(m.id) && cur.id === lower(cur.id)) ? m : cur);
       const drop = keep === m ? cur : m;
       merged.set(key, {
         ...keep,
@@ -130,6 +145,9 @@ const toModelInfo = (m, { benefit = false } = {}) => {
   if (!id) return null;
   return {
     id: String(id),
+    // 出处记账：只有真正的 model_id 字段才敢当「发给上游的 id」；靠 model_name/modelAlias
+    // 兜底出来的是展示名，上游 InferHub 不认（现网 2026-10-24：DeepSeek-V4.1-Flash 必 404）。
+    byModelId: !!m?.model_id,
     name: String(m?.model_name || id),
     contextWindow: Number(m?.context_window) || 0,
     maxTokens: Number(m?.max_tokens) || 0,

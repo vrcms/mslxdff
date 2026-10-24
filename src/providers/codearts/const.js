@@ -44,12 +44,19 @@ export const MAAS_TYPE_HEADER = "maas_type";
 export const MAAS_BENEFIT = "benefit";
 
 // 冷启动种子：福利套餐轮换后新模型在首次发现前也按福利路由（宁多带不少带，少带即 404）。
-// 现网取证 2026-10-16（福利网关 /api/v1/gateway/config，error_code=0000）共 4 位：下列 4 个 id 逐字对齐上游。
-export const SEED_BENEFIT_MODELS = ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "deepseek-v4.1-flash", "glm-5.3-flash"];
-// 内置模型种子（仅用于大小写归一，不标福利）。
+// 现网取证 2026-10-16（福利网关 /api/v1/gateway/config，error_code=0000）共 4 位：下列 id 逐字对齐上游。
+// 2026-10-24 再取证：`deepseek-v4.1-flash` 已转 builtin 正式模型（福利网关该号已空）。它留在福利种子里
+// 是有害的 —— preheat 未回来时带福利头 → InferHub.4004.200 benefit not found，不带才 200。故移出、转入正式表。
+export const SEED_BENEFIT_MODELS = ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash"];
+// 内置模型种子（仅用于大小写归一，不标福利）。id 一律写上游真正的 model_id 大小写：
+// `deepseek-v4.1-flash` 是全小写，`GLM-5.2` 就是混合大小写——猜错即 InferHub.002002009.404。
 export const SEED_KNOWN_MODELS = [
-  "GLM-5.2", "GLM-5.2-ArkTS-SPARK", "GLM-5.1", "GLM-4.7",
-  "OpenPangu-2.0-Pro", "OpenPangu-2.0-Flash",
+  // 现网取证 2026-10-24（builtin 路真 model_id 逐字）：这些就是全小写，展示名（OpenPangu-2.0-Pro /
+  // GLM-5.3 / Kimi-K3）出自 agent-center 的 model_name，当 id 发上去必 InferHub.002002009.404。
+  // 同名漂移记在 name 字段，不占用 id：GLM-5.2-ArkTS-SPARK 的真 id 是 glm-5.2-sft-harmony。
+  "deepseek-v4.1-flash", "glm-5.3", "kimi-k3", "openpangu-2.0-pro", "openpangu-2.0-flash",
+  "glm-5.2-sft-harmony", "kimi-k2.6-vl",
+  "GLM-5.2", "GLM-5.1", "GLM-4.7",
   "Qwen3-VL-235B", "Qwen3.5-397B-A17B-VL", "Qwen3.6-27B-VL",
 ];
 
