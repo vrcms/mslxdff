@@ -2,11 +2,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveMultiIpConfig, resolveRole, devNameFor, tableFor } from "../src/multi-ip-pool/config.js";
-import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile, fetchNodes, probeExitIp } from "../src/multi-ip-pool/nodes.js";
+import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
+import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile } from "../src/multi-ip-pool/nodes-fetch.js";
 import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel } from "../src/multi-ip-pool/tunnel.js";
 import { createMultiIpDispatcher } from "../src/multi-ip-pool/dispatch.js";
 import { createMultiIpPool } from "../src/multi-ip-pool/index.js";
@@ -117,6 +118,49 @@ test("nodes: fetchNodes 逐源回退（第一源 500，第二源可用）", asyn
   assert.equal(r.source, "https://good");
   assert.equal(r.rows.length, 1);
   assert.ok(lines.some((l) => l.includes("节点源失败")));
+});
+
+test("nodes: fetch 失败必须挖出真凶（undici 只回 fetch failed，cause.code 才说人话）", async () => {
+  assert.ok(describeFetchError({ message: "fetch failed", cause: { code: "ENOTFOUND" } }).includes("DNS"));
+  assert.ok(describeFetchError({ cause: { code: "ECONNRESET" } }).includes("重置"));
+  assert.ok(describeFetchError({ cause: { code: "ETIMEDOUT" } }).includes("超时"));
+  assert.ok(describeFetchError({ cause: { message: "self-signed certificate" } }).includes("TLS"));
+  assert.ok(describeFetchError({ cause: { code: "EHOSTUNREACH" } }).includes("EHOSTUNREACH"));
+  const boom = async () => { const e = new Error("fetch failed"); e.cause = { code: "ENOTFOUND" }; throw e; };
+  await assert.rejects(
+    () => fetchNodes({ sources: ["https://a.test/", "https://b.test/"], fetchImpl: boom }),
+    (err) => err.message.includes("2 个节点源") && /a\.test/.test(err.message) && /b\.test/.test(err.message) && /DNS/.test(err.message),
+    "全失败时异常必须逐源带原因（受限网络下这是用户唯一的线索）",
+  );
+});
+
+test("nodes: 本地表文件可以当源（受限网络抓一份带过去，命中即零网络请求）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mi-file-"));
+  const csv = `*vpn_servers\n#HostName,IP,Score\nvpn9.vpngate.net,203.0.113.9,9,1,1,Japan,JP,1,1,1,1,2weeks,AS1,,${B64}\n`;
+  writeFileSync(join(dir, "vpngate.csv"), csv);
+  let netCalls = 0;
+  const r = await fetchNodes({
+    sources: [join(dir, "vpngate.csv"), "https://never.test/x.csv"],
+    dir,
+    fetchImpl: async () => { netCalls++; throw new Error("不该打网"); },
+  });
+  assert.equal(r.rows.length, 1);
+  assert.ok(r.text.includes("vpn9.vpngate.net"), "必须回带 CSV 原文（fetch 子命令要落盘）");
+  assert.equal(netCalls, 0, "本地源命中就不该再打网络");
+  assert.ok(/x\.csv$/.test(sourceToLocalPath("file:///tmp/x.csv")), "file:// 必须换成本机路径写法");
+  assert.equal(sourceToLocalPath("https://a/b"), null, "http(s) 源不能被当成本地路径");
+});
+
+test("config: 节点源官方在前、镜像只站末位；NODES_FILE 排最前", () => {
+  const d = resolveMultiIpConfig({});
+  assert.equal(d.sources.length, 3);
+  assert.ok(d.sources[0].includes("vpngate.net"), "官方源必须永远优先");
+  assert.ok(d.sources[2].includes("raw.githubusercontent.com"), "第三方镜像只能作兜墙末位");
+  assert.equal(d.nodesFile, "");
+  const withFile = resolveMultiIpConfig({ MSLXDFF_MULTI_IP_NODES_FILE: "/tmp/vpngate.csv" });
+  assert.equal(withFile.sources[0], "/tmp/vpngate.csv", "本地表排在最前：文件在就一次网络都不打");
+  assert.equal(withFile.sources.length, 4, "网络源仍留作后备（本地表路径写错时不至于全盘瘫）");
+  assert.deepEqual(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_SOURCES: "https://mine.test/a", MSLXDFF_MULTI_IP_NODES_FILE: "/tmp/v.csv" }).sources, ["/tmp/v.csv", "https://mine.test/a"]);
 });
 
 test("nodes: probeExitIp 三态（认得出 / 认不出 / 网络异常）", async () => {
@@ -361,4 +405,15 @@ test("index: 全通过 ⇒ 起 N 槽并上池（出口 IP 取证进 stats）", a
   assert.ok(logs.some((l) => l.includes("出口池就绪")));
   await pool.close();
   assert.equal(pool.stats().tunnels, 0);
+});
+
+test("nodes: fetchNodesToFile 原样落盘（-multi-ip-pool fetch 的骨架）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mi-tofile-"));
+  const out = join(dir, "sub", "vpngate.csv");
+  const csv = `*vpn_servers\n#h\nvpn9.vpngate.net,203.0.113.9,9,1,1,Japan,JP,1,1,1,1,2weeks,AS1,,${B64}`;
+  const got = await fetchNodesToFile({ sources: ["https://t.test/"], out, fetchImpl: async () => ({ ok: true, status: 200, text: async () => csv }) });
+  assert.equal(got.out, out);
+  assert.equal(got.rows.length, 1);
+  assert.equal(readFileSync(out, "utf8"), csv, "必须原样落 CSV（不能只落解析结果，否则重抓的信息全丢）");
+  if (process.platform !== "win32") assert.equal(statSync(out).mode & 0o777, 0o600, "表里带节点凭据，必须 0600");
 });

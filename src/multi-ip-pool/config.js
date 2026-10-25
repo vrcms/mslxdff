@@ -37,10 +37,18 @@ export const DEFAULTS = {
   sysctl: true, // 放宽 rp_filter（严格反向路径过滤会让隧道"活着但请求挂死"）
 };
 
-/** VPNGate 官方节点源：HTTPS 优先、HTTP 兜底；受限网络用 MSLXDFF_MULTI_IP_SOURCES 换镜像（不硬编码第三方）。 */
+/**
+ * VPNGate 节点源：**官方永远在前**，第三方镜像只作兜墙的最后一条。
+ * 镜像 `aimili-vpngate` 仓库内 `mirror/vpngate.csv` 由它的 GitHub Actions **每 15 分钟**从官方表刷新
+ * （cron `7,22,37,52 * * * *`），实测 2026-10-25 与官方**同 15 列同 schema**、99 节点全部可解码 ⇒ 解析器零改动。
+ * 注意：它自己配的那条 GitHub Pages 镜像 `baoweise-bot.github.io/...` 已 404 死（实测），故不采用。
+ * 表内容只是**公开节点的连接配置 + VPNGate 公共账号（vpn/vpn）**，不含任何私人凭据；仍不信任镜像就用
+ * `MSLXDFF_MULTI_IP_SOURCES` 只留官方，或 `MSLXDFF_MULTI_IP_NODES_FILE` 自带一份本地表。
+ */
 export const NODE_SOURCES = [
   "https://www.vpngate.net/api/iphone/",
   "http://www.vpngate.net/api/iphone/",
+  "https://raw.githubusercontent.com/OpenMili/aimili-vpngate/main/mirror/vpngate.csv",
 ];
 
 const OFF = ["0", "off", "false", "no", "disable", "disabled"];
@@ -92,9 +100,12 @@ export function tableFor(baseTable, i) {
  */
 export function resolveMultiIpConfig(env = process.env, { logDirFn = logDir } = {}) {
   const modeRaw = envStr(env, "MSLXDFF_MULTI_IP_MODE", DEFAULTS.mode).toLowerCase();
-  const sources = envList(env, "MSLXDFF_MULTI_IP_SOURCES").length
+  // 受限网络兜墙：`MSLXDFF_MULTI_IP_NODES_FILE` 指的本地表**排在最前**（设了就一次网络都不打）。
+  const nodesFile = envStr(env, "MSLXDFF_MULTI_IP_NODES_FILE", "");
+  const baseSources = envList(env, "MSLXDFF_MULTI_IP_SOURCES").length
     ? envList(env, "MSLXDFF_MULTI_IP_SOURCES")
     : NODE_SOURCES;
+  const sources = nodesFile ? [nodesFile, ...baseSources.filter((s) => s !== nodesFile)] : baseSources;
   return {
     enabled: envBool(env, "MSLXDFF_MULTI_IP_POOL", DEFAULTS.enabled),
     mode: MODES.includes(modeRaw) ? modeRaw : DEFAULTS.mode,
@@ -118,6 +129,7 @@ export function resolveMultiIpConfig(env = process.env, { logDirFn = logDir } = 
     authPass: envStr(env, "MSLXDFF_MULTI_IP_AUTH_PASS", DEFAULTS.authPass),
     dir: envStr(env, "MSLXDFF_MULTI_IP_DIR", join(logDirFn(), "multi-ip-pool")),
     sources,
+    nodesFile,
     debug: envBool(env, "MSLXDFF_MULTI_IP_DEBUG", DEFAULTS.debug),
     sysctl: envBool(env, "MSLXDFF_MULTI_IP_SYSCTL", DEFAULTS.sysctl),
   };

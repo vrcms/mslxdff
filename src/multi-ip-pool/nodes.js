@@ -1,12 +1,10 @@
-// multi-ip-pool · VPNGate 节点表：取表（多源回退 + 本地缓存）→ 解 base64 配置 → 筛候选 → 落 conf。
+// multi-ip-pool · VPNGate 节点表（**纯解析与落盘**侧）：解 CSV → 解 base64 配置 → 筛候选 → 落 conf/缓存。
 //
-// 为什么要这层：出口 IP 的**来源**就是这些免费志愿者节点。参照实现（aimili-vpngate）用同一份
-// CSV（`/api/iphone/`，每行末列是 base64 的 OpenVPN 配置），我们直接取它、不引入 Python 侧任何代码。
+// 为什么要拆开：出口 IP 的**来源**就是这些免费志愿者节点（参照实现 aimili-vpngate 用同一份 CSV），
+// 但「取表」在受限网络里是独立的成败关口，它的诊断逻辑单独住在 ./nodes-fetch.js（fetch/归因/出口取证）。
 // 纪律：候选的 conf / auth 一律 0600 落在**非工作树**目录（默认 logDir()/multi-ip-pool）。
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compatFetch, getUndici, timeoutSignal } from "../compat.js";
-import { EXIT_PROBE_URL, parseExitIp } from "../warp-pool/revive.js";
 
 /** CSV 列序（VPNGate `/api/iphone/`）：末列是 base64 配置，其余为节点元数据。 */
 export const VPNGATE_FIELDS = [
@@ -126,27 +124,6 @@ export function saveNodeCache({ dir, source = "", rows = [], now = () => Date.no
   return payload;
 }
 
-/** 逐源尝试取表；任一源返回可解析的 CSV 即成功（并顺手写缓存）。 */
-export async function fetchNodes({ sources = [], dir = "", fetchImpl, timeoutMs = 20_000, now = () => Date.now(), log = () => {} } = {}) {
-  const f = fetchImpl || getUndici().fetch || compatFetch;
-  let lastErr = null;
-  for (const url of sources) {
-    try {
-      const res = await f(url, { signal: timeoutSignal(timeoutMs) });
-      const text = await res.text();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const rows = parseVpnGateCsv(text);
-      if (!rows.length) throw new Error("返回体不是可解析的 VPNGate CSV");
-      log(`[multi-ip-pool] 节点表取自 ${url}（${rows.length} 个节点）`);
-      if (dir) saveNodeCache({ dir, source: url, rows, now });
-      return { source: url, rows };
-    } catch (e) {
-      lastErr = e;
-      log(`[multi-ip-pool] 节点源失败 ${url}：${String(e?.message || e)}`);
-    }
-  }
-  throw new Error(`全部节点源都失败：${String(lastErr?.message || lastErr || "无源可试")}`);
-}
 
 /** 落一份 node conf（设备名/路由由 CLI 覆盖，不改原配置文本）；返回文件路径。 */
 export function writeNodeConf({ dir, row, name = "" } = {}) {
@@ -170,22 +147,4 @@ export function materializeNode({ dir, row, name = "" } = {}) {
 export function writeAuthFile({ dir, user = "vpn", pass = "vpn" } = {}) {
   ensureDir(dir);
   return writePrivate(join(dir, "auth.txt"), `${user}\n${pass}\n`);
-}
-
-/**
- * 出口取证：从某槽的 tun 地址出网，读回真实出口 IP（照 warp-pool/revive.js 的同源判据）。
- * 这是「换 IP 到底换没换动」的直接证据——没有它，日志只能说"起了隧道"，说不了"出口变了"。
- * @returns {Promise<{ ok: boolean, ip: string, ms: number, error?: string }>}
- */
-export async function probeExitIp({ agent, fetchImpl, timeoutMs = 12_000 } = {}) {
-  const t0 = Date.now();
-  try {
-    const f = fetchImpl || getUndici().fetch || compatFetch;
-    const res = await f(EXIT_PROBE_URL, { ...(agent ? { dispatcher: agent } : {}), signal: timeoutSignal(timeoutMs) });
-    const text = await res.text();
-    const ip = parseExitIp(text);
-    return { ok: Boolean(ip), ip, ms: Date.now() - t0, ...(ip ? {} : { error: `取证响应认不出出口 IP：${text.slice(0, 80)}` }) };
-  } catch (e) {
-    return { ok: false, ip: "", ms: Date.now() - t0, error: String(e?.message || e) };
-  }
 }

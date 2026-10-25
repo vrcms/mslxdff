@@ -10,7 +10,8 @@ import { genId } from "../opencode-identity.js";
 import { DEFAULT_PROBE_MODEL, probeUpstreamFrom } from "../v6pool/selftest.js";
 import { classifyWarpSignal } from "../warp-pool/verdict.js";
 import { resolveMultiIpConfig, resolveRole } from "./config.js";
-import { candidateNodes, fetchNodes, loadNodeCache, materializeNode, probeExitIp } from "./nodes.js";
+import { candidateNodes, loadNodeCache, materializeNode } from "./nodes.js";
+import { fetchNodes, probeExitIp } from "./nodes-fetch.js";
 import { bringUpTunnel, checkOpenvpn, isRoot, isSupportedPlatform, tearDownTunnel } from "./tunnel.js";
 import { fmtExitIp, fmtNodePick, fmtNodes, fmtProbe } from "./report.js";
 import { loadGroupsJoined } from "../state.js";
@@ -65,7 +66,7 @@ export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFA
       rows = got.rows;
       source = got.source;
     } catch (e) {
-      return { status: "skip", reason: `节点表取不到：${String(e?.message || e)}`, hint: "先在能连 vpngate.net 的网络里跑一次，或设 MSLXDFF_MULTI_IP_SOURCES" };
+      return { status: "skip", reason: `节点表取不到：${String(e?.message || e)}`, hint: "在能连的机器上跑 `mslxdff -multi-ip-pool fetch` 抓一份表带过来，或设 MSLXDFF_MULTI_IP_NODES_FILE / _SOURCES" };
     }
   }
   tick({ phase: "nodes", source, total: rows.length });

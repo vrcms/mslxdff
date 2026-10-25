@@ -8,7 +8,8 @@
 // 拆成独立模块的原因：装配（index）、拨号（本文件）、备选池（standby）三件事各自都要单测，混一起必超 10KB 门。
 import { getUndici } from "../compat.js";
 import { DEFAULT_PROBE_MODEL, probeUpstreamFrom } from "../v6pool/selftest.js";
-import { candidateNodes, fetchNodes, loadNodeCache, materializeNode, probeExitIp } from "./nodes.js";
+import { candidateNodes, loadNodeCache, materializeNode } from "./nodes.js";
+import { fetchNodes, probeExitIp } from "./nodes-fetch.js";
 import { bringUpTunnel, tearDownTunnel } from "./tunnel.js";
 import { AGENT_OPTIONS } from "./dispatch.js";
 import { fmtExitIpFail, fmtHi, fmtNodePick, fmtNodes } from "./report.js";

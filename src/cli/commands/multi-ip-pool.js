@@ -3,7 +3,9 @@
 //
 // 为什么需要这条命令（用户要的"取证"）：换出口到底有没有换来新额度，只有实测能回答。
 // 本命令做 A/B：直连打一条免费层请求取基线 → 逐条 VPN 隧道打**同一条**请求 → 对照判语。
+import { join } from "node:path";
 import { runMultiIpCompare, VERDICT_ZH, MITEST_DEFAULT, MITEST_MAX } from "../../multi-ip-pool/selftest.js";
+import { fetchNodesToFile } from "../../multi-ip-pool/nodes-fetch.js";
 import { resolveMultiIpConfig, resolveRole } from "../../multi-ip-pool/config.js";
 import { checkOpenvpn, isRoot, isSupportedPlatform } from "../../multi-ip-pool/tunnel.js";
 import { loadGroupsJoined } from "../../state.js";
@@ -34,6 +36,7 @@ export async function handleMultiIpPool(args = []) {
   const sub = (args[at].includes("=") ? args[at].split("=")[1] : args[at + 1] || "test").toLowerCase();
   if (["-h", "--help", "help"].includes(sub)) return printUsage();
   if (sub === "status") return await printStatus(args);
+  if (sub === "fetch" || sub === "grab") return await runFetch(args);
   return await runTest(args);
 }
 
@@ -88,6 +91,34 @@ async function runTest(args) {
   process.exit(r.verdict === "multi-ip-works" || r.verdict === "mixed" ? 0 : 1);
 }
 
+/**
+ * `-multi-ip-pool fetch [路径]`：在**能连节点源**的机器上抓一份 VPNGate 表落成文件，scp 到受限网络的组长机，
+ * 那边设 `MSLXDFF_MULTI_IP_NODES_FILE=<路径>` 即可完全跳过取表网络请求（2026-10-25 真机：华为云 ECS 上 vpngate.net 不可达）。
+ */
+async function runFetch(args) {
+  const cfg = resolveMultiIpConfig(process.env);
+  const out = flagValue(args, "--out", "-o") || join(cfg.dir, "vpngate.csv");
+  console.log(`  节点源（按序试）：${cfg.sources.join("\n              ")}`);
+  console.log("");
+  try {
+    const got = await fetchNodesToFile({ sources: cfg.sources, out, timeoutMs: cfg.probeTimeoutMs });
+    const usable = got.rows.filter((r) => r.config).length;
+    console.log(`  ✅ ${got.rows.length} 个节点（${usable} 个配置可解码）已写入：${out}`);
+    console.log(`     来源：${got.source}`);
+    console.log("");
+    console.log("  带到受限网络的机器上：");
+    console.log(`     scp ${out} root@<组长机>:/root/.config/mslxdff/multi-ip-pool/vpngate.csv`);
+    console.log("     export MSLXDFF_MULTI_IP_NODES_FILE=/root/.config/mslxdff/multi-ip-pool/vpngate.csv");
+    console.log("     （之后取表零网络请求；表会旧，免费节点掉得快，建议隔几天重抓一次）");
+    process.exit(0);
+  } catch (e) {
+    console.log(`  ❌ 一个源都没取到：${String(e?.message || e)}`);
+    console.log("     下一步：换网络重试，或 MSLXDFF_MULTI_IP_SOURCES=<你自己能连的镜像/本地路径> 再跑一次");
+    process.exit(1);
+  }
+  return true;
+}
+
 async function printStatus(args) {
   const cfg = resolveMultiIpConfig(process.env);
   const role = resolveRole({ mode: cfg.mode, joined: loadGroupsJoined() });
@@ -104,9 +135,10 @@ async function printStatus(args) {
   console.log(`  权限门     ${root ? "通过（root）" : "不通过（需要 root 才能建 tun 与策略路由）"}`);
   console.log(`  openvpn    ${openvpn.ok ? `可用（${openvpn.version}）` : `不可用（${openvpn.why}）`}`);
   console.log(`  隧道数     ${cfg.count}｜国家 ${cfg.countries.length ? cfg.countries.join("/") : "不限"}｜Score ≥ ${cfg.minScore}｜表号 ${cfg.baseTable}+`);
-  console.log(`  备选池     ${cfg.standby} 条已验通出口待命（每 ${Math.round((cfg.standbyEveryMs || 0) / 60_000)} 分钟重拨一批；429 时立即启用，启用前再打一次 hi 要 200）`);
+  console.log(`  备选池     配 ${cfg.standby} 条（每 ${Math.round((cfg.standbyEveryMs || 0) / 60_000)} 分钟重拨一批；入池标准是 hi 回 200，不是"隧道起来了"）`);
+  console.log(`             实际就绪几条**只有 daemon 知道**（本命令不建池、不拨号）→ 看 mslxdff -log 里的 [multi-ip-pool] 备选池 行`);
   console.log(`  目录       ${cfg.dir}`);
-  console.log(`  节点源     ${cfg.sources.join("，")}`);
+  console.log(`  节点源     ${cfg.nodesFile ? `本地表优先：${cfg.nodesFile}（其后 ${cfg.sources.length - 1} 个网络源）` : cfg.sources.join("，")}`);
   console.log("");
   console.log(`  下一步：mslxdff ${FLAG} test（真机取证：换出口到底有没有换来新额度）`);
   process.exit(0);
@@ -114,7 +146,7 @@ async function printStatus(args) {
 }
 
 function printUsage() {
-  console.log(`用法: mslxdff ${FLAG} [test|status] [--count N] [--model <id>]`);
+  console.log(`用法: mslxdff ${FLAG} [test|status|fetch|help] [--count N] [--model <id>] [--out <路径>]`);
   console.log("");
   console.log("  在多出口池上做 A/B：直连打一条 free 层请求取基线，再逐条 VPN 隧道打同一条，");
   console.log("  对照判语：");
@@ -129,7 +161,8 @@ function printUsage() {
   console.log("    MSLXDFF_MULTI_IP_COUNT=N            并行隧道数（缺省 2）");
   console.log("    MSLXDFF_MULTI_IP_COUNTRY=JP,KR      国家白名单（缺省不限）");
   console.log(`    MSLXDFF_MULTI_IP_MIN_SCORE=N        节点 Score 下限（缺省 1000000）`);
-  console.log("    MSLXDFF_MULTI_IP_SOURCES=url,url    节点表来源（缺省 VPNGate 官方 https+http）");
+  console.log("    MSLXDFF_MULTI_IP_SOURCES=url,url    节点表来源（缺省 VPNGate 官方 https+http，末位挂 aimili 仓库内镜像兜墙）");
+  console.log("    MSLXDFF_MULTI_IP_NODES_FILE=<路径>   本地表文件（排在最前，设了就不打网；配合 -multi-ip-pool fetch 生成）");
   console.log("    MSLXDFF_MULTI_IP_BASE_TABLE=N       策略路由表起始号（缺省 210）");
   console.log("    MSLXDFF_MULTI_IP_SYSCTL=0|1         是否放宽 rp_filter（缺省 1）");
   console.log("    MSLXDFF_MULTI_IP_STANDBY=N          备选出口条数（缺省 5，**上限 5**，0=关）");
