@@ -1,4 +1,4 @@
-// mslxdff -multi-ip-pool [test|status|fetch|help]
+// mslxdff -multi-ip-pool [test|probe|status|fetch|help]
 //   多出口池（VPNGate 免费 OpenVPN 节点当出口）：**组长**专属，只服务 opencode 免费层。
 //
 // 本文件只做「分发 + status + 用法」；test / fetch 两条取证流程在 ./multi-ip-pool-test.js
@@ -6,7 +6,8 @@
 import { resolveMultiIpConfig, resolveRole } from "../../multi-ip-pool/config.js";
 import { checkOpenvpn, isRoot, isSupportedPlatform } from "../../multi-ip-pool/tunnel.js";
 import { loadGroupsJoined } from "../../state.js";
-import { runFetch, runTest } from "./multi-ip-pool-test.js";
+import { runFetch, runProbe } from "./multi-ip-pool-fetch.js";
+import { runTest } from "./multi-ip-pool-test.js";
 
 const FLAG = "-multi-ip-pool";
 
@@ -16,6 +17,7 @@ export async function handleMultiIpPool(args = []) {
   const sub = (args[at].includes("=") ? args[at].split("=")[1] : args[at + 1] || "test").toLowerCase();
   if (["-h", "--help", "help"].includes(sub)) return printUsage();
   if (sub === "status") return await printStatus(args);
+  if (sub === "probe" || sub === "ping") return await runProbe(args);
   if (sub === "fetch" || sub === "grab") return await runFetch(args);
   return await runTest(args);
 }
@@ -43,18 +45,22 @@ async function printStatus(args = []) {
   console.log(`  节点源     ${cfg.nodesFile ? `本地表优先：${cfg.nodesFile}（其后 ${cfg.sources.length - 1} 个网络源）` : cfg.sources.join("，")}`);
   console.log("");
   console.log(`  下一步：mslxdff ${FLAG} test（真机取证：换出口到底有没有换来新额度）`);
+  console.log(`  测网络可达性（不要 root）：mslxdff ${FLAG} probe [--probe N]`);
   process.exit(0);
   return true;
 }
 
 function printUsage() {
-  console.log(`用法: mslxdff ${FLAG} [test|status|fetch|help] [--count N] [--model <id>] [--out <路径>]`);
+  console.log(`用法: mslxdff ${FLAG} [test|probe|status|fetch|help] [--count N] [--probe N] [--force] [--model <id>] [--out <路径>]`);
   console.log("");
   console.log("  test 在多出口池上做 A/B：直连打一条 free 层请求取基线，再逐条 VPN 隧道打同一条，");
   console.log("  对照判语：");
   console.log("    基线 429 + VPN 出口有 200 ⇒ 池有用（换 IP 换到新额度）");
   console.log("    基线 429 + VPN 出口也全 429 ⇒ 换 IP 抬不动（上游不按出口 IP 计额）");
   console.log("  test 每一步都编号打印并整份落盘（结尾给出 transcript 路径），失败即停在原地。");
+  console.log("");
+  console.log("  probe 只回答「这台机能连上表里几个节点」（按簇轮转取样 + 限并发 TCP 预检）：不拨号、不要 root、");
+  console.log("  不碰 openvpn/内核、不看角色门，任何平台都能跑 —— 池值不值得继续用的先行问题。");
   console.log("");
   console.log("  前置：Linux + root + openvpn（tun 设备与策略路由必需）。非 Linux 如实跳过。");
   console.log("");

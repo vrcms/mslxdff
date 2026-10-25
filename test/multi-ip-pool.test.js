@@ -6,12 +6,13 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveMultiIpConfig, resolveRole, devNameFor, tableFor } from "../src/multi-ip-pool/config.js";
-import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
+import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, sampleCandidates, clusterOf, countCandidates, probeTargetOf, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
 import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile } from "../src/multi-ip-pool/nodes-fetch.js";
 import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel } from "../src/multi-ip-pool/tunnel.js";
-import { openvpnErrorLine, openvpnErrorBrief, probeTcp, createTranscript, envSnapshotLines, slotPlanLines, residualHints } from "../src/multi-ip-pool/diagnose.js";
+import { openvpnErrorLine, openvpnErrorBrief, probeTcp, probeBatch, probeSummaryLines, createTranscript, envSnapshotLines, slotPlanLines, residualHints } from "../src/multi-ip-pool/diagnose.js";
 import { createMultiIpDispatcher } from "../src/multi-ip-pool/dispatch.js";
 import { createMultiIpPool } from "../src/multi-ip-pool/index.js";
+import { createDialer } from "../src/multi-ip-pool/dial.js";
 
 const CONF = "client\ndev tun\nproto udp\nremote 203.0.113.9 1194\ncipher AES-128-CBC\n";
 const B64 = Buffer.from(CONF, "utf8").toString("base64");
@@ -476,11 +477,95 @@ test("diagnose: 快照与槽计划读得懂、善后命令给得全", () => {
   assert.ok(plan[0].includes("1.2.3.4:443") && plan[0].includes("proto tcp") && plan[0].includes("设备 mltun0") && plan[0].includes("表 210"));
   assert.ok(residualHints().length >= 3);
 });
+// —— 五次修订：可连性取样（真机第三轮教训：一个机房连不上被误读成「整表不通」）——
+test("nodes: clusterOf 同机房同网段归一簇；sampleCandidates 按簇轮转（不偏袒一家机房）", () => {
+  const rows = [
+    rowOf({ hostName: "public-vpn-198", ip: "219.100.37.178", score: 9_000_000 }),
+    rowOf({ hostName: "public-vpn-201", ip: "219.100.37.212", score: 8_000_000 }),
+    rowOf({ hostName: "public-vpn-229", ip: "219.100.37.217", score: 7_000_000 }),
+    rowOf({ hostName: "vpn-jp-1", ip: "203.0.113.9", score: 6_000_000 }),
+    rowOf({ hostName: "vpn-jp-2", ip: "203.0.113.10", score: 5_000_000 }),
+  ];
+  assert.equal(clusterOf(rows[0]), clusterOf(rows[2]), "同前缀 + 同 /24 ⇒ 同一簇（真机三个候选就是这么抱团的）");
+  assert.notEqual(clusterOf(rows[0]), clusterOf(rows[3]));
+  // 纯 Score 序的前三名全在 public-vpn（一个机房霸榜）；按簇轮转后第 2 条就换了一家
+  assert.deepEqual(candidateNodes({ rows, minScore: 1, scan: 3 }).map((r) => r.hostName), ["public-vpn-198", "public-vpn-201", "public-vpn-229"]);
+  assert.deepEqual(sampleCandidates({ rows, limit: 3 }).map((r) => r.hostName), ["public-vpn-198", "vpn-jp-1", "public-vpn-201"]);
+  assert.equal(sampleCandidates({ rows, limit: 8 }).length, 5, "轮转不丢节点：取满为止");
+  assert.deepEqual(sampleCandidates({ rows, limit: 8, perCluster: 1 }).map((r) => r.hostName), ["public-vpn-198", "vpn-jp-1"]);
+  assert.equal(countCandidates({ rows, minScore: 7_000_000 }), 3);
+  assert.equal(countCandidates({ rows, countries: ["JP"], minScore: 1 }), 5);
+});
 
-test("CLI 接线：两个命令文件必须 import 得动（拆文件后 import 名写错 = 命令直接崩）", async () => {
+test("nodes: probeTargetOf 只读解出 host/port/proto；解不开的返 null（不落文件、不猜）", () => {
+  const target = probeTargetOf(rowOf());
+  assert.deepEqual({ host: target.host, port: target.port, proto: target.proto }, { host: "203.0.113.9", port: 1194, proto: "udp" });
+  assert.equal(probeTargetOf({ config: "bm90LWEtY29uZmln" }), null);
+});
+
+test("diagnose: probeBatch 限并发、与输入顺序一一对应、注入探针可判生死", async () => {
+  let running = 0;
+  let peak = 0;
+  const nodes = [1, 2, 3, 4, 5].map((i) => ({ hostName: `n${i}`, host: `10.0.0.${i}`, port: 443, proto: "tcp" }));
+  const probe = async ({ host }) => {
+    running += 1;
+    peak = Math.max(peak, running);
+    await new Promise((r) => setImmediate(r));
+    running -= 1;
+    return host.endsWith("2") ? { ok: false, ms: 1, error: "连接超时" } : { ok: true, ms: 3 };
+  };
+  const res = await probeBatch({ nodes, concurrency: 2, probe });
+  assert.equal(res.length, 5);
+  assert.deepEqual(res.map((r) => r.node.hostName), ["n1", "n2", "n3", "n4", "n5"], "结果必须与输入顺序一一对应（否则判语对不上节点）");
+  assert.ok(peak <= 2, `并发必须被夹住，实测峰值 ${peak}`);
+  assert.equal(res[1].ok, false);
+  assert.match(res[1].error, /超时/);
+});
+
+test("diagnose: probeSummaryLines 判死口径分开（UDP 不算不通）+ 簇分布一眼看得出", () => {
+  const mk = (hostName, ip, proto, ok) => ({ node: { hostName, ip, proto, score: 9_000_000 }, ok, ms: 1, error: ok ? "" : "连接超时" });
+  const lines = probeSummaryLines({
+    minScore: 1_000_000,
+    results: [mk("public-vpn-1", "219.100.37.1", "tcp", false), mk("public-vpn-2", "219.100.37.2", "tcp", false), mk("vpn-udp", "203.0.113.9", "udp", true)],
+  });
+  assert.match(lines[0], /取样 3 个（Score 达下限 3 个）→ TCP 通 0｜不通 2/);
+  assert.match(lines[0], /另有 1 条 UDP 节点：无握手，不计入判死/);
+  assert.match(lines[1], /public-vpn\|219\.100\.37 0\/2 通/, "哪一片不通必须一眼看得出");
+  assert.ok(lines.some((l) => l.includes("TCP 探不出结论")));
+});
+
+test("dial: 候选择序按簇轮转（真机教训：前三名同一机房 ⇒ 那一片连不上就整池起不来）", async () => {
+  const rows = [
+    rowOf({ hostName: "public-vpn-198", ip: "219.100.37.178", score: 9_000_000 }),
+    rowOf({ hostName: "public-vpn-201", ip: "219.100.37.212", score: 8_000_000 }),
+    rowOf({ hostName: "public-vpn-229", ip: "219.100.37.217", score: 7_000_000 }),
+    rowOf({ hostName: "vpn-jp-1", ip: "203.0.113.9", score: 6_000_000 }),
+    rowOf({ hostName: "vpn-jp-2", ip: "203.0.113.10", score: 5_000_000 }),
+  ];
+  const tried = [];
+  const d = createDialer({
+    cfg: resolveMultiIpConfig({ MSLXDFF_MULTI_IP_COUNT: "3" }, { logDirFn: () => "C:/logs" }),
+    log: (m) => { const hit = /尝试 ([\w.-]+)（/.exec(m); if (hit) tried.push(hit[1]); },
+    deps: {
+      loadNodeCache: () => ({ rows, source: "test" }),
+      materializeNode: ({ row }) => ({ ...row, conf: "C:/logs/n.conf", host: row.ip, port: 1194, proto: "udp" }),
+      bringUpTunnel: async ({ slotIndex, node }) => ({ dev: `mltun${slotIndex}`, table: 210 + slotIndex, priority: 20_000, tunIp: `10.8.0.${slotIndex + 2}`, pid: 1, node, stop: () => {}, tail: () => "" }),
+      tearDownTunnel: async () => {},
+      probeExitIp: async () => ({ ok: true, ip: "198.51.100.1", ms: 1 }),
+      probeHi: async () => ({ ok: true, status: 200, kind: "none", ms: 1 }),
+      agentFactory: (addr) => fakeAgent(addr),
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => "{}" }),
+    },
+  });
+  await d.ensureCandidates();
+  for (let i = 0; i < 3; i++) await d.openSlot(i);
+  assert.deepEqual(tried, ["public-vpn-198", "vpn-jp-1", "public-vpn-201"], "第 2 条必须换一家机房，而不是同机房的第二名");
+});
+
+test("CLI 接线：三个命令文件必须 import 得动（拆文件后 import 名写错 = 命令直接崩）", async () => {
   const m = await import("../src/cli/commands/multi-ip-pool.js");
+  const t = await import("../src/cli/commands/multi-ip-pool-test.js");
+  const n = await import("../src/cli/commands/multi-ip-pool-fetch.js");
   assert.equal(typeof m.handleMultiIpPool, "function");
-  const f = await import("../src/cli/commands/multi-ip-pool-test.js");
-  assert.equal(typeof f.runTest, "function", "test 流程");
-  assert.equal(typeof f.runFetch, "function", "fetch 流程");
+  assert.deepEqual({ test: typeof t.runTest, fetch: typeof n.runFetch, probe: typeof n.runProbe, survey: typeof n.surveyCandidates }, { test: "function", fetch: "function", probe: "function", survey: "function" });
 });

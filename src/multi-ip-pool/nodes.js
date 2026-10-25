@@ -105,6 +105,60 @@ export function candidateNodes({ rows = [], countries = [], minScore = 0, scan =
     .slice(0, scan);
 }
 
+/**
+ * 节点「簇」：同一批免费节点往往同机房同网段（hostName 同前缀 + 同 /24），**一条连不上时整片都连不上**。
+ * 真机 2026-10-25 实证：按 Score 取 3 个候选全落在 `public-vpn-*` / `219.100.37.x`，
+ * 于是「一个机房的墙」被误读成「全部节点不通」。取样与候选排序都必须按簇摊开。
+ */
+export function clusterOf(row) {
+  const host = String(row?.hostName || "").replace(/[-.\d]+$/, "");
+  const seg = String(row?.ip || "").split(".").slice(0, 3).join(".");
+  return `${host}|${seg}`;
+}
+
+/** 达标候选条数（只数不取：给「取样里有几个是达标的」这类结论用）。 */
+export function countCandidates({ rows = [], countries = [], minScore = 0 } = {}) {
+  return rows.filter((r) => r.config && r.score >= minScore && matchCountry(r, countries)).length;
+}
+
+/**
+ * 取样候选：Score 降序，但**按簇轮转**（先每个机房各出一条，再轮到各家第二条…）。
+ * 为什么不沿用纯 Score 序：免费表前列常被同一个机房霸榜，纯排序取样＝拿一个机房的运气赌整台机器能不能用。
+ * 轮转不丢节点——簇内仍是 Score 降序，只是把同簇的连续几条摊到后面几轮去。
+ * @param {{ rows?: object[], countries?: string[], minScore?: number, limit?: number,
+ *           perCluster?: number, skip?: Set<string> }} opts perCluster=0 表示不设每簇上限
+ */
+export function sampleCandidates({ rows = [], countries = [], minScore = 0, limit = 12, perCluster = 0, skip = new Set() } = {}) {
+  const pool = candidateNodes({ rows, countries, minScore, scan: Math.max(1, rows.length), skip });
+  const groups = new Map();
+  for (const r of pool) {
+    const key = clusterOf(r);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const out = [];
+  for (let round = 0; out.length < limit && groups.size; round++) {
+    let added = 0;
+    for (const list of groups.values()) {
+      if (out.length >= limit) break;
+      if (round >= list.length || (perCluster > 0 && round >= perCluster)) continue;
+      out.push(list[round]);
+      added += 1;
+    }
+    if (!added) break; // 各簇都取空了
+  }
+  return out;
+}
+
+/** 只读地把一行解成「探什么/拨什么」（不落文件）：TCP 预检与选槽共用同一份解析。 */
+export function probeTargetOf(row) {
+  const conf = decodeConfig(row?.config);
+  if (!conf) return null;
+  const remote = parseRemote(conf);
+  if (!remote) return null;
+  return { decoded: conf, host: remote.host, port: remote.port, proto: (/^\s*proto\s+(\S+)/m.exec(conf) || [])[1] || "" };
+}
+
 /** 节点表缓存（TTL 内直接用，省一次外网请求；VPNGate 免费节点掉得快，默认 30min）。 */
 export function loadNodeCache({ dir, ttlMs = 0, now = () => Date.now() } = {}) {
   try {
@@ -133,15 +187,15 @@ export function writeNodeConf({ dir, row, name = "" } = {}) {
   return { path: writePrivate(join(dir, `node-${alias}.conf`), row.config), hostName: row.hostName };
 }
 
-/** writeNodeConf 落的是**解码后**的配置；这里显式解码一次，把「解不开」的节点挡在门外（绝不猜）。 */
+/** writeNodeConf 落的是**解码后**的配置；这里复用 `probeTargetOf` 解码：
+ * 解不开或缺 remote 的节点一律返 null（绝不猜），绝不把坏配置交给 openvpn。 */
 export function materializeNode({ dir, row, name = "" } = {}) {
-  const conf = decodeConfig(row.config);
-  if (!conf) return null;
-  const remote = parseRemote(conf);
-  if (!remote) return null;
-  const written = writeNodeConf({ dir, row: { ...row, config: conf }, name });
-  // proto 一并带出：预检与判语要分清「TCP 节点连不上」与「UDP 节点无握手可探」两回事
-  return { ...row, conf: written.path, host: remote.host, port: remote.port, proto: (/^\s*proto\s+(\S+)/m.exec(conf) || [])[1] || "" };
+  const target = probeTargetOf(row);
+  if (!target) return null;
+  // 落盘的是解码后的配置文本；别名照旧按 hostName/ip 生成（与旧行为一致）
+  const written = writeNodeConf({ dir, row: { ...row, config: target.decoded }, name });
+  // host/port/proto 与 TCP 预检同源（都出自 `probeTargetOf`）：预检探的与这里拨的必须是同一份解释
+  return { ...row, conf: written.path, host: target.host, port: target.port, proto: target.proto };
 }
 
 /** VPNGate 公共账号（vpn/vpn）；落在 0600 文件里，绝不入库。 */

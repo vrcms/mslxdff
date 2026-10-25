@@ -7,6 +7,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import net from "node:net";
 import { devNameFor, tableFor } from "./config.js";
+import { clusterOf } from "./nodes.js";
 
 /** 值得单独成行的报错关键词（openvpn 的用法/握手/认证/网络失败都在这里）。 */
 const ERRORISH = /options error|unrecognized|missing or extra|fatal|error:|can ?not|cannot|denied|failed|refused|reset|auth failed|tls|write udp|bind|permission/i;
@@ -54,6 +55,52 @@ export function probeTcp({ host, port, timeoutMs = 6_000, connectFn } = {}) {
     s.once("connect", () => { clearTimeout(timer); s.destroy(); done(true, {}); });
     s.once("error", (e) => { clearTimeout(timer); done(false, { error: String(e?.code || e?.message || e) }); });
   });
+}
+
+/**
+ * 批量 TCP 预检：**限并发**探一组节点，按输入顺序返回结果（`{ node, ok, ms, error }`）。
+ * 为什么必须成批：真机实证「同一机房整片连不上」远多于「个别节点不通」——只探 3 条会给出
+ * 一句误导的「全部不通」，探一批才看得出**是哪一片不通、还有哪片是通的**。
+ */
+export async function probeBatch({ nodes = [], timeoutMs = 6_000, concurrency = 6, probe = probeTcp } = {}) {
+  const out = new Array(nodes.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= nodes.length) return;
+      const node = nodes[i];
+      out[i] = { node, ...(await probe({ host: node?.host, port: node?.port, timeoutMs })) };
+    }
+  };
+  const width = Math.max(1, Math.min(Math.max(1, concurrency), nodes.length || 1));
+  await Promise.all(Array.from({ length: width }, worker));
+  return out;
+}
+
+/**
+ * 取样小结：一句「探了几条、通几条」+ **簇分布**（哪个机房整片不通，一眼看出）。
+ * 判死口径必须分开写：`proto udp` 的节点无握手，TCP 探不通**不能**当成「这条隧道必挂」。
+ */
+export function probeSummaryLines({ results = [], minScore = 0, clustersShown = 6 } = {}) {
+  const udp = results.filter((r) => String(r.node?.proto || "").toLowerCase() === "udp");
+  const tcp = results.filter((r) => !udp.includes(r));
+  const tcpLive = tcp.filter((r) => r.ok);
+  const strict = results.filter((r) => Number(r.node?.score || 0) >= minScore).length;
+  const groups = new Map();
+  for (const r of tcp) {
+    const key = clusterOf(r.node);
+    const cur = groups.get(key) || { total: 0, ok: 0 };
+    cur.total += 1;
+    cur.ok += r.ok ? 1 : 0;
+    groups.set(key, cur);
+  }
+  const tail = udp.length ? `（另有 ${udp.length} 条 UDP 节点：无握手，不计入判死）` : "";
+  const lines = [`取样 ${results.length} 个（Score 达下限 ${strict} 个）→ TCP 通 ${tcpLive.length}｜不通 ${tcp.length - tcpLive.length}${tail}`];
+  const shown = [...groups.entries()].slice(0, clustersShown).map(([key, v]) => `${key} ${v.ok}/${v.total} 通`);
+  if (shown.length) lines.push(`簇分布（机房/IP 段）：${shown.join("｜")}${groups.size > clustersShown ? `｜…共 ${groups.size} 簇` : ""}`);
+  if (!tcpLive.length && udp.some((r) => r.ok)) lines.push("探通的都是 UDP 节点 ⇒ TCP 探不出结论，下面仍按取样顺序真拨");
+  return lines;
 }
 
 /**

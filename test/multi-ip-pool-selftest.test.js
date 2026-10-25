@@ -101,3 +101,17 @@ test("取证必须把 auth 文件路径交给起槽函数（真机踩过：空�
   await runMultiIpCompare({ count: 1, env: {}, deps: d });
   assert.equal(seen, "/tmp/mi-auth.txt", "authFile 为空时 openvpn 只会回一句「Use --help」，这条锁死接线");
 });
+
+test("slots 注入：③ 探通的节点直接进 ④，两边不再各挑一次（否则预检白做）", async () => {
+  const pickedRows = [
+    { hostName: "picked-1", ip: "203.0.113.9", score: 1, ping: 1, countryShort: "JP", config: B64 },
+    { hostName: "picked-2", ip: "203.0.113.10", score: 2, ping: 1, countryShort: "JP", config: B64 },
+  ];
+  const seen = [];
+  const d = deps({ baseline: quotaless, fallback: { ok: true, status: 200, kind: "none" } });
+  d.materializeNode = ({ row }) => { seen.push(row.hostName); return { ...row, conf: "C:/logs/n.conf", host: row.ip, port: 1194 }; };
+  const r = await runMultiIpCompare({ count: 3, env: {}, deps: d, slots: pickedRows });
+  assert.deepEqual(seen, ["picked-1", "picked-2"], "拨的必须就是传进来的 slots（预检探通的那批）");
+  assert.equal(r.requested, 2, "requested 必须反映真拨的条数，而不是 count");
+  assert.equal(r.okCount, 2);
+});

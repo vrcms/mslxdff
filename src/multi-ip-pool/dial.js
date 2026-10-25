@@ -8,7 +8,7 @@
 // 拆成独立模块的原因：装配（index）、拨号（本文件）、备选池（standby）三件事各自都要单测，混一起必超 10KB 门。
 import { getUndici } from "../compat.js";
 import { DEFAULT_PROBE_MODEL, probeUpstreamFrom } from "../v6pool/selftest.js";
-import { candidateNodes, loadNodeCache, materializeNode } from "./nodes.js";
+import { loadNodeCache, materializeNode, sampleCandidates } from "./nodes.js";
 import { fetchNodes, probeExitIp } from "./nodes-fetch.js";
 import { bringUpTunnel, tearDownTunnel } from "./tunnel.js";
 import { AGENT_OPTIONS } from "./dispatch.js";
@@ -74,7 +74,7 @@ export function createDialer({ cfg, baseUrl = "https://opencode.ai", log = () =>
     return { ok: Boolean(r.ok), status: Number(r.status) || 0, kind: r.kind || "", ms: Number(r.ms) || 0, ip, error: r.error || "" };
   }
 
-  /** 取节点表 → 候选队列（按 Score 降序，剔除已用过的）；`force` = 绕过缓存重取（每小时刷新备选池用）。 */
+  /** 取节点表 → 候选队列（Score 降序 + **按簇轮转**，剔除已用过的）；`force` = 绕过缓存重取（每小时刷新备选池用）。 */
   async function ensureCandidates({ force = false } = {}) {
     if (!force && pending.length) return pending.length;
     let rows = [];
@@ -90,7 +90,9 @@ export function createDialer({ cfg, baseUrl = "https://opencode.ai", log = () =>
       rows = got.rows;
       source = got.source;
     }
-    pending = candidateNodes({ rows, countries: cfg.countries, minScore: cfg.minScore, skip: used, scan: cfg.scan * (cfg.count + cfg.standby + 1) });
+    // 按簇轮转（见 nodes.js sampleCandidates）：免费表前列常被同一个机房霸榜，纯 Score 序会让「那一片连不上」
+    // 变成「池永远起不来」（真机 2026-10-25：三个候选同属 219.100.37.x）。轮转不丢节点，只是把各机房摊开。
+    pending = sampleCandidates({ rows, countries: cfg.countries, minScore: cfg.minScore, skip: used, limit: cfg.scan * (cfg.count + cfg.standby + 1) });
     log(fmtNodes({ source, total: rows.length, countries: cfg.countries, minScore: cfg.minScore }));
     return pending.length;
   }

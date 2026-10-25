@@ -115,7 +115,7 @@
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
 | IPv6 出口对照 | `-v6-pool [test] [--count N] [--model <id>]` | **Linux VPS** 专用：直连（IPv4）打一条 free 层请求取基线，再从 v6 段随机采 N 个源地址各打同一条（只换源地址）→ **基线 429 + v6 有 200 ⇒ 换 IP 能换到新额度**；v6 也 429 ⇒ 换 IP 抬不动。自造 `/128` 用完即撤；非 Linux 如实跳过 |
-| 多出口池取证 | `-multi-ip-pool [test\|status\|fetch] [--count N] [--model <id>]` | **只有组长 + 只有 Linux + root + openvpn**（ADR-0072）：`test` 六步流水账（环境快照→节点表→TCP 预检→基线与逐槽隧道→判语→善后），每步编号带耗时并整份落盘（贴一个文件即可定位）。直连基线 vs 逐条 VPNGate 隧道打同一条 free 层请求 → **有 200 ⇒ 换出口能续额度**；可用判据＝打 hi 要 200；每小时预拨≤5 条已验通备选出口，429 立即启用。墙内取不到表就 `fetch` 抓一份带过去 + `MSLXDFF_MULTI_IP_NODES_FILE`。`MSLXDFF_MULTI_IP_POOL=0` 关 |
+| 多出口池取证 | `-multi-ip-pool [test\|probe\|status\|fetch] [--count N] [--probe N] [--force] [--model <id>]` | **test 要 只有组长 + 只有 Linux + root + openvpn**（ADR-0072）：`test` 六步流水账（环境快照→节点表→**按簇轮转取样 + 限并发 TCP 预检**→基线与逐槽隧道→判语→善后），每步编号带耗时并整份落盘；**只拨探通的**、一条 TCP 都不通就停（`--force` 强拨留证据）。`probe` **只测可达性：不拨号、不要 root、不要 openvpn、任何平台可跑**（先回答「这台机能连上几个节点」）。直连基线 vs 逐条 VPNGate 隧道打同一条 free 层请求 → **有 200 ⇒ 换出口能续额度**；可用判据＝打 hi 要 200；候选与换槽按**机房簇轮转**；每小时预拨≤5 条已验通备选出口，429 立即启用。墙内取不到表就 `fetch` 抓一份带过去 + `MSLXDFF_MULTI_IP_NODES_FILE`。`MSLXDFF_MULTI_IP_POOL=0` 关 |
 | 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
 | 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启 |
 | 自启状态 | `-autostart status` / `--autostart status` | 查看自启状态 |

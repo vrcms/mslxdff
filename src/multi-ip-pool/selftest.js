@@ -27,9 +27,9 @@ export const MITEST_DEFAULT = 3;
  *           onProgress?: (ev: object) => void,
  *           deps?: { joined?, platform?, supported?, isRoot?, checkOpenvpn?, loadNodeCache?, fetchNodes?,
  *                    materializeNode?, bringUpTunnel?, tearDownTunnel?, agentFactory?, probeExitIp?,
- *                    probeUpstream?, fetchImpl?, session?, log? } }} opts
+ *                    probeUpstream?, fetchImpl?, session?, log? }, slots?: object[] }} opts
  */
-export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFAULT, model = DEFAULT_PROBE_MODEL, baseUrl = "https://opencode.ai", onProgress, deps = {} } = {}) {
+export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFAULT, model = DEFAULT_PROBE_MODEL, baseUrl = "https://opencode.ai", onProgress, deps = {}, slots = null } = {}) {
   const cfg = resolveMultiIpConfig(env);
   const tick = (ev) => { try { onProgress?.(ev); } catch { /* 渲染出错不打断测试 */ } };
   const log = deps.log || (() => {});
@@ -76,8 +76,10 @@ export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFA
   tick({ phase: "baseline-start", model });
   const baseline = await probe({ addr: "", model, baseUrl, agentFactory, fetchImpl: deps.fetchImpl, session });
   tick({ phase: "baseline-done", ...baseline });
+  // 候选：调用方给了 `slots` 就用它——CLI 侧已经「按簇取样 + TCP 预检」过，拨的必须就是探通的那些；
+  // 没给才自己按 Score 取（单测与旧路径）。两边各挑一次会让「探的」与「拨的」不是同一批，预检就白做了。
 
-  const picked = candidateNodes({ rows, countries: cfg.countries, minScore: cfg.minScore, scan: Math.max(1, Math.min(MITEST_MAX, Number(count) || MITEST_DEFAULT)) });
+  const picked = (Array.isArray(slots) && slots.length) ? slots.slice(0, MITEST_MAX) : candidateNodes({ rows, countries: cfg.countries, minScore: cfg.minScore, scan: Math.max(1, Math.min(MITEST_MAX, Number(count) || MITEST_DEFAULT)) });
   if (!picked.length) return { status: "skip", reason: "没有满足条件的候选节点（国家/Score 过滤后为空）", hint: "放宽 MSLXDFF_MULTI_IP_MIN_SCORE 或去掉 MSLXDFF_MULTI_IP_COUNTRY" };
   // auth 文件必须先落到磁盘再把路径交给 openvpn。取证路径以前把 `deps.authFile`（undefined）直接传下去
   // ⇒ `--auth-user-pass` 拿到空参数 ⇒ openvpn 判「选项缺参数」，只留一句「Use --help」——2026-10-25 真机三条槽全挂在这。
