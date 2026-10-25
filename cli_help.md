@@ -109,9 +109,6 @@
 | `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
-| `mslxdff -v6-pool [test] [--count N] [--model <id>]` | `--v6-pool` | IPv6 出口**额度对照**测试（**Linux VPS**）：先直连（IPv4/系统默认出口）打一条 free 层请求取基线，再从 v6 段随机采 N 个源地址各打**同一条**（同 UA/模型/stream/五核心工具，只换源地址），对照 IPv6 出口还有没有额度——**基线 429 + v6 有 200 ⇒ 池有用**（换 IP 换到新额度）；**v6 也 429 ⇒ 换 IP 抬不动**（上游不按出口 IP 计额 / 段没真路由过来）。判语复用生产同源的 `warp-pool/verdict.js classifyWarpSignal`；自造 `/128` 用完即撤（bind 模式不碰网卡）；非 Linux 如实跳过并给下一步。相关 env 同 daemon 建池：`MSLXDFF_V6_PREFIX/IFACE/CLAIM/MIN_HOST_BITS` | 否（只读+可逆） | 立即生效 |
-| `mslxdff -multi-ip-pool [test\|probe\|status\|fetch] [--count N] [--probe N] [--force] [--model <id>] [--out 路径]` | `--multi-ip-pool` | 多出口池（VPNGate 免费 OpenVPN 节点当出口，**只有组长启用**，ADR-0072）：`test` 是六步流水账（① 环境快照含「缺 auth.txt 点名」② 节点表与逐源死因 ③ **按簇轮转取样 + 限并发 TCP 预检**（缺省取样 12 条/并发 6）——**只拨探通的**，一条 TCP 都不通就当场停并给下一步（`--force` 强拨留证据）④ 基线与逐槽起隧道，**openvpn 实际命令行 argv 进日志** ⑤ 判语 ⑥ 善后与残留自查），每行 `[步骤号 +秒]` 并整份落盘，结尾给 transcript 路径；判语 **multi-ip-works** / **also-limited** / **unreachable** / mixed。`probe` 只回答「**这台机能连上表里几个节点**」（按簇取样 + 逐条 `host:port` 判语 + 簇分布 + 结论）：**不拨号、不要 root、不要 openvpn、不碰内核、不看角色门**，任何平台都能跑 —— 池值不值得继续的先行问题。`status` 只读五道门 + 备选池**配置**（实际就绪条数只由 daemon 记账）；`fetch` 在能连的机器上抓一份表落盘，scp 进墙内后配 `MSLXDFF_MULTI_IP_NODES_FILE` 零网络取表（真机：华为云 ECS 五道门全过但 vpngate.net 不可达）。可用性判据＝**打一个 hi 到 opencode.ai 要它 200**（与生产同源 `dial.js`；候选与换槽按**机房簇轮转**，不被一个机房卡死）；**每小时预拨不多于 5 条已验通的备选出口**，429 立即启用、不现场拨号（`MSLXDFF_MULTI_IP_STANDBY=0` 关）。**前置：Linux + root + openvpn**（`probe` 例外：三者都不要），非 Linux 如实跳过并给下一步。相关 env：`MSLXDFF_MULTI_IP_POOL/MODE/COUNT/STANDBY/STANDBY_EVERY_MS/COUNTRY/MIN_SCORE/SOURCES/NODES_FILE/BASE_TABLE/SYSCTL/PROBE_MODEL` | 是（daemon 缺省建池：起 openvpn 隧道 + tun 设备 + 策略路由；`MSLXDFF_MULTI_IP_POOL=0` 关） | 立即生效 |
-| `mslxdff -multi-ip-pool`（取表源与表龄追加，2026-10-25） | — | 取表源**多级回退**：官方 https/http → **GitHub Pages 活表**（本机复测：28 分钟前生成 / 95 节点）→ 仓库内死快照兜底（2026-08-26 手工提交，复测 60 天前；上一行里「仓库内镜像每 15 分钟刷新」**作废**），都不通再 `fetch` 自带表；取到表读同目录 `vpngate.meta.json` 报**表龄**，超 `MSLXDFF_MULTI_IP_MAX_TABLE_AGE_MS`（缺省 24h）打 ⚠ 并给「换源 / 自带表」两条出路（旧表症状与被墙一模一样），**不阻断取表**；无 meta 的源不猜不报 | 否（只读；阈值 env 可逆） | 立即生效 |
 | `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；`workbuddy/` 模型不在目录 → 走上游原生字段兜底（上下文/读图/推理默认档），其余未收录模型仅写名称不影响使用；旧格式条目自动升级注入（缺 variants 的也补）） | 是（`opencode.json`） | 热重载 |
 | `mslxdff -creategroup <name>` | `--creategroup`, `-group create <name>` | 在本节点创建群组（组名即密码，本节点为 leader） | 是（`groups`+`groupsJoined`） | 否 |
 | `mslxdff -addtogroup [<host> [<name>]] [--broadband]` | `--addtogroup` | 以成员身份加入远端 leader 的群组；`--broadband` 为宽带中继模式（不占端口，只出站）；**省略参数进手机宽带接入向导**（问组长地址+组名，自动起服务并回报出口 IP） | 是（`groupsJoined`） | 否 |
@@ -149,7 +146,7 @@
 - **作用**：显式以后台 daemon 启动。同样 **只升不降**：先 `stopDaemonIfOutdated()`（仅 `VERSION > runningVersion` 才停旧），若已在跑更高版本则 `keeping` 并复用，不另起降级。`spawn detached` 后等待健康检查。
 - **环境**：子进程带 `MSLXDFF_DAEMON=1` 标记；父进程等待后打印 `daemon started (pid XXX)`、`log`、`pid`。
 - **与其他参数混用**：`startDaemon` 会过滤掉 `-d/--daemon` 再透传其余参数（如 `-port 8989`）。
-- **启动自愈（2026-10-17）**：daemon 起来时先扫 `/proc`，若内存里还有**比它旧**的 mslxdff daemon（不在 `daemon.pid` 里、`-restart` 结构性碰不到的那种）就先 SIGTERM → 5s → SIGKILL 请出去，避免两个 daemon 互抢 warp-pool 端口（日志：`[daemon] 内存里还有别的 mslxdff daemon：pid …（已运行 6h12m，比本进程旧）—— 先请它退出`；清完 `✓ 已请走 N 个旧 daemon`）；与本次启动**几乎同时**的不动，由 8989 的 bind 决定谁活（防两边互杀）。
+- **启动自愈（2026-10-17）**：daemon 起来时先扫 `/proc`，若内存里还有**比它旧**的 mslxdff daemon（不在 `daemon.pid` 里、`-restart` 结构性碰不到的那种）就先 SIGTERM → 5s → SIGKILL 请出去，避免两个 daemon 互抢本机长驻端口（当年是 warp-pool 的 wireproxy，该功能已随 ADR-0073 移除）（日志：`[daemon] 内存里还有别的 mslxdff daemon：pid …（已运行 6h12m，比本进程旧）—— 先请它退出`；清完 `✓ 已请走 N 个旧 daemon`）；与本次启动**几乎同时**的不动，由 8989 的 bind 决定谁活（防两边互杀）。
 - **示例**：
   ```bash
   mslxdff -d
@@ -183,7 +180,7 @@
 ### `-restart` / `--restart`
 
 - **语法**：`mslxdff -restart`
-- **作用**：重启 daemon（`stopDaemon()` + **等旧进程真死**（`waitPidGone`，超时补 SIGKILL）→ **清掉不在 `daemon.pid` 里的 daemon**（`reapGhostDaemons`：`-restart` 的结构性盲区，真机曾因此与新 daemon 互抢 warp-pool 端口一整天）→ `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`；**若仍有旧 daemon 在世**（`/health` 可能由它应答）改打 `⚠ 仍有 N 个旧 daemon 在跑…请 kill 掉`，不再谎报 restarted。
+- **作用**：重启 daemon（`stopDaemon()` + **等旧进程真死**（`waitPidGone`，超时补 SIGKILL）→ **清掉不在 `daemon.pid` 里的 daemon**（`reapGhostDaemons`：`-restart` 的结构性盲区，真机曾因此与新 daemon 互抢本机长驻端口一整天）→ `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`；**若仍有旧 daemon 在世**（`/health` 可能由它应答）改打 `⚠ 仍有 N 个旧 daemon 在跑…请 kill 掉`，不再谎报 restarted。
 - **示例**：`mslxdff -restart`
 
 ### `-uninstall` / `--uninstall`

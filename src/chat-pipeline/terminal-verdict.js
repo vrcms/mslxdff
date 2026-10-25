@@ -21,10 +21,10 @@ const FREE_TIER_PATTERNS = [
   /FreeTierError/i,
   // ⚠ `FreeUsageLimitError` 曾列在此（BUG-8 于 2026-10-16 加入）**现已移除**（2026-10-17 纠正）：
   // 它是**限额/限流**判决，不是身份闸门。三条独立实证都证明「换出口/换组员就恢复」⇒ 属可接力：
-  //   ① 本仓自测记录（warp-pool/verdict.js:9-10）：同一身份连发 3 次 429 FreeUsageLimitError，
+  //   ① 本仓自测记录（原 warp-pool/verdict.js:9-10，该模块已随 ADR-0073 移除）：同一身份连发 3 次 429 FreeUsageLimitError，
   //      **身份一换、同一个请求立刻 200**（限额按出口 IP 计）；
-  //   ② warp-pool 的决策表（verdict.js:62）对 429 FreeUsage 明写「强制换出口、跳过冷却」；
-  //   ③ v6 池（v6pool-claim-rotate.test.js:140）同样据它换源地址。
+  //   ② 原 warp-pool 的决策表（verdict.js:62）对 429 FreeUsage 明写「强制换出口、跳过冷却」（该模块已随 ADR-0073 移除）；
+  //   ③ 原 v6 池（v6pool-claim-rotate.test.js:140）同样据它换源地址（已随 ADR-0073 移除）。
   // 更根本：ADR-0058 §2 本就把「401/402/**429**/5xx」明列为**可恢复、接力照常**；本文件头 :9-11 也是
   // 同一口径。BUG-8 把 429 的具名文案判成终局，偏离了本模块自己写下的边界 —— 现网代价是
   // 组员额度还在、仍被 `peersSkipped:true` 一刀跳过（2026-10-18 events.log 满屏实证）。
@@ -62,7 +62,7 @@ const TRANSIENT_MARKERS = [
   // 限额/限流具名判决 ⇒ **可恢复**（换出口换组员就恢复，见 FREE_TIER_PATTERNS 上方三条实证）。
   // 显式列出而非指望 message 里的 "rate limit" 字样：上游改文案时这层不能跟着失明
   // （`FreeUsageLimitError` 的类名比它的 message 稳定得多）。
-  // GoUsageLimitError 与它同族（warp-pool/verdict.js:25 把两者并列），同样按出口计、同样可换。
+  // GoUsageLimitError 与它同族（原 warp-pool/verdict.js:25 把两者并列），同族同判。
   /FreeUsageLimitError|GoUsageLimitError/i,
   /security_reject/i,
   /安全校验拒绝/,

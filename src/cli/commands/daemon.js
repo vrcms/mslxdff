@@ -56,7 +56,7 @@ export async function handleRestart(args, VERSION) {
     console.log("daemon not running — starting...");
   }
   // 结构性盲区收口：不在 daemon.pid 里的 daemon 永远杀不到（真机：Oct16 起的旧 daemon 活了一整天，
-  // 与新版互杀 warp-pool 端口；两边日志格式交错才暴露）。起新的之前先清干净。
+  // 与新版互抢本机端口；两边日志格式交错才暴露）。起新的之前先清干净。
   const ghosts = await reapGhostDaemons({ log: (m) => console.log(m) });
   if (ghosts.length) console.log(`已清掉 ${ghosts.length} 个不在册的 daemon（pid ${ghosts.map((g) => g.pid).join(", ")}）`);
   const port = effectivePort(args);

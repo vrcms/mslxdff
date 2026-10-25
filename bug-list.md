@@ -24,5 +24,5 @@
 **回归测试**：`test/curl-fetch.test.js` 新增 2 例（100 段跳过 × parse/ready），9/9 通过。
 
 **顺带发现（未修）**：`daemon_err.log` 有历史 `EBUSY: daemon.log`（同机双 daemon 抢日志 fd 的
-启动失败记录，当前 PID 29344 正常在跑，与本次故障无关）；`src/warp-pool/wireproxy.js` 的
-两处 `spawn` 在 win32 有理论弹窗风险（当前 Windows 无预编译二进制、池安静跳过，未触发）。
+启动失败记录，当前 PID 29344 正常在跑，与本次故障无关）；原指向 `src/warp-pool/wireproxy.js` 的
+两处 `spawn` 在 win32 的弹窗风险——该模块**已于 2026-10-25 随三套出口池整体移除（ADR-0073），此条作废**。

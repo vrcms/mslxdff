@@ -180,7 +180,7 @@ export async function waitPidGone(pid, { timeoutMs = 5000, killWaitMs = 2000, st
 
 /**
  * 清「不在 daemon.pid 里的」幽灵 daemon —— `-restart` 的结构性盲区
- *（真机事故：旧 daemon 活了一整天，与新版互杀 warp-pool 端口，两边日志格式交错才暴露）。
+ *（真机事故：旧 daemon 活了一整天，与新版互抢本机端口，两边日志格式交错才暴露）。
  * 先 SIGTERM 全清 → 等 5s → 仍活着的 SIGKILL。返回**确实清掉**的清单（供调用方诚实汇报）。
  */
 export async function reapGhostDaemons({ self = process.pid, list = () => findDaemons({ self }), kill = process.kill, log = () => {}, isAlive = isPidAlive, settleMs = 5000, killWaitMs = 2000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
@@ -201,7 +201,7 @@ export async function reapGhostDaemons({ self = process.pid, list = () => findDa
  * 接管：内存里若还有**别的** mslxdff daemon，先把比我们旧的那批请出去。
  * 为什么必须有（用户点名要求 + 真机 2026-10-17 事故）：`-restart` 只认 `daemon.pid`，
  * 不在册的 daemon（SIGTERM 后没真退出、pid 文件又被删掉的那个）会活一整天，与新版互抢
- * warp-pool 的 4 个端口——日志里只能看到「起一条死一条」，看不出是两个 daemon 在互杀。
+ * 本机那 4 个长驻端口（当年是 warp-pool 的 wireproxy，该模块已随 ADR-0073 移除）——日志里只能看到「起一条死一条」，看不出是两个 daemon 在互杀。
  * 判据：比自己早启动 ≥ `minAgeMs` 的一律清（SIGTERM → 等 → SIGKILL）；与本次启动几乎同时的不动
  * （谁该活由 8989 的 bind 决定，`server-lifecycle` 的 EADDRINUSE 自愈会收口），避免两边互杀。
  * 全程不抛（接管失败绝不能挡住启动）。
@@ -227,7 +227,7 @@ export async function takeoverOlderDaemons({
   const older = sibs.filter(isOlder);
   const skipped = sibs.filter((d) => !isOlder(d));
 
-  for (const d of older) log(`[daemon] 内存里还有别的 mslxdff daemon：pid ${d.pid}（父 ${d.ppid}，已运行 ${fmtAlive(d.aliveSec)}，比本进程旧）—— 先请它退出，否则两个 daemon 会抢同一批端口（warp-pool 起一条死一条的真因）`);
+  for (const d of older) log(`[daemon] 内存里还有别的 mslxdff daemon：pid ${d.pid}（父 ${d.ppid}，已运行 ${fmtAlive(d.aliveSec)}，比本进程旧）—— 先请它退出，否则两个 daemon 会抢同一批端口（当年是 warp-pool 起一条死一条的真因，该模块已随 ADR-0073 移除）`);
   for (const d of older) { try { kill(d.pid, "SIGTERM"); } catch {} }
   const t0 = Date.now();
   while (Date.now() - t0 < settleMs && older.some((d) => isAlive(d.pid))) await sleep(100);

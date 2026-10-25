@@ -41,11 +41,6 @@ export async function run(args = process.argv.slice(2)) {
   if (await handleAutostart(args)) return;
   if (await handleFree(args)) return;
 
-  const { handleV6Pool } = await import("./commands/v6-pool.js");
-  if (await handleV6Pool(args)) return;
-
-  const { handleMultiIpPool } = await import("./commands/multi-ip-pool.js");
-  if (await handleMultiIpPool(args)) return;
 
   const { handleProviders, handleProvider } = await import("./commands/provider.js");
   if (await handleProviders(args)) return;

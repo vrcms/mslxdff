@@ -78,8 +78,8 @@ test("classifyTerminalUpstream: 可恢复拒绝一律不终局（换号/换节�
 
 // BUG-41（推翻 BUG-8 的修复方向）：429 的具名额度判决（FreeUsageLimitError/GoUsageLimitError）是
 // **按出口/按号**计的限额，不是身份闸门。三条仓内实证 + 一条机制事实：
-//   ① 本仓自测（warp-pool/verdict.js:9-10）：同一身份连发 3 次 429，**身份一换、同一个请求立刻 200**；
-//   ② warp-pool 决策表对 429 FreeUsage 明写「强制换出口」；v6 池同样据它换源地址；
+//   ① 本仓自测（原 warp-pool/verdict.js:9-10，已随 ADR-0073 移除）：同一身份连发 3 次 429，**身份一换、同一个请求立刻 200**；
+//   ② 原 warp-pool 判决表对 429 FreeUsage 明写「强制换出口」，v6 池同样据它换源地址（两套池均已移除）；
 //   ③ opencode 恒不借 key（share-keys.js:15,49）⇒ 组员打 opencode 用的是**组员自己的身份与出口**，
 //      额度池彼此独立——这正是「组员多、额度还有一堆」的机制基础；
 //   ④ ADR-0058 §2 本就把 429 明列为可恢复，BUG-8 偏离了它自己写下的边界。
@@ -92,7 +92,7 @@ test("classifyTerminalUpstream: 429 具名额度判决（FreeUsage/GoUsage）不
   const r = classifyTerminalUpstream(429, FREE_USAGE_BODY);
   assert.equal(r.terminal, false, "按出口计的限额判终局 = 静默跳过组员，把可用额度按死");
   assert.equal(r.kind, undefined);
-  assert.equal(classifyTerminalUpstream(429, GO_USAGE_BODY).terminal, false, "GoUsage 同族（warp verdict 并列）");
+  assert.equal(classifyTerminalUpstream(429, GO_USAGE_BODY).terminal, false, "GoUsage 同族（同族同判）");
   assert.equal(classifyTerminalUpstream(429, "Rate limit exceeded. Please try again later.").terminal, false, "裸 429 限流同样可接力");
   // 具名类名要单独兜住：防上游把 message 改了（类名比 message 稳定）
   assert.equal(classifyTerminalUpstream(429, `{"error":{"type":"FreeUsageLimitError","message":"whatever the upstream renames it to"}}`).terminal, false);

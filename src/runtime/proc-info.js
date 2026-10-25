@@ -1,11 +1,11 @@
 // 进程取证层（Linux /proc 只读）——2026-10-17 组长 VPS「幽灵 daemon 互杀」事故后新增。
 //
-// 事故：两个 daemon 同时活着（一个从昨天起活了一整天），都管同一份 warp-pool 目录，
+// 事故：两个 daemon 同时活着（一个从昨天起活了一整天），都管同一批长驻目录（原 warp-pool，已随 ADR-0073 移除），
 // 把对方的 wireproxy 当「上一代残留」杀掉 ⇒ 无限互杀、池永远不稳。三处都缺「读 /proc 说事实」的能力：
 //   ① 日志不知道「同机还有几个 daemon」（只能靠人肉 ps 才发现）；
 //   ② 清理不知道「这个 wireproxy 的父进程还活着（= 另一个 daemon 的活隧道）」；
 //   ③ 「SIGKILL 都清不掉」其实是**僵尸**（state=Z，kill 对它无效，但 kill(pid,0) 仍返回成功）。
-// 放 runtime 而不是 warp-pool：daemon 与 warp-pool 都要用，放 warp-pool 会让 daemon 反向依赖它。
+// 放 runtime 而不是某个子系统目录：daemon 与子系统都要用，放子系统里会让 daemon 反向依赖它。
 // 非 Linux 一律返回空 —— 读不到 /proc 就别猜（不在别的平台做危险推断）。
 import { readFileSync, readdirSync } from "node:fs";
 

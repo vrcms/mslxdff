@@ -1,5 +1,5 @@
 // /proc 取证层 + 「幽灵 daemon」收口逻辑的离线测试（纯解析 + 全部注入，不依赖 Linux、不真发信号）。
-// 背景（2026-10-17 组长 VPS 真机事故）：两个 daemon 同时活着，都管同一份 warp-pool 目录，
+// 背景（2026-10-17 组长 VPS 真机事故）：两个 daemon 同时活着，都管同一批长驻目录（原 warp-pool，已随 ADR-0073 移除），
 // 互相把对方的活隧道当「上一代残留」杀掉 ⇒ 无限互杀。这三件事必须可测，否则下次还得靠人肉 ps 才发现。
 import { test } from "node:test";
 import assert from "node:assert/strict";

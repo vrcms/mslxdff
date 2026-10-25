@@ -50,10 +50,10 @@ export function startServer({ router, signals = true, host, onBeforeClose }, por
       if (stopping) return;
       stopping = true;
       try { console.log(`[lifecycle] ${sig} received — shutting down (pid ${process.pid}, uptime ${Math.round(process.uptime())}s)`); } catch {}
-      // 关停必须**真的退出**：warp-pool 的 wireproxy 子进程 stdio 是 pipe，活着的子进程会把事件循环钉住；
+      // 关停必须**真的退出**：长驻子进程（当年是 warp-pool 的 wireproxy，已随 ADR-0073 移除）的 stdio 是 pipe，活着的子进程会把事件循环钉住；
       // 只 close() server（放开 8989）会留下「不监听端口却还活着」的幽灵 daemon
-      //（真机 2026-10-17：Oct16 起的幽灵与新版互杀 warp-pool 端口一整天，且它不在 daemon.pid 里，-restart 永远碰不到）。
-      // process.exit 会跑 exit 钩子（warp-pool 杀隧道、lifecycle 写遗书），故清理不会被跳过。
+      //（真机 2026-10-17：Oct16 起的幽灵与新版互抢本机端口一整天，且它不在 daemon.pid 里，-restart 永远碰不到）。
+      // process.exit 会跑 exit 钩子（lifecycle 写遗书等已注册钩子），故清理不会被跳过。
       const hard = setTimeout(() => { try { console.log(`[lifecycle] ${sig} 优雅关停 8s 未完成 — 强制退出`); } catch {} process.exit(0); }, 8000);
       hard.unref?.();
       close().then(() => process.exit(0), (e) => { try { console.log(`[lifecycle] 关停抛错：${String(e?.message || e)}`); } catch {} process.exit(1); });
