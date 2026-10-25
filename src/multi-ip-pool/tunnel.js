@@ -9,7 +9,6 @@
 // 平台纪律：只有 Linux 能干（tun + `ip rule`）；其它平台由调用方**诚实跳过一行**，不做半吊子。
 import { spawn } from "node:child_process";
 import { devNameFor, tableFor } from "./config.js";
-import { tailReason } from "../warp-pool/revive.js";
 import { fmtExit, fmtRpf, fmtRuleFail, fmtSpawn, fmtTunAddrFail } from "./report.js";
 
 /** openvpn 就绪标志（配置文件里可能出现别的 "Sequence"，必须整串匹配）。 */
@@ -39,17 +38,35 @@ export function isRoot(getuid = process.getuid?.bind(process)) {
  * openvpn 命令行。**dev 与路由一律走命令行覆盖**（命令行优先于 config 文件）：
  * `--route-nopull` + `--pull-filter ignore redirect-gateway` 保证它绝不碰主路由表——
  * 主路由表被改 = 整台机器的流量（含 daemon 自己打上游）都被拽进隧道，那是灾难。
+ * `--dev-type tun` 不可省：槽设备名（`mltun1`…）**不以 tun/tap 开头**，openvpn 从名字推不出类型
+ * （其 usage 原文：dev-type「仅当 --dev 的设备名不以 tun 或 tap 开头时使用」）；实测 97 个 VPNGate 节点全是 `dev tun`。
+ * 三个必填项缺一即抛：空串传下去会被 openvpn 判成「选项缺参数」，只留下一句没头没尾的 usage 错误（2026-10-25 真机踩过）。
  */
 export function buildOpenvpnArgs({ conf, dev, authFile, logFile = "", verb = 3 }) {
+  for (const [name, v] of [["conf", conf], ["dev", dev], ["authFile", authFile]]) {
+    if (!v) throw new Error(`buildOpenvpnArgs 缺 ${name}：拒绝起隧道（空参数会让 openvpn 只报一句 usage 错误，看不出病因）`);
+  }
   return [
     "--config", conf,
     "--dev", dev,
+    "--dev-type", "tun",
     "--auth-user-pass", authFile,
     "--route-nopull",
     "--pull-filter", "ignore", "redirect-gateway",
     "--verb", String(verb),
     ...(logFile ? ["--log", logFile] : []),
   ];
+}
+
+/**
+ * openvpn 输出里挑「最能说明问题」的一行：用法错误的**末行恒是** `Use --help for more information.`，
+ * 真凶（`Options error: …`）在它上面。只报末行等于把病因盖住——2026-10-25 真机就因为这样绕了一圈。
+ */
+export function openvpnErrorLine(text, max = 240) {
+  const lines = String(text || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (!lines.length) return "";
+  const pick = lines.find((l) => /options error|unrecognized|missing or extra|fatal|error:|can ?not|cannot|denied|failed|refused|reset|auth failed/i.test(l));
+  return (pick || lines[lines.length - 1]).slice(0, max);
 }
 
 /** 从 `ip -4 addr show dev <dev>` 输出里取 tun 地址（VPNGate 推的是 10.x 内网地址）。 */
@@ -139,7 +156,7 @@ export function startTunnel({ bin, args, timeoutMs = 25_000, spawnFn = spawn, lo
       if (tail.length > 20) tail.shift();
     }
   };
-  const lastTail = () => tailReason(tail.join("\n"));
+  const lastTail = () => openvpnErrorLine(tail.join("\n"));
   const ready = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       if (settled) return;

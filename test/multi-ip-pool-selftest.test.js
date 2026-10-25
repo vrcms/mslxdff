@@ -89,3 +89,15 @@ test("采样上限与默认值：count 被夹在 1..MITEST_MAX，缺省 3", asyn
   assert.equal(one.requested, 1);
   assert.ok(one.exits[0].hostName);
 });
+
+test("取证必须把 auth 文件路径交给起槽函数（真机踩过：空参数被 openvpn 判成 usage 错误、三槽同挂）", async () => {
+  let seen = "没调用";
+  const d = deps({ baseline: quotaless, fallback: { ok: true, status: 200, kind: "none" } });
+  d.writeAuthFile = () => "/tmp/mi-auth.txt";
+  d.bringUpTunnel = async ({ slotIndex, deps: inner }) => {
+    seen = inner.authFile;
+    return { dev: `mltun${slotIndex}`, table: 210, priority: 20_000, tunIp: `10.8.0.${slotIndex + 2}`, pid: 1, stop: () => {}, tail: () => "" };
+  };
+  await runMultiIpCompare({ count: 1, env: {}, deps: d });
+  assert.equal(seen, "/tmp/mi-auth.txt", "authFile 为空时 openvpn 只会回一句「Use --help」，这条锁死接线");
+});

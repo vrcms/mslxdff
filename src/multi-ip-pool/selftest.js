@@ -10,7 +10,7 @@ import { genId } from "../opencode-identity.js";
 import { DEFAULT_PROBE_MODEL, probeUpstreamFrom } from "../v6pool/selftest.js";
 import { classifyWarpSignal } from "../warp-pool/verdict.js";
 import { resolveMultiIpConfig, resolveRole } from "./config.js";
-import { candidateNodes, loadNodeCache, materializeNode } from "./nodes.js";
+import { candidateNodes, loadNodeCache, materializeNode, writeAuthFile } from "./nodes.js";
 import { fetchNodes, probeExitIp } from "./nodes-fetch.js";
 import { bringUpTunnel, checkOpenvpn, isRoot, isSupportedPlatform, tearDownTunnel } from "./tunnel.js";
 import { fmtExitIp, fmtNodePick, fmtNodes, fmtProbe } from "./report.js";
@@ -79,6 +79,9 @@ export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFA
 
   const picked = candidateNodes({ rows, countries: cfg.countries, minScore: cfg.minScore, scan: Math.max(1, Math.min(MITEST_MAX, Number(count) || MITEST_DEFAULT)) });
   if (!picked.length) return { status: "skip", reason: "没有满足条件的候选节点（国家/Score 过滤后为空）", hint: "放宽 MSLXDFF_MULTI_IP_MIN_SCORE 或去掉 MSLXDFF_MULTI_IP_COUNTRY" };
+  // auth 文件必须先落到磁盘再把路径交给 openvpn。取证路径以前把 `deps.authFile`（undefined）直接传下去
+  // ⇒ `--auth-user-pass` 拿到空参数 ⇒ openvpn 判「选项缺参数」，只留一句「Use --help」——2026-10-25 真机三条槽全挂在这。
+  const authFile = deps.authFile || (deps.writeAuthFile || writeAuthFile)({ dir: cfg.dir, user: cfg.authUser, pass: cfg.authPass });
 
   const exits = [];
   try {
@@ -91,7 +94,7 @@ export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFA
       try {
         const node = materialize({ dir: cfg.dir, row });
         if (!node) throw new Error("节点配置解不开（base64 或 remote 缺失）");
-        slot = await startSlot({ cfg, slotIndex: i, node, deps: { authFile: deps.authFile, runCmdFn: deps.runCmdFn, spawnFn: deps.spawnFn, wait: deps.wait, log } });
+        slot = await startSlot({ cfg, slotIndex: i, node, deps: { authFile, runCmdFn: deps.runCmdFn, spawnFn: deps.spawnFn, wait: deps.wait, log } });
         const exit = await exitProbe({ agent: agentFactory(slot.tunIp), timeoutMs: cfg.probeTimeoutMs });
         if (exit.ok) log(fmtExitIp({ dev: slot.dev, ip: exit.ip, ms: exit.ms }));
         // 从这条隧道的出口打**同一条**免费层请求

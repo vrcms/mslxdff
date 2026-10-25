@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { resolveMultiIpConfig, resolveRole, devNameFor, tableFor } from "../src/multi-ip-pool/config.js";
 import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
 import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile } from "../src/multi-ip-pool/nodes-fetch.js";
-import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel } from "../src/multi-ip-pool/tunnel.js";
+import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel, openvpnErrorLine } from "../src/multi-ip-pool/tunnel.js";
 import { createMultiIpDispatcher } from "../src/multi-ip-pool/dispatch.js";
 import { createMultiIpPool } from "../src/multi-ip-pool/index.js";
 
@@ -182,6 +182,18 @@ test("tunnel: openvpn 参数必须挡掉主路由（route-nopull + dev 覆盖）
   assert.ok(/--dev mltun1/.test(s));
   assert.ok(/--config \/d\/n\.conf/.test(s));
   assert.ok(/--auth-user-pass \/d\/auth\.txt/.test(s));
+  // 设备名 `mltun1` 不以 tun/tap 开头 ⇒ 必须显式给 --dev-type，否则 openvpn 推不出设备类型
+  assert.ok(/--dev-type tun/.test(s), "缺 --dev-type tun：mltun* 这类名字 openvpn 认不出类型");
+  assert.throws(() => buildOpenvpnArgs({ conf: "/d/n.conf", dev: "mltun1", authFile: "" }), /缺 authFile/, "空 auth 路径必须当场拒，不许传给 openvpn 变成 usage 错误");
+  assert.throws(() => buildOpenvpnArgs({ conf: "", dev: "mltun1", authFile: "/d/auth.txt" }), /缺 conf/);
+});
+
+test("tunnel: openvpn 报错要挑「真凶行」，不是恒为 Use --help 的末行", () => {
+  const usage = "Options error: Unrecognized option or missing or extra parameter(s): --auth-user-pass (2.6.19)\nUse --help for more information.";
+  assert.ok(openvpnErrorLine(usage).startsWith("Options error"), "必须报出 Options error 那行");
+  assert.equal(openvpnErrorLine("TLS Error: TLS handshake failed\nsome noise"), "TLS Error: TLS handshake failed");
+  assert.equal(openvpnErrorLine("只是普通一行\n第二行"), "第二行", "没有可归因的行时退回末行");
+  assert.equal(openvpnErrorLine(""), "");
 });
 
 test("tunnel: tun 地址解析与策略路由命令（装/撤对称）", () => {

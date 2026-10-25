@@ -25,7 +25,7 @@ function flagValue(args, ...names) {
 
 const kindZh = { "free-quota": "429 额度耗尽", "free-tier": "403 免费层资格", "ip-limit": "429 限流", "black-quota": "账号日配额", network: "网络不可达", none: "非额度信号" };
 const line = (r) => {
-  if (r.error) return `✗ 不可达（${String(r.error).slice(0, 60)}）`;
+  if (r.error) return `✗ 不可达（${String(r.error).replace(/\s+/g, " ").slice(0, 220)}）`;
   if (r.ok) return `✅ HTTP ${r.status} 有额度`;
   return `⛔ HTTP ${r.status} ${kindZh[r.kind] || r.kind}`;
 };
