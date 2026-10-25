@@ -44,6 +44,11 @@ export function fmtSpawn({ dev, pid, host, port, country, table }) {
   return `${TAG} ${SYM.ok} ${dev} 隧道就绪（pid=${pid}，出口节点 ${host}:${port} ${country}，策略表 ${table}）`;
 }
 
+/** 实际执行的 openvpn 命令行（argv 原文）：真机排障第一问就是「你到底跑了什么」。 */
+export function fmtArgv({ bin, args }) {
+  return `${TAG} ${SYM.step} 执行：${bin} ${(args || []).join(" ")}`;
+}
+
 export function fmtTunAddrFail({ dev, out }) {
   return `${TAG} ${SYM.bad} ${dev} 起来了但读不到 tun 地址（ip -4 addr show dev ${dev} 的输出：${(out || "(空)").slice(0, 200)}）—— 隧道建不起来，这槽换下一个节点`;
 }

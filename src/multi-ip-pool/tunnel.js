@@ -9,7 +9,8 @@
 // 平台纪律：只有 Linux 能干（tun + `ip rule`）；其它平台由调用方**诚实跳过一行**，不做半吊子。
 import { spawn } from "node:child_process";
 import { devNameFor, tableFor } from "./config.js";
-import { fmtExit, fmtRpf, fmtRuleFail, fmtSpawn, fmtTunAddrFail } from "./report.js";
+import { fmtArgv, fmtExit, fmtRpf, fmtRuleFail, fmtSpawn, fmtTunAddrFail } from "./report.js";
+import { openvpnErrorLine, openvpnErrorBrief } from "./diagnose.js";
 
 /** openvpn 就绪标志（配置文件里可能出现别的 "Sequence"，必须整串匹配）。 */
 export const READY_PATTERN = /Initialization Sequence Completed/;
@@ -58,16 +59,6 @@ export function buildOpenvpnArgs({ conf, dev, authFile, logFile = "", verb = 3 }
   ];
 }
 
-/**
- * openvpn 输出里挑「最能说明问题」的一行：用法错误的**末行恒是** `Use --help for more information.`，
- * 真凶（`Options error: …`）在它上面。只报末行等于把病因盖住——2026-10-25 真机就因为这样绕了一圈。
- */
-export function openvpnErrorLine(text, max = 240) {
-  const lines = String(text || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  if (!lines.length) return "";
-  const pick = lines.find((l) => /options error|unrecognized|missing or extra|fatal|error:|can ?not|cannot|denied|failed|refused|reset|auth failed/i.test(l));
-  return (pick || lines[lines.length - 1]).slice(0, max);
-}
 
 /** 从 `ip -4 addr show dev <dev>` 输出里取 tun 地址（VPNGate 推的是 10.x 内网地址）。 */
 export function parseTunAddr(text) {
@@ -138,6 +129,8 @@ export async function checkOpenvpn(bin, { runCmdFn = runCmd } = {}) {
  * tail 保留末 20 行：真机排障时"openvpn 为什么退"全在这几行里。
  */
 export function startTunnel({ bin, args, timeoutMs = 25_000, spawnFn = spawn, log = () => {}, onExit = null, dev = "" } = {}) {
+  // 「我到底跑了什么」必须是第一条信息：openvpn 的 argv 报错只有对着命令行原文才看得懂
+  log(fmtArgv({ bin, args }));
   let child;
   try {
     child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -157,12 +150,13 @@ export function startTunnel({ bin, args, timeoutMs = 25_000, spawnFn = spawn, lo
     }
   };
   const lastTail = () => openvpnErrorLine(tail.join("\n"));
+  const briefTail = () => openvpnErrorBrief(tail.join("\n"));
   const ready = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       try { child.kill("SIGTERM"); } catch { /* 已退 */ }
-      reject(new Error(`等 ${Math.round(timeoutMs / 1000)}s 没等到「Initialization Sequence Completed」（隧道没起来）：${lastTail()}`));
+      reject(new Error(`等 ${Math.round(timeoutMs / 1000)}s 没等到「Initialization Sequence Completed」（隧道没起来）：${briefTail()}`));
     }, timeoutMs);
     const onChunk = (buf) => {
       push(buf);
@@ -178,7 +172,7 @@ export function startTunnel({ bin, args, timeoutMs = 25_000, spawnFn = spawn, lo
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        reject(new Error(`openvpn 提前退出（code=${code} signal=${signal}）：${lastTail()}`));
+        reject(new Error(`openvpn 提前退出（code=${code} signal=${signal}）：${briefTail()}`));
       }
       // 主动关掉的隧道不算"意外退出"：收摊日志只该出现在真出事时（否则每次换槽都刷一行假警报）
       if (!stopping) log(fmtExit({ dev, code, signal, pid: child.pid, aliveMs, tail: lastTail() }));

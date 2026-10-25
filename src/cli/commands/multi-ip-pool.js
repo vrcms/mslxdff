@@ -1,34 +1,14 @@
-// mslxdff -multi-ip-pool [test|status|help]
-//   多出口池（VPNGate 免费 OpenVPN 节点当出口）：**组长/单机**专属，只服务 opencode 免费层。
+// mslxdff -multi-ip-pool [test|status|fetch|help]
+//   多出口池（VPNGate 免费 OpenVPN 节点当出口）：**组长**专属，只服务 opencode 免费层。
 //
-// 为什么需要这条命令（用户要的"取证"）：换出口到底有没有换来新额度，只有实测能回答。
-// 本命令做 A/B：直连打一条免费层请求取基线 → 逐条 VPN 隧道打**同一条**请求 → 对照判语。
-import { join } from "node:path";
-import { runMultiIpCompare, VERDICT_ZH, MITEST_DEFAULT, MITEST_MAX } from "../../multi-ip-pool/selftest.js";
-import { fetchNodesToFile } from "../../multi-ip-pool/nodes-fetch.js";
+// 本文件只做「分发 + status + 用法」；test / fetch 两条取证流程在 ./multi-ip-pool-test.js
+// （2026-10-25 起拆分：那边是全程 transcript 流水账，混在一起两边都顶过体积线）。
 import { resolveMultiIpConfig, resolveRole } from "../../multi-ip-pool/config.js";
 import { checkOpenvpn, isRoot, isSupportedPlatform } from "../../multi-ip-pool/tunnel.js";
 import { loadGroupsJoined } from "../../state.js";
-import { argValue } from "../policy.js";
+import { runFetch, runTest } from "./multi-ip-pool-test.js";
 
 const FLAG = "-multi-ip-pool";
-
-function flagValue(args, ...names) {
-  for (const name of names) {
-    const v = argValue(args, name);
-    if (v !== null && v !== undefined && !String(v).startsWith("-")) return v;
-    const eq = args.find((a) => a.startsWith(`${name}=`));
-    if (eq) return eq.slice(eq.indexOf("=") + 1);
-  }
-  return null;
-}
-
-const kindZh = { "free-quota": "429 额度耗尽", "free-tier": "403 免费层资格", "ip-limit": "429 限流", "black-quota": "账号日配额", network: "网络不可达", none: "非额度信号" };
-const line = (r) => {
-  if (r.error) return `✗ 不可达（${String(r.error).replace(/\s+/g, " ").slice(0, 220)}）`;
-  if (r.ok) return `✅ HTTP ${r.status} 有额度`;
-  return `⛔ HTTP ${r.status} ${kindZh[r.kind] || r.kind}`;
-};
 
 export async function handleMultiIpPool(args = []) {
   const at = args.findIndex((x) => x === FLAG || x.startsWith(`${FLAG}=`));
@@ -40,86 +20,8 @@ export async function handleMultiIpPool(args = []) {
   return await runTest(args);
 }
 
-async function runTest(args) {
-  const count = (() => { const v = flagValue(args, "--count", "-n"); return v === null ? MITEST_DEFAULT : Math.max(1, Math.min(MITEST_MAX, Number(v) || MITEST_DEFAULT)); })();
-  const model = flagValue(args, "--model", "-m") || "";
-  console.log("=".repeat(66));
-  console.log("  多出口池取证 —— 「直连 429 时，换成 VPN 出口还有额度吗」");
-  console.log("=".repeat(66));
-  console.log("");
-  console.log(`  探测模型 ${model || "(默认免费模型)"}｜采样 ${count} 条隧道｜只换出口，其余请求完全相同`);
-  console.log("");
-
-  const onProgress = (ev) => {
-    if (ev.phase === "nodes") console.log(`  ▸ 节点表：${ev.source}（${ev.total} 个节点）`);
-    else if (ev.phase === "baseline-start") console.log("  ▸ 基线：直连（系统默认出口）打一条免费层请求…");
-    else if (ev.phase === "baseline-done") {
-      console.log(`    基线结果：${line(ev)}${ev.body ? `（${String(ev.body).slice(0, 80).replace(/\s+/g, " ")}）` : ""}`);
-      console.log("");
-    } else if (ev.phase === "exit-start") console.log(`  [${String(ev.i).padStart(2)}/${ev.n}] ${ev.row.hostName}（${ev.row.countryShort || "?"}）…`);
-    else if (ev.phase === "exit-done") console.log(`      ${line(ev)}${ev.exitIp ? `｜出口 IP ${ev.exitIp}` : ""}`);
-  };
-
-  let r;
-  try {
-    r = await runMultiIpCompare({ count, ...(model ? { model } : {}), onProgress });
-  } catch (e) {
-    console.log("");
-    console.log(`❌ 测试执行出错：${e?.message ?? e}`);
-    console.log(`   重试：mslxdff ${FLAG}`);
-    process.exit(1);
-    return true;
-  }
-  if (r.status === "skip") {
-    console.log(`❌ 测不了：${r.reason}`);
-    console.log(`   下一步：${r.hint}`);
-    process.exit(1);
-    return true;
-  }
-
-  console.log("");
-  console.log("-".repeat(66));
-  console.log(`  基线（直连）：${line(r.baseline)}`);
-  console.log(`  VPN 出口：有额度 ${r.okCount}｜受限 ${r.limitedCount}｜不可达 ${r.netCount}（共 ${r.requested}）`);
-  console.log("");
-  const v = VERDICT_ZH[r.verdict] || { text: "未判定", next: "" };
-  const mark = r.verdict === "multi-ip-works" ? "✅" : r.verdict === "mixed" ? "△" : "⛔";
-  console.log(`  ${mark} ${v.text}：${r.okCount}/${r.requested} 条隧道拿到 200`);
-  if (v.next) console.log(`   ${v.next}`);
-  console.log("");
-  console.log(`   重试：mslxdff ${FLAG} --count ${r.requested}${model ? ` --model ${model}` : ""}`);
-  process.exit(r.verdict === "multi-ip-works" || r.verdict === "mixed" ? 0 : 1);
-}
-
-/**
- * `-multi-ip-pool fetch [路径]`：在**能连节点源**的机器上抓一份 VPNGate 表落成文件，scp 到受限网络的组长机，
- * 那边设 `MSLXDFF_MULTI_IP_NODES_FILE=<路径>` 即可完全跳过取表网络请求（2026-10-25 真机：华为云 ECS 上 vpngate.net 不可达）。
- */
-async function runFetch(args) {
-  const cfg = resolveMultiIpConfig(process.env);
-  const out = flagValue(args, "--out", "-o") || join(cfg.dir, "vpngate.csv");
-  console.log(`  节点源（按序试）：${cfg.sources.join("\n              ")}`);
-  console.log("");
-  try {
-    const got = await fetchNodesToFile({ sources: cfg.sources, out, timeoutMs: cfg.probeTimeoutMs });
-    const usable = got.rows.filter((r) => r.config).length;
-    console.log(`  ✅ ${got.rows.length} 个节点（${usable} 个配置可解码）已写入：${out}`);
-    console.log(`     来源：${got.source}`);
-    console.log("");
-    console.log("  带到受限网络的机器上：");
-    console.log(`     scp ${out} root@<组长机>:/root/.config/mslxdff/multi-ip-pool/vpngate.csv`);
-    console.log("     export MSLXDFF_MULTI_IP_NODES_FILE=/root/.config/mslxdff/multi-ip-pool/vpngate.csv");
-    console.log("     （之后取表零网络请求；表会旧，免费节点掉得快，建议隔几天重抓一次）");
-    process.exit(0);
-  } catch (e) {
-    console.log(`  ❌ 一个源都没取到：${String(e?.message || e)}`);
-    console.log("     下一步：换网络重试，或 MSLXDFF_MULTI_IP_SOURCES=<你自己能连的镜像/本地路径> 再跑一次");
-    process.exit(1);
-  }
-  return true;
-}
-
-async function printStatus(args) {
+/** status：只回答「开没开、为什么」。**不建池不拨号**，所以只能报告配置与门，报不了 daemon 内存里的池。 */
+async function printStatus(args = []) {
   const cfg = resolveMultiIpConfig(process.env);
   const role = resolveRole({ mode: cfg.mode, joined: loadGroupsJoined() });
   const platform = process.platform;
@@ -148,10 +50,11 @@ async function printStatus(args) {
 function printUsage() {
   console.log(`用法: mslxdff ${FLAG} [test|status|fetch|help] [--count N] [--model <id>] [--out <路径>]`);
   console.log("");
-  console.log("  在多出口池上做 A/B：直连打一条 free 层请求取基线，再逐条 VPN 隧道打同一条，");
+  console.log("  test 在多出口池上做 A/B：直连打一条 free 层请求取基线，再逐条 VPN 隧道打同一条，");
   console.log("  对照判语：");
   console.log("    基线 429 + VPN 出口有 200 ⇒ 池有用（换 IP 换到新额度）");
   console.log("    基线 429 + VPN 出口也全 429 ⇒ 换 IP 抬不动（上游不按出口 IP 计额）");
+  console.log("  test 每一步都编号打印并整份落盘（结尾给出 transcript 路径），失败即停在原地。");
   console.log("");
   console.log("  前置：Linux + root + openvpn（tun 设备与策略路由必需）。非 Linux 如实跳过。");
   console.log("");

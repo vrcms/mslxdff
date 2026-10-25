@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { resolveMultiIpConfig, resolveRole, devNameFor, tableFor } from "../src/multi-ip-pool/config.js";
 import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
 import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile } from "../src/multi-ip-pool/nodes-fetch.js";
-import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel, openvpnErrorLine } from "../src/multi-ip-pool/tunnel.js";
+import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel } from "../src/multi-ip-pool/tunnel.js";
+import { openvpnErrorLine, openvpnErrorBrief, probeTcp, createTranscript, envSnapshotLines, slotPlanLines, residualHints } from "../src/multi-ip-pool/diagnose.js";
 import { createMultiIpDispatcher } from "../src/multi-ip-pool/dispatch.js";
 import { createMultiIpPool } from "../src/multi-ip-pool/index.js";
 
@@ -428,4 +429,58 @@ test("nodes: fetchNodesToFile 原样落盘（-multi-ip-pool fetch 的骨架）",
   assert.equal(got.rows.length, 1);
   assert.equal(readFileSync(out, "utf8"), csv, "必须原样落 CSV（不能只落解析结果，否则重抓的信息全丢）");
   if (process.platform !== "win32") assert.equal(statSync(out).mode & 0o777, 0o600, "表里带节点凭据，必须 0600");
+});
+
+// —— diagnose.js：真机排障全靠这层的输出质量，逐条锁死 ——
+test("diagnose: openvpnErrorBrief 一行内给真凶 + 末几行（不再只报 Use --help）", () => {
+  const text = "Options error: File is not existing or size 0: undefined (2.6.19)\nSat Oct 25 10:00:00 2026 Note: --auth-user-pass is required\nUse --help for more information.";
+  const brief = openvpnErrorBrief(text);
+  assert.ok(brief.startsWith("Options error:"), "第一句必须是真凶行");
+  assert.ok(brief.includes("‖"), "还要带其余行");
+  assert.ok(!brief.includes("Use --help"), "无用的末行进摘要没意义");
+});
+
+test("diagnose: probeTcp 判语（通 / 注入失败 / 缺参数），且绝不漏句柄", async () => {
+  assert.equal((await probeTcp({ host: "", port: 0 })).ok, false);
+  const ok = await probeTcp({ host: "h", port: 443, connectFn: async () => ({ ok: true }) });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.host, "h");
+  const bad = await probeTcp({ host: "h", port: 443, connectFn: async () => { throw Object.assign(new Error("EHOSTUNREACH"), { code: "EHOSTUNREACH" }); } });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /EHOSTUNREACH/);
+});
+
+test("diagnose: transcript 编号 + 耗时 + 同步落盘（贴一个文件就能定位）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mi-tr-"));
+  const mem = [];
+  const fs = { mkdirSync: () => {}, appendFileSync: (p, s) => mem.push(s) };
+  let nowT = 1_000;
+  const t = createTranscript({ dir, out: (l) => mem.push(l), fs, now: () => (nowT += 1_500), fileName: "x.log" });
+  t.step("① 环境快照");
+  t.say("node v22");
+  t.step("② 节点表");
+  assert.ok(mem.some((l) => /^\[01 \+1\.5s\] ① 环境快照/.test(l)), `步骤要带编号与耗时，实得：${mem[1]}`);
+  assert.ok(mem.some((l) => /^\[01 \+3\.0s\]\s{6,}node v22/.test(l)), "明细行归在同号步骤下且不占编号");
+  assert.ok(mem.some((l) => /^\[02 \+/.test(l) && l.includes("② 节点表")));
+  assert.ok(t.file.endsWith("x.log"));
+  assert.ok(mem.some((l) => l.includes("transcript")), "文件里也要有抬头说明");
+});
+test("diagnose: 快照与槽计划读得懂、善后命令给得全", () => {
+  const cfg = resolveMultiIpConfig({ MSLXDFF_MULTI_IP_COUNTRY: "JP", MSLXDFF_MULTI_IP_COUNT: "2" });
+  const lines = envSnapshotLines({ cfg, platform: "linux", root: true, openvpn: { ok: true, version: "OpenVPN 2.6.19" }, files: ["auth.txt(8B)"] });
+  assert.ok(lines[0].includes("root 是"));
+  assert.ok(lines[1].includes("2.6.19"));
+  assert.ok(lines[2].includes("隧道 2 条"));
+  assert.ok(lines[4].includes("vpngate.net"));
+  const plan = slotPlanLines({ cfg, nodes: [{ hostName: "n1", countryShort: "JP", host: "1.2.3.4", port: 443, proto: "tcp" }] });
+  assert.ok(plan[0].includes("1.2.3.4:443") && plan[0].includes("proto tcp") && plan[0].includes("设备 mltun0") && plan[0].includes("表 210"));
+  assert.ok(residualHints().length >= 3);
+});
+
+test("CLI 接线：两个命令文件必须 import 得动（拆文件后 import 名写错 = 命令直接崩）", async () => {
+  const m = await import("../src/cli/commands/multi-ip-pool.js");
+  assert.equal(typeof m.handleMultiIpPool, "function");
+  const f = await import("../src/cli/commands/multi-ip-pool-test.js");
+  assert.equal(typeof f.runTest, "function", "test 流程");
+  assert.equal(typeof f.runFetch, "function", "fetch 流程");
 });

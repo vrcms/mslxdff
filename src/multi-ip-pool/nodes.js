@@ -140,7 +140,8 @@ export function materializeNode({ dir, row, name = "" } = {}) {
   const remote = parseRemote(conf);
   if (!remote) return null;
   const written = writeNodeConf({ dir, row: { ...row, config: conf }, name });
-  return { ...row, conf: written.path, host: remote.host, port: remote.port };
+  // proto 一并带出：预检与判语要分清「TCP 节点连不上」与「UDP 节点无握手可探」两回事
+  return { ...row, conf: written.path, host: remote.host, port: remote.port, proto: (/^\s*proto\s+(\S+)/m.exec(conf) || [])[1] || "" };
 }
 
 /** VPNGate 公共账号（vpn/vpn）；落在 0600 文件里，绝不入库。 */
