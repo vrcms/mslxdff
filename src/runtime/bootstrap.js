@@ -68,6 +68,11 @@ export async function startDaemonMain(VERSION) {
     try { logs.appendEvent({ ts: Date.now(), type: "raccoon-checkin-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
   });
 
+  const { setupCodeartsCheckin } = await import("./codearts-checkin.js");
+  void setupCodeartsCheckin({ bus, logs }).catch((e) => {
+    try { logs.appendEvent({ ts: Date.now(), type: "codearts-checkin-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}
+  });
+
   const { setupWorkbuddyGrowth } = await import("./workbuddy-growth.js");
   void setupWorkbuddyGrowth({ bus, logs }).catch((e) => {
     try { logs.appendEvent({ ts: Date.now(), type: "workbuddy-growth-setup-failed", error: String(e?.message || e).slice(0, 200) }); } catch {}

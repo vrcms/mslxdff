@@ -72,6 +72,7 @@
 | `mslxdff -provider cline quota [--json] [--account <hash>] [--model <substr>]` | `--provider` | **只读**：聚合 `cline-usage.jsonl` 的账号×模型双口径统计并分组打印：free 走本周期 tokens（+已完成周期/上周期），pass 走近 24h；`--json` 供脚本，`--account/--model` 过滤；空账本给引导 | 否 | 否 |
 | `mslxdff -provider cline migrate [--dry-run]` | `--provider` | 把旧 `providerConfigs.clinebot` 合并进 `cline`（keys 去重 + 剔除 `sk_` 形态、allowlist 求并、baseUrl 归一到 `https://api.cline.bot`）后删除旧键，幂等；真改动前备份 `state.json.bak-<ISO 时间戳>` | 是 | 重启生效 |
 | `mslxdff -provider codearts login` / `codearts models [--json]` | `--provider` | 华为云 CodeArts Agent（盘古助手）PKCE 授权：浏览器登录拿 `refreshToken/codeVerifier/dpopJwk` 组凭证 blob 落盘 `providerConfigs.codearts.keys`（一账号一 blob，多账号 keyring 轮转）；`models` 三路发现 + benefit claim（幂等），对外 `codearts/<modelId>` 前缀（ADR-0027） |
+| `mslxdff -provider codearts checkin [--json] [--dry]` / `codearts quota [--json]` | `--provider` | **每日签到领积分**（snap-access 的 `/v1/ops/*`：`GET /v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`；每日签到 #1 = **1000 分/号/天**；daemon 每日 9:00 自动签，`MSLXDFF_CODEARTS_CHECKIN_HOUR` 调点、`=0` 关）。**与 `models` 那条福利是两本账**：这里是**积分账**，`-provider codearts models` 是模型 Token 福利账（走 opengw）。到账判据 = **领取后重读活动列表**的状态，不信 claim 回执；`quota` 只读积分余额（`/snap-manager/v1/statistics/plugin` 的 `usageTotalPackageCredit`） | 是（写 `codeartsCheckin`） | 否（直连上游） |
 | `mslxdff -provider traework login` | `--provider` | TRAE SOLO 通道浏览器授权（复刻 traework2api login.sh）：打印 trae.cn 授权链接 → 登录后粘贴 `127.0.0.1` 回调链接 → ExchangeToken → 落盘 `auths/trae-<uid>.json`（0600）+ state 双写，自动签到+查积分；此后 `traework/<modelId>` 前缀路由（恒 `stream:true` SOLO SSE 透传/聚合，模型空/auto→`glm-5.2`，动态表+静态 32 回退；1005 plan 长冷却 12h、401 换号、429 短冷，过期前 24h 预刷新）；**恒 local-only** 不借出 key |
 | `mslxdff -provider traework checkin` | `--provider` | 逐号补领 TRAE SOLO 今日签到积分（每日 100 分；daemon 另有每日 9:00 自动签，`MSLXDFF_TRAEWORK_CHECKIN_HOUR` 调点、`=0` 关）。**到账判据 = 领取后复查 `checkin_credits/status` 的 `checked_in`**：上游回执 `code:0` 而复查没翻的一律判未到账（phantom）并按退出码 1 报出，不再记成功 | 是（写 `traeworkCheckin`，且**只有真到账才盖当日 date 戳**，谎报时保留旧 date 让补签继续） | 否（直连上游） |
 | `mslxdff -provider traework quota [--json]` | `--provider` | 只读查签到状态与积分（`checkin_credits/status` + `pay/ide_user_ent_usage`），**不发模型请求、不烧配额**。⚠ 读数口径：显示的「额度上限」= 各权益包 `credits_limit` 之和，**不是剩余可用**（该接口无已用/剩余字段，所以模型报 `4008 exceeded the quota` 时这个数照样非零）；`keys` 槽位不像 accessToken 时一个请求都不发，直接指路重登 | 否（纯读） | 否（直连上游） |
@@ -767,9 +768,13 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
   mslxdff -provider codearts login              # 浏览器 PKCE 授权 → 凭证 blob 落盘
   mslxdff -provider codearts login --no-allow-any  # 接入后保持 allowAny OFF（默认 ON）
   mslxdff -provider codearts models [--json]    # 三路发现列模型（benefit 自动 claim）
+  mslxdff -provider codearts checkin            # 补领今日积分（已到账则零写操作）
+  mslxdff -provider codearts checkin --dry      # 干跑：只看有没有可领，不发写请求
+  mslxdff -provider codearts quota              # 只读积分余额
   ```
 - **作用**：华为云 CodeArts Agent（盘古助手）免费福利模型接入。`login` 走 PKCE 浏览器授权（本地回调 server 收 code + ticket 轮询双通道），成功后把 `refreshToken/codeVerifier/dpopJwk/AK/SK/securityToken` 组成**一账号一 blob JSON** 落盘 `providerConfigs.codearts.keys`（多账号重复 login 追加 = keyring 轮转；默认 `allowAnyModels=true`，`--no-allow-any` 关）。此后对话走 `codearts/<modelId>` 前缀：恒 `stream:true` 直连上游 v2 SSE（`text` 全文快照→流式 delta / 非流式聚合 `chat.completion`）；SDK-HMAC-SHA256 签名 + DPoP ES256；STS 临时凭证临期（提前 30min）单飞刷新、refresh_token 单次轮换**原位写回**（`invalid_grant` 终态死号 → 提示重跑 login）；HTTP 200 内嵌错误码映射 429/400/502。
 - **恒 local-only（硬约束）**：不经组员转发/via-route、不借出 key（refreshToken+DPoP 绑定型凭据，外借 = 对端刷新轮换互踢下线，同 cline；ADR-0015/0019/0027）。
+- **积分签到（与上面的「模型福利」是两本账）**：上游「每日签到领积分」在 snap-access 的 `/v1/ops/*`（**不是**福利网关 `opengw` 的 `benefit/claim`）：`delivery?channel=IDE` 读活动列表 → 只对 `type=USER_LOGIN`（+`NEW_USER_REGISTER`）、`status=ELIGIBLE` 且 `claimable` 的条目 `claim`（`{campaignId, channel:"IDE", idempotentKey:"claim_<id>_<毫秒>"}`）→ **无条件补 `confirm`**（`{campaignId}`）→ **重读活动列表复查**，状态落到 `CONFIRMED/CONSUMED` 才算到账（只信回执就会谎报到账，raccoon/traework 同款纪律）；`status=CLAIMED` 只补 confirm，已到账**零写操作**。字段坑：`campaignId` 是**数字**、积分字段是 **`benefitAmount`**（不是 `amount`）、不可领取时 `status` 为 **`null`**；ops 请求必须带 `Agent-Type: PromptCenter`（缺 → `TM.00001001 请求头Agent-Type为空`），且 `agent-type`/`x-language` 要**签名后追加**（进 canonical request 会被拒）。daemon 每日 9:00 自动签（`MSLXDFF_CODEARTS_CHECKIN=0` 关、`MSLXDFF_CODEARTS_CHECKIN_HOUR` 改点），结果落 `state.codeartsCheckin {date,ok,total,credits,accounts}`（qoder/workbuddy 同款，失败不再静默）。`quota` 取 `/snap-manager/v1/statistics/plugin` 的 `usageTotalPackageCredit`（`package_credit_remain` 才是余额；basic/bonus/onDemand 是分类明细，**不累加**）。
 - **示例**：
   ```bash
   mslxdff -provider codearts login
@@ -1425,6 +1430,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_CODEARTS_TIMEOUT_MS` / `_COOLDOWN_MS` | `30000 / 30000` | codearts 上游请求超时 / key 冷却（多账号轮转间隔） |
 | `MSLXDFF_CODEARTS_REFRESH_SKEW_MS` | `1800000` | STS 临时凭证提前刷新窗口（默认提前 30min） |
 | `MSLXDFF_CODEARTS_AUTO_CLAIM` | `1` | 福利模型自动领取（`benefit claim`，幂等；`0` 关） |
+| `MSLXDFF_CODEARTS_CHECKIN` | `1` | daemon **每日签到领积分**开关（`0` 关；开则每天本地时 `MSLXDFF_CODEARTS_CHECKIN_HOUR` 逐号**串行**领取，写 `state.codeartsCheckin` 记账，启动时过点补跑；幂等靠活动列表预检，已到账零写操作） |
+| `MSLXDFF_CODEARTS_CHECKIN_HOUR` | `9` | 上面那个定时器的小时（0–23，越界回 9） |
 | `MSLXDFF_CODEARTS_MAX_CONCURRENT` | `3` | codearts 上游在途并发硬上限（该上游对并发极敏感，>3 即坏号/限流）；超限请求 FIFO 排队等待不拒绝，`0` = 不限 |
 | `MSLXDFF_CODEARTS_MAX_TOKENS_CEILING` | `65536` | 出站 `max_tokens` 夹紧上限。福利网关自报的 `max_tokens`（131072~393216）不可信：现网实测 `deepseek-v4.1-flash` 65536 通、98304 起回 200 内嵌 `InferHub.001001005.400 The request param is invalid`；客户端只发 Responses 风格的 `max_completion_tokens` 时先映射成 `max_tokens` 再夹（`chat.js buildUpstreamBody`） |
 | `MSLXDFF_CODEARTS_BASE_URL` | — | codearts 上游地址覆盖（state `providerConfigs.codearts.baseUrl` 优先） |
