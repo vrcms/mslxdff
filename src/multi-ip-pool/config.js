@@ -30,6 +30,7 @@ export const DEFAULTS = {
   cooldownMs: 600_000, // 槽失败冷却
   rotate: true, // 撞额度信号时换槽
   nodesTtlMs: 30 * 60_000, // 节点表缓存有效期（VPNGate 免费节点掉得快）
+  maxTableAgeMs: 24 * 60 * 60_000, // 表龄告警阈值：镜像表超过它就 ⚠（旧表 = 一堆早下线的 IP，白拨几分钟）
   openvpnBin: "openvpn",
   authUser: "vpn", // VPNGate 公共账号（非私人凭据）
   authPass: "vpn",
@@ -38,16 +39,16 @@ export const DEFAULTS = {
 };
 
 /**
- * VPNGate 节点源：**官方永远在前**，第三方镜像只作兜墙的最后一条。
- * 镜像 `aimili-vpngate` 仓库内 `mirror/vpngate.csv` 由它的 GitHub Actions **每 15 分钟**从官方表刷新
- * （cron `7,22,37,52 * * * *`），实测 2026-10-25 与官方**同 15 列同 schema**、99 节点全部可解码 ⇒ 解析器零改动。
- * 注意：它自己配的那条 GitHub Pages 镜像 `baoweise-bot.github.io/...` 已 404 死（实测），故不采用。
- * 表内容只是**公开节点的连接配置 + VPNGate 公共账号（vpn/vpn）**，不含任何私人凭据；仍不信任镜像就用
- * `MSLXDFF_MULTI_IP_SOURCES` 只留官方，或 `MSLXDFF_MULTI_IP_NODES_FILE` 自带一份本地表。
+ * VPNGate 节点源：**官方永远在前**，第三方镜像只作兜墙。
+ * 纠错（2026-10-26 实测）：`aimili-vpngate` 的 Actions 只把新鲜快照发到 **GitHub Pages**（`openmili.github.io/aimili-vpngate/`），
+ * **不往仓库里写表**；仓库内 `mirror/vpngate.csv` 是手工提交的死快照（2026-08-26 后未变）——此前当「每 15 分钟刷新」用 =
+ * 拿两个月前的死 IP 白拨，真机症状与被墙一模一样。
+ * 表只是公开节点配置 + VPNGate 公共账号（vpn/vpn）；不信任镜像就 `_SOURCES` 只留官方或 `_NODES_FILE` 自带。
  */
 export const NODE_SOURCES = [
   "https://www.vpngate.net/api/iphone/",
   "http://www.vpngate.net/api/iphone/",
+  "https://openmili.github.io/aimili-vpngate/vpngate.csv",
   "https://raw.githubusercontent.com/OpenMili/aimili-vpngate/main/mirror/vpngate.csv",
 ];
 
@@ -124,6 +125,7 @@ export function resolveMultiIpConfig(env = process.env, { logDirFn = logDir } = 
     cooldownMs: envInt(env, "MSLXDFF_MULTI_IP_COOLDOWN_MS", DEFAULTS.cooldownMs),
     rotate: envBool(env, "MSLXDFF_MULTI_IP_ROTATE", DEFAULTS.rotate),
     nodesTtlMs: envInt(env, "MSLXDFF_MULTI_IP_NODES_TTL_MS", DEFAULTS.nodesTtlMs),
+    maxTableAgeMs: envInt(env, "MSLXDFF_MULTI_IP_MAX_TABLE_AGE_MS", DEFAULTS.maxTableAgeMs),
     openvpnBin: envStr(env, "MSLXDFF_MULTI_IP_OPENVPN", DEFAULTS.openvpnBin),
     authUser: envStr(env, "MSLXDFF_MULTI_IP_AUTH_USER", DEFAULTS.authUser),
     authPass: envStr(env, "MSLXDFF_MULTI_IP_AUTH_PASS", DEFAULTS.authPass),

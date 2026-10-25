@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveMultiIpConfig, resolveRole, devNameFor, tableFor } from "../src/multi-ip-pool/config.js";
 import { parseVpnGateCsv, decodeConfig, parseRemote, candidateNodes, sampleCandidates, clusterOf, countCandidates, probeTargetOf, matchCountry, loadNodeCache, saveNodeCache, writeAuthFile } from "../src/multi-ip-pool/nodes.js";
-import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile } from "../src/multi-ip-pool/nodes-fetch.js";
+import { fetchNodes, probeExitIp, describeFetchError, sourceToLocalPath, fetchNodesToFile, metaUrlFor, humanAge, fetchTableMeta } from "../src/multi-ip-pool/nodes-fetch.js";
 import { buildOpenvpnArgs, parseTunAddr, tunnelUpCommands, tunnelDownCommands, rulePriorityFor, isSupportedPlatform, startTunnel, waitTunAddr, relaxRpf, bringUpTunnel } from "../src/multi-ip-pool/tunnel.js";
 import { openvpnErrorLine, openvpnErrorBrief, probeTcp, probeBatch, probeSummaryLines, createTranscript, envSnapshotLines, slotPlanLines, residualHints } from "../src/multi-ip-pool/diagnose.js";
 import { createMultiIpDispatcher } from "../src/multi-ip-pool/dispatch.js";
@@ -136,6 +136,65 @@ test("nodes: fetch 失败必须挖出真凶（undici 只回 fetch failed，cause
   );
 });
 
+test("nodes: 表龄守卫（meta 说了生成时间 ⇒ 过期要 ⚠，但不拦取表；无 meta 不猜）", async () => {
+  assert.equal(metaUrlFor("https://openmili.github.io/aimili-vpngate/vpngate.csv"), "https://openmili.github.io/aimili-vpngate/vpngate.meta.json");
+  assert.equal(metaUrlFor("https://raw.githubusercontent.com/OpenMili/aimili-vpngate/main/mirror/vpngate.csv"), "https://raw.githubusercontent.com/OpenMili/aimili-vpngate/main/mirror/vpngate.meta.json");
+  assert.equal(metaUrlFor("https://www.vpngate.net/api/iphone/"), "", "官方源没有同源 meta");
+  assert.equal(metaUrlFor("/tmp/vpngate.csv"), "", "本地表文件没有 meta");
+  assert.equal(humanAge(90_000), "2 分钟");
+  assert.equal(humanAge(3 * 3600_000), "3.0 小时");
+  assert.equal(humanAge(5 * 86_400_000), "5 天");
+  assert.equal(humanAge("nope"), "未知");
+
+  const csv = `a.vpngate.net,203.0.113.9,9,1,1,Japan,JP,1,1,1,1,2weeks,AS1,,${B64}`;
+  const table = "https://openmili.github.io/aimili-vpngate/vpngate.csv";
+  const good = { ok: true, status: 200, text: async () => csv };
+  const metaRes = (iso) => ({ ok: true, status: 200, text: async () => JSON.stringify({ generated_at_iso: iso, row_count: 1 }) });
+  const now = Date.parse("2026-10-26T00:00:00Z");
+  const lines = [];
+  const old = await fetchNodes({
+    sources: [table],
+    fetchImpl: async (url) => (url.endsWith("vpngate.meta.json") ? metaRes("2026-08-26T11:36:33Z") : good),
+    maxAgeMs: 24 * 3600_000,
+    now: () => now,
+    log: (m) => lines.push(m),
+  });
+  assert.equal(old.stale, true, "两个月前的表必须判过期（真机踩过：拿旧表 = 一堆早已下线的 IP 白拨几分钟）");
+  assert.ok(lines.some((l) => l.includes("⚠ 表已过期")), "过期要显眼地打在取表那行上");
+  assert.ok(lines.some((l) => l.includes("MSLXDFF_MULTI_IP_SOURCES") && l.includes("MSLXDFF_MULTI_IP_NODES_FILE")), "要给出换源/自带表两条出路，而不是静默");
+  assert.equal(old.rows.length, 1, "过期只是告警，绝不拦取表（也许没有更好的源）");
+
+  const fresh = await fetchNodes({ sources: [table], fetchImpl: async (url) => (url.endsWith("vpngate.meta.json") ? metaRes("2026-10-25T23:00:00Z") : good), maxAgeMs: 24 * 3600_000, now: () => now });
+  assert.equal(fresh.stale, false, "一小时前生成的表不能误报");
+  assert.equal(fresh.meta.ageMs, 3600_000, "表龄按 meta 的生成时间算，不按取表时刻");
+
+  const noMeta = await fetchNodes({ sources: ["https://www.vpngate.net/api/iphone/"], fetchImpl: async () => good, maxAgeMs: 1 });
+  assert.equal(noMeta.meta, null);
+  assert.equal(noMeta.stale, false, "不知道表龄就不报警（官方源本来就是活的）");
+});
+
+test("nodes: fetchTableMeta 拿不到就 null（404/非 JSON/抛异常都不猜），generated_at 秒级也要认", async () => {
+  const src = "https://openmili.github.io/aimili-vpngate/vpngate.csv";
+  const withRes = (res) => fetchTableMeta({ source: src, fetchImpl: async () => res });
+  assert.equal(await withRes({ ok: false, status: 404, text: async () => "" }), null);
+  assert.equal(await withRes({ ok: true, status: 200, text: async () => "not json" }), null);
+  assert.equal(await withRes({ ok: true, status: 200, text: async () => JSON.stringify({ generated_at_iso: "nonsense" }) }), null, "时间解不出来 = 当没有 meta");
+  assert.equal(await fetchTableMeta({ source: src, fetchImpl: async () => { throw new Error("ECONNRESET"); } }), null, "meta 取不到绝不能拖垮取表");
+  assert.equal(await fetchTableMeta({ source: "https://www.vpngate.net/api/iphone/", fetchImpl: async () => { throw new Error("不该打网"); } }), null, "没有同源 meta 的源一次网都不打");
+  const at = 1_792_878_552_800;
+  const m = await fetchTableMeta({ source: src, fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ generated_at: at / 1000 }) }), now: () => at + 60_000 });
+  assert.equal(m.ageMs, 60_000, "generated_at（秒）也要认");
+  assert.equal(m.generatedAtIso, new Date(at).toISOString());
+});
+
+test("config: 表龄阈值缺省 24 小时（envInt 只认正整数）；显式 SOURCES 与本地表共存", () => {
+  assert.equal(resolveMultiIpConfig({}).maxTableAgeMs, 24 * 3600_000);
+  assert.equal(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_MAX_TABLE_AGE_MS: "3600000" }).maxTableAgeMs, 3600_000);
+  assert.equal(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_MAX_TABLE_AGE_MS: "0" }).maxTableAgeMs, 24 * 3600_000, "非正整数回落缺省（与其它 envInt 项同口径）");
+  assert.deepEqual(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_SOURCES: "https://mine.test/a", MSLXDFF_MULTI_IP_NODES_FILE: "/tmp/v.csv" }).sources, ["/tmp/v.csv", "https://mine.test/a"]);
+  assert.deepEqual(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_SOURCES: "https://mine.test/a" }).sources, ["https://mine.test/a"], "显式 SOURCES 完全接管（没有活表镜像时也照跑）");
+});
+
 test("nodes: 本地表文件可以当源（受限网络抓一份带过去，命中即零网络请求）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mi-file-"));
   const csv = `*vpn_servers\n#HostName,IP,Score\nvpn9.vpngate.net,203.0.113.9,9,1,1,Japan,JP,1,1,1,1,2weeks,AS1,,${B64}\n`;
@@ -153,16 +212,16 @@ test("nodes: 本地表文件可以当源（受限网络抓一份带过去，命�
   assert.equal(sourceToLocalPath("https://a/b"), null, "http(s) 源不能被当成本地路径");
 });
 
-test("config: 节点源官方在前、镜像只站末位；NODES_FILE 排最前", () => {
+test("config: 节点源官方在前、活表镜像(Pages)次之、仓库快照只站末位；NODES_FILE 排最前", () => {
   const d = resolveMultiIpConfig({});
-  assert.equal(d.sources.length, 3);
+  assert.equal(d.sources.length, 4);
   assert.ok(d.sources[0].includes("vpngate.net"), "官方源必须永远优先");
-  assert.ok(d.sources[2].includes("raw.githubusercontent.com"), "第三方镜像只能作兜墙末位");
+  assert.ok(d.sources[2].includes("openmili.github.io"), "上游 Actions 只发 Pages；仓库内那份是 2026-08-26 的手工死快照");
+  assert.ok(d.sources[3].includes("raw.githubusercontent.com"), "仓库内快照只能作兜墙末位");
   assert.equal(d.nodesFile, "");
   const withFile = resolveMultiIpConfig({ MSLXDFF_MULTI_IP_NODES_FILE: "/tmp/vpngate.csv" });
   assert.equal(withFile.sources[0], "/tmp/vpngate.csv", "本地表排在最前：文件在就一次网络都不打");
-  assert.equal(withFile.sources.length, 4, "网络源仍留作后备（本地表路径写错时不至于全盘瘫）");
-  assert.deepEqual(resolveMultiIpConfig({ MSLXDFF_MULTI_IP_SOURCES: "https://mine.test/a", MSLXDFF_MULTI_IP_NODES_FILE: "/tmp/v.csv" }).sources, ["/tmp/v.csv", "https://mine.test/a"]);
+  assert.equal(withFile.sources.length, 5, "网络源仍留作后备（本地表路径写错时不至于全盘瘫）");
 });
 
 test("nodes: probeExitIp 三态（认得出 / 认不出 / 网络异常）", async () => {

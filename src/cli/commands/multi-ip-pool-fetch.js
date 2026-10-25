@@ -50,8 +50,8 @@ export async function ensureRows(cfg, t) {
     return cache.rows;
   }
   t.say("缓存没有或已过期 ⇒ 逐源取表（每源失败原因都会列出来）");
-  const got = await fetchNodes({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, log: (m) => t.say(m) });
-  t.say(`取到：${got.source} → ${got.rows.length} 个节点`);
+  const got = await fetchNodes({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, maxAgeMs: cfg.maxTableAgeMs, log: (m) => t.say(m) });
+  t.say(`取到：${got.source} → ${got.rows.length} 个节点${got.stale ? "（⚠ 这张表已过期：节点多半早下线，别拿它当唯一来源）" : ""}`);
   return got.rows;
 }
 
@@ -155,9 +155,9 @@ export async function runFetch(args = []) {
   t.step("逐源取表（失败原因逐条列出）");
   t.say(`源列表：${cfg.sources.join(" → ")}`);
   try {
-    const got = await fetchNodesToFile({ sources: cfg.sources, out, timeoutMs: cfg.probeTimeoutMs, log: (m) => t.say(m) });
+    const got = await fetchNodesToFile({ sources: cfg.sources, out, timeoutMs: cfg.probeTimeoutMs, maxAgeMs: cfg.maxTableAgeMs, log: (m) => t.say(m) });
     const usable = got.rows.filter((r) => r.config).length;
-    t.say(`✅ ${got.rows.length} 个节点（${usable} 个配置可解码）→ ${out}`);
+    t.say(`✅ ${got.rows.length} 个节点（${usable} 个配置可解码）→ ${out}${got.stale ? "　⚠ 这份表已过期，只能应急" : ""}`);
     console.log("");
     console.log("  带到受限网络的机器上：");
     console.log(`     scp ${out} root@<组长机>:/root/.config/mslxdff/multi-ip-pool/vpngate.csv`);

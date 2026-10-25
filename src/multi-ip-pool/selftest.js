@@ -62,7 +62,7 @@ export async function runMultiIpCompare({ env = process.env, count = MITEST_DEFA
   let source = cache?.source || "(本地缓存)";
   if (!rows.length) {
     try {
-      const got = await (deps.fetchNodes || fetchNodes)({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, log });
+      const got = await (deps.fetchNodes || fetchNodes)({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, maxAgeMs: cfg.maxTableAgeMs, log });
       rows = got.rows;
       source = got.source;
     } catch (e) {

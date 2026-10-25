@@ -86,7 +86,7 @@ export function createDialer({ cfg, baseUrl = "https://opencode.ai", log = () =>
       }
     }
     if (!rows.length) {
-      const got = await (deps.fetchNodes || fetchNodes)({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, log });
+      const got = await (deps.fetchNodes || fetchNodes)({ sources: cfg.sources, dir: cfg.dir, timeoutMs: cfg.probeTimeoutMs, maxAgeMs: cfg.maxTableAgeMs, log });
       rows = got.rows;
       source = got.source;
     }
