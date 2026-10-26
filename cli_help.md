@@ -46,7 +46,7 @@
 | `mslxdff -debug` | `--debug` | 停掉后台 daemon，前台运行并实时打印事件流；Ctrl+C 恢复后台 | 清空旧日志 | 会停旧 daemon |
 | `mslxdff -plugins` | `--plugins` | 列出插件目录与已识别插件及其 hooks，不启动 daemon | 否 | 否 |
 | `mslxdff -stop` | `--stop` | 停止 daemon | 否 | 需运行 |
-| `mslxdff -restart` | `--restart` | 重启 daemon | 否 | 有则重启，无则拉起 |
+| `mslxdff -restart` | `--restart` | 重启 daemon；末尾再做一次**开机自启体检**（失效自动派进程重注入，连「体检通过」都打回执） | 否 | 有则重启，无则拉起 |
 | `mslxdff -uninstall` | `--uninstall` | 停 daemon 并删除 state/pid/log/calls/errors/events 文件，提示 `npm uninstall -g` | 删文件 | — |
 | `mslxdff -port N` | `--port N` | 持久化监听端口到 state，运行中则重启 daemon | 是（`port`） | 重启 |
 | `mslxdff -showtoken` | `--showtoken` | 打印当前 Bearer token | 首次会生成 | 否 |
@@ -83,6 +83,9 @@
 | `mslxdff -provider raccoon login` | `--provider` | Raccoon（商汤小浣熊）**扫码登录**：请服务端签发二维码（`POST /api/iam/v1/auth/mp/qrcode` 拿 `qrcode_code`+`scan_path`+`expires_in`）→ 终端渲染二维码 + 打印 `https://xiaohuanxiong.com/login/mp?code=…` 深链接（**必须用微信「扫一扫」扫**；浏览器直接打开必 404 —— 站点 SPA 路由表无该路径）→ 轮询至 `success`，落盘 `auths/raccoon-<uid>.json`（0600）+ state keys，并把兜底目录（6 模型，全部读图）只增不减并入 allowlist（开箱可用）；此后 `raccoon/<modelId>` 前缀路由（**OpenAI 兼容网关**，流式逐字节透传、非流式本地聚合；客户端同形头 + `extra_body.thinking`，**不发 `reasoning_effort`**；按响应体形状判流式）；错误分级 登录态（200001/200003/401）→401 重登指引、积分不足→长冷 1h + `quota_exhausted`、限流/服务端→短冷 30s；临期用 `refresh_token` 自动续期；**全程免验证码**；**恒 local-only** 不借出（ADR-0050） | 是（写 `providerConfigs.raccoon`） | 重启生效 |
 | `mslxdff -provider raccoon login --password [--phone <号>] [--nation <码>]` | `--provider` | Raccoon **手机号+密码登录**（多账号免扫码，适合连着批量补号 / 脚本化）。走官方同款 `POST /api/web/auth/v1/login_with_password`，body `{nation_code, phone, password}` 里 **phone/password 必须 AES-128-CFB 加密**（算法与 key 硬编码在前端，见 `crypto.js`）—— 发明文会被判成「手机号或密码不正确」，极易误诊为密码错。TTY 下手机号可见输入、**密码关回显（逐键回显 `*`）**；非 TTY 必须用 `--password=<密码>`（不从管道偷读）。默认 `--nation 86`。失败码表给人话（`200004`→「手机号或密码不正确」），回执回显手机号但**打码**、**绝不回显密码**。落盘/确认/领奖与扫码登录**完全同路**（同一 `auths/raccoon-<uid>.json` + `iam/confirm` + 一次性登录奖励） | 是（写 `providerConfigs.raccoon`） | 重启生效 |
 | `mslxdff -provider raccoon quota [--json]` / `checkin [--json]` | `--provider` | 逐号查积分余额（可用/奖励/每日/月度/充值五分项）与每日积分结算 + 一次性登录奖励补领。**每日积分是惰性结算**（2026-10-21 账单实测）：服务端每天 00:00 挂账（当前档位 500 分），**当天第一次访问 `GET /api/web/office/v3/setting_info` 才真正入账**（入账即有效期到 T+6 的 23:59:59，即官方文案「当天登录后延长至 7 天」），不访问则当天 `daily_points` 恒 0；`checkin` 就先打这个端点触发结算（幂等，可每天重复），再补一次性「桌面端登录奖励 3000」（每号一次性，`login` 时已自动领）。判据一律走账单：结算认「今天那笔 `daily_grant`」、登录奖励先认上游 `data.granted`（`false`＝本号已发过，**不是未到账**）再回查账单（上游对重复领取照样回 code:0 却不到账），每日结算输出 `claimed/already/unverified/error`、登录奖励 `claimed/already/phantom/unverified/error`；未登录给 login 指引、登录态失效给重登指引；`--json` 输出 `{accounts:[…]}`；daemon 每日 09:00 跑同一套（`MSLXDFF_RACCOON_CHECKIN=0` 关，`_CHECKIN_HOUR` 改点，启动补扫，结果落 `state.raccoonCheckin`） | 否（只读）/ 是（checkin 触发每日结算 + 补领） | 立即生效 |
+| `mslxdff -provider todaycn login [--refresh <串>]` | `--provider` | Today AI（今日工作助手）接入：默认**只读**解密本机桌面登录态（Windows DPAPI 解 `Local State` 密钥 → AES-256-GCM 解 `account-credentials.slot-a\|b`）导入这一枚 `refreshCredential`（一机一号）；`--refresh <串>` 手填另一台机/另一个号 = **多号轮换的唯一途径**。落盘 `auths/todaycn-<uid>.json`（0600 原子写）+ state `providerConfigs.todaycn.keys`，并把该号 `/v1/pricing/status` 的 `modelOptions` 播种进 allowlist（**目录源就用它**：`/v1/llm/models` 那 35 个 id 看得见、用不了，PUT 枚举外必 400）。此后 `todaycn/<模型名>` 前缀路由：多号 keyring 轮换（号=refreshCredential，实测**不轮换**）、失败分档冷却（auth/quota 长冷、**空转**中冷且当场换号、server/network 短冷、param/unknown 不冷却）、模型位是**账号级**设置故按「号↔模型位」绑定（能切就切、切不动就换号，`MSLXDFF_TODAYCN_SWITCH_MODEL=0` 关切换）；**恒 local-only 不借出**（本机账号凭据、形状非 JWT，靠 `NEVER_SHARE_IDS` 显式登记） | 是（写 `providerConfigs.todaycn` + auths） | 重启生效 |
+| `mslxdff -provider todaycn models [--json]` | `--provider` | 列该账号**真正可选**的模型位（`/v1/pricing/status` 的 `modelOptions.options`，带消耗倍率如 `deepseek-v4.1-flash 1x` / `glm-5.3 4x`；按 allowlist 过滤） | 否（只读） | 立即生效 |
+| `mslxdff -provider todaycn persona [show\|apply\|rollback]` | `--provider` | **把工具格式契约写进 / 摘出 agent 人设**（`PATCH /v1/agents/default` 的 `agentCharacter`，控制面免费、产品允许用户改的设置项）：`show` 显示当前人设与契约是否已写入（末 300 字预览）、`apply` 幂等追加、`rollback` 幂等仅摘本仓那一段（其余文字一字不动）、`on`/`off` 为别名、`--uid <uid>` 指定多号中的某一号。为什么需要：只按轮在消息里写契约时，任务型请求会被平台自带工具通道劫走（零 tool_calls，实测原话「已经派出去抓了」），写进人设后同一句稳定回单行 JSON；契约只对「我在写一个小脚本」开头的机器请求生效，普通聊天不受影响（ADR-0075） | 是（改账号级人设，可回滚） | 立即生效 |
 | `mslxdff -provider <id> set-models-path <path>` | `--provider` | 改 `models` 路径（如 `myapi` 的 `/v1/models`、`workbuddy` 的 `/console/...`） | 是 | 重启生效 |
 | `mslxdff -provider <id> set-chat-path <path>` | `--provider` | 改 `chat` 路径（如 `/v1/chat/completions`、`/v2/chat/completions`） | 是 | 重启生效 |
 | `mslxdff -provider <id> ...` | `--provider` | 配置需鉴权供应商的 API keys/地址（多 key 轮转、set-url 改地址）及共享开关 | 是 | 重启生效 |
@@ -104,9 +107,9 @@
 | `mslxdff -setto claude-desktop [modelId ...] [--max N] [--max-effort <lvl>] [--1m <off|auto|all|列表>] [--no-alias] [--check] [--official]` | `--setto`、`claudedesktop` | 一键接 **Claude Desktop**（App 的 Code tab，官方名 Claude Desktop on 3P，ADR-0048）：桌面端**不读** `ANTHROPIC_BASE_URL`/`settings.json`，只读自家 3P profile 且只认「三档角色 ID」→ 本命令一次写两处：① `configLibrary/<uuid>.json` + `_meta.json`（`inferenceProvider=gateway`/`credentialKind=static`/`authScheme=bearer`/`baseUrl` **不带 /v1**/`inferenceModels[{name:角色槽,labelOverride:真模型名,可选 supports1m+prefer1m}]`，只 upsert 自家条目、他人 entry 不动、损坏拒写、幂等按原文比对、明文 token `0600`）② `model-aliases.json` 写「角色槽 → 真模型」（入站 `policy.js` 生效、未命中即重读 → **不重启 daemon**）；槽位上限 12（取 App 签名 `model-catalog`），超出如实报 dropped；**`--1m`（ADR-0056，Claude 专用）**：`auto`（缺省）问本机 `/v1/models` 已裁决窗口 ≥1M 的行打官方成对键 `supports1m+prefer1m`（App 菜单单条、新会话直接 1M；此前不打标一律被 App 按 200K 封顶）——网关不可达 ℹ 行降级不打、不阻塞写盘；`all` 全打（用户担保）、`off` 回历史三键形状、逗号分隔列表只打命中行（未命中值 ⚠ 不失败） | 否（不改 `preferredModel`/state） | 否；⚠ **App 不热重载**，写完必须完全退出重开并在登录界面选这份配置 |
 | `mslxdff -claude-desktop [status|slots|check]` | `--claude-desktop` | 桌面端体检（只读）：`status` 托管策略→profile 登记→槽位 alias 三段判据（含 `supports1m` 的条目行尾标 `1M`）；`slots` 解 App 签名 `model-catalog`（base64 `documentBytes`）与内置 12 槽比对；`check` 逐槽打本机 `/v1/messages`（`max_tokens=16`）给 状态/耗时/`x-mslxdff-actual-model`/失败原因与下一步 | 否 | 否 |
 | `mslxdff -free` | `--free`, `-free-check`, `--free-check` | V2EX 白嫖雷达（仅 V2EX 单源）：拉 `latest.json + hot.json` 按 `白嫖|限免|免费额度|注册送|羊毛` 过滤 | 否 | 否 |
-| `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起） | 否 | 否 |
-| `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启 | 否 | 否 |
-| `mslxdff -autostart status` | `--autostart status` | 查看自启状态（已启用/未启用 + 任务/注册表路径） | 否 | 否 |
+| `mslxdff -enable-autostart` | `--enable-autostart` | 开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起）；成功即落意愿位（`state.json: autostart=true`）并清零重注入台账 | 否 | 否 |
+| `mslxdff -disable-autostart` | `--disable-autostart` | 关闭开机自启并落意愿位（`state.json: autostart=false`）——此后 daemon 每次启动的自愈体检不再补注册 | 否 | 否 |
+| `mslxdff -autostart status` | `--autostart status` | 自启体检：意愿 + 注册现状 + **内容健康**（注册里 node/脚本路径是否还存在）+ supervisor 是否在管 + 重注入台账（连续失败/剩余预算）——与 daemon 启动自愈、`-restart` 同一判据 | 否 | 否 |
 | `mslxdff -timezone [set <tz>\|clear\|status]` | `--timezone`, `-tz`, `--tz` | 时区配置：默认 `Asia/Shanghai`，可设 `UTC`/`America/New_York` 等（`MSLXDFF_TZ` 环境变量临时覆盖，`state.json: timezone` 持久化） | 是（`timezone`） | 否 |
 | `mslxdff -free-watch` | `--free-watch` | V2EX 白嫖雷达 watch 模式（每 5 分钟轮询，前台常驻） | 否 | 否 |
 | `mslxdff -setto opencode [modelId\|--all]` | `--setto` | 把本地网关注册为 opencode 供应商（`provider.mslxdff`，`http://127.0.0.1:<port>/v1`，模型直写裸名如 `deepseek-v4-flash-free`，`/` 自动转 `-` 如 `bai/deepseek`→`bai-deepseek` 到达 8989 自动还原，`--all` 批量同步全部 `modelPicks`；`picks` 非空时自动摘除未在 picks 的失效模型；**自动附模型能力**（models.dev 目录：推理档位/📷读图/tool_call/上下文长度/价格，写入 opencode Model 形状字段，opencode 原生识别；`workbuddy/` 模型不在目录 → 走上游原生字段兜底（上下文/读图/推理默认档），其余未收录模型仅写名称不影响使用；旧格式条目自动升级注入（缺 variants 的也补）） | 是（`opencode.json`） | 热重载 |
@@ -181,6 +184,7 @@
 
 - **语法**：`mslxdff -restart`
 - **作用**：重启 daemon（`stopDaemon()` + **等旧进程真死**（`waitPidGone`，超时补 SIGKILL）→ **清掉不在 `daemon.pid` 里的 daemon**（`reapGhostDaemons`：`-restart` 的结构性盲区，真机曾因此与新 daemon 互抢本机长驻端口一整天）→ `startDaemon([])` → 等 `/health` 4s）。`daemon 已在运行` 时先停再起，`stale pid` 时清旧 pid 后拉起，`未运行` 时直接拉起。结束打 `restarted as a background daemon (pid XXX)` + `endpoint`/`log`/`pid`；**若仍有旧 daemon 在世**（`/health` 可能由它应答）改打 `⚠ 仍有 N 个旧 daemon 在跑…请 kill 掉`，不再谎报 restarted。
+- **开机自启体检（ADR-0074 二次修订）**：新 daemon 起来后，restart **本体**也调一次 `repairAutostartOnce()`（与 daemon 启动 2.5s 后那次同一判据、同一动作，收在 `src/runtime/autostart-repair.js`）—— 体检不过（未注册 / 任务被禁用 / 注册里的 node·脚本路径已不存在）就派一个 detached helper 跑 `-enable-autostart` 重注入，并把**旧注册值**打进回执与 `events.log`；`reportOk` 打开 ⇒ 连「体检通过」也印一行。两道护栏：**在途互斥 60s**（`state.json: autostartRepair.at`，防 CLI 与 daemon 连派两个 helper 抢写同一条注册）与 **supervisor 门**（`supervised`：本进程在 systemd 下、或有 system 级 unit 在管 ⇒ 整块跳过，别跟 systemd 抢端口，ADR-0064）。关掉这步：`MSLXDFF_NO_AUTOSTART=1` 或 `MSLXDFF_AUTOSTART_REPAIR=0`（会明打「本次未体检」，不静默）。
 - **示例**：`mslxdff -restart`
 
 ### `-uninstall` / `--uninstall`
@@ -218,7 +222,7 @@
   - `mslxdff vX.Y.Z`、`daemon` 是否运行（pid + uptime + version ok）、`endpoint` + `health` 探活（ok/fail + ms）、`config`（port 来源 persisted/env/default + state/log 路径 + bind host）
   - `upstream providers`：所有已配置供应商（`opencode` 恒 enabled 无需 key + `openrouter`/`workbuddy`/通用 `providerConfigs.<id>`），每行 `●/○ enabled/disabled  keys/acc  allow  baseUrl  共享` + 备注（测试桩/缺 key 等），0 enabled 时提示加 `mslxdff -provider add` 或 `node workbuddy-token-auto.js`（`providerRows` 聚合 `loadProviderConfigs+Keys+BaseUrl+Allow`，workbuddy `k-new` stub 特殊识别）
   - `models`：`models.json` free 数 + 缓存时间/age、`preferred`（含 avg首字/tps/次数）、`picks`（勾选集，空=全量）、`free list`（每模型 `fmtStatus` + avg首字/tps/次数，<10ms 视为测试数据隐藏）、`模型体检 TopN`（`modelStats` 按次数排序的 `avg首字/总耗时/速度/啰嗦/样本/p95`，<10ms 隐藏，仅样本>0）
-  - `autostart`：`getAutostartStatus()` 的 `detail` + `task/unit`，含 `mslxdff -autostart status` 提示
+  - `autostart`：`checkAutostartHealth()` 统一判据（与 daemon 启动自愈同源）：意愿位（`state.json: autostart`）+ 注册现状 + **内容健康**（注册里 node/脚本路径已不存在 = 失效）+ 重注入台账（`state.json: autostartRepair`）
   - `plugins`：`resolvePluginDirs+loadPlugins` 的 `plugins.length` 与每插件 `name@version [hooks]` 或 `none` 提示
   - `joined groups`：每个已加入群组的 `name`、`leaderUrl`、成员列表（同前）
   - `failover targets`：`peers.all()` 列表（同前），空时提示 `failover: (none — 加组后自动出现)`
@@ -1317,6 +1321,8 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_STATE_FILE` | `~/.config/mslxdff/state.json` | state 持久化路径 |
 | `MSLXDFF_TZ` / `MSLXDFF_TIMEZONE` / `TZ` | `Asia/Shanghai` | 时区（`state.json: timezone` 持久化，env 临时覆盖，`Intl` 校验；所有时间展示统一走此时区） |
 | `MSLXDFF_DAEMON_DIR` | 随 state 派生（`dirname(stateFile)`） | daemon pid/log/models 目录 |
+| `MSLXDFF_NO_AUTOSTART` | — | 关掉 daemon 启动时的开机自启自愈（任意非空值生效；`-enable-autostart` 的 helper 也带它防递归） |
+| `MSLXDFF_AUTOSTART_REPAIR` | 开 | 开机自启自愈总开关：`0/off` 时 daemon 启动不再体检/补注册（重注入连续失败 3 次后自动停手只告警，台账见 `state.json: autostartRepair`） |
 | `MSLXDFF_STATE_FLUSH_MS` | `500` | 热数据批量刷盘间隔，`0` 则同步刷（测试用） |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai` | 默认供应商上游 |
 | `MSLXDFF_UPSTREAM_ENGINE` | `sdk` | 上游 wire 层引擎（ADR-0017）：缺省即 AI SDK（opencode 流式 chat 走 `@ai-sdk/openai-compatible`，`muse-spark*` 等 responses 类走 `@ai-sdk/openai` 的 responses 适配器；响应带 `x-mslxdff-upstream-engine: sdk` 标记，复用 legacy keep-alive 连接池；非流式自动委派 legacy；SDK 不可用自动回退并告警一次）；显式 `legacy` 或关闭词（`0/off/false/no/disable`）=原实现；通用 OpenAI 兼容族与 cline 的流式 chat 同源（供应商级 `MSLXDFF_<ID>_SDK` 显式设置即局部生效，未设置则继承本变量＝全局一键熔断） |
@@ -1359,6 +1365,11 @@ mslxdff -provider <id> [key...|add|remove|list|clear|set-url]
 | `MSLXDFF_QWENWORK_UA` / `_COSY_VERSION` / `_RELEASE_VERSION` / `_BUILD` | `qoderwork/1.0.5` / `1.1.18` / `1.0.5-26090901` / `26090901` | qwenwork 协议版本快照覆盖（排障用；客户端升级后 403 时改，改后必须现网复测） |
 | `QWENWORK_AUTH_DIR` | `<state 目录>/auths` | qwenwork 账号落盘目录（`qwenwork-<uid>.json`，0600 tmp+rename；测试环境走系统 tmp） |
 | `QWENWORK_DEBUG` | `0` | qwenwork 排障日志（`1` 打 `[qwenwork-chat]`：refresh 失败/身份补齐失败） |
+| `MSLXDFF_RAILWAY` / `_BASES` / `_TIMEOUT_MS` / `_COOLDOWN_MS` | 开 / 缺省两出口（`instabox.tech` → 老 railway 反代，顺序=优先级） / `60000` / `30000` | railway 供应商（opencode zen free 层多出口反代，免凭证）：`=0` 关该供应商；`_BASES` 逗号分隔**完整替换**出口列表；`_TIMEOUT_MS` 上游请求超时；`_COOLDOWN_MS` key 冷却 |
+| `MSLXDFF_RAILWAY_ENDPOINT_COOLDOWN_MS` / `_ENDPOINT_QUOTA_COOLDOWN_MS` / `_ENDPOINT_RETRY_DELAY_MS` / `_ENDPOINT_ROUNDS` | `3000` / `3600000` / `3000` / `2` | railway 多出口两档重试：非 429 失败（5xx/连不上/超时）→ 该出口短冷却，且本请求内**等 `_RETRY_DELAY_MS` 换下一个**；**429**（免费层额度按出口计）→ 该出口长冷却、**不等待**直接换；两侧轮流、每出口最多 `_ROUNDS` 次，用尽后交回最后那条错误（成功一次即清该出口冷却；400/401/403 原样交回、不冷却） |
+| `MSLXDFF_TODAYCN_COOLDOWN_MS` / `_QUOTA_COOLDOWN_MS` / `_EMPTY_COOLDOWN_MS` | `30000` / `3600000` / `120000` | Today AI 多号冷却分档：短冷（401/403/429/5xx 与 fetch 异常）/ 额度耗尽长冷 / `_EMPTY` = 发出去但轮询超时无 final（中冷且当场换号） |
+| `MSLXDFF_TODAYCN_POLL_INTERVAL_MS` / `_POLL_TIMEOUT_MS` / `_MAX_CHARS` | `2500` / `75000` / `120000` | Today AI 上游轮询节奏（`GET /v2/messages`）与单条正文上限（`contentMaxChars`，超长截断） |
+| `MSLXDFF_TODAYCN_SWITCH_MODEL` / `_AUTH_DIR` / `_STATE_DIR` | 开 / `<state 目录>/auths` / 桌面态目录（自动探测） | Today AI：`_SWITCH_MODEL=0` 关「号↔模型位」自动切换（随之不再为切模型而换号）；`_AUTH_DIR` 账号文档目录（`todaycn-<uid>.json`，0600）；`_STATE_DIR` 覆盖桌面客户端 Local State 目录（自动导入多号的来源，只读） |
 | `MSLXDFF_<ID>_KEY` | — | 任意供应商的 env key（`<ID>` 大写、非字母数字转 `_`） |
 | `MSLXDFF_<ID>_BASE_URL` | — | 通用供应商 env baseUrl（覆盖 `providerConfigs.<id>.baseUrl`） |
 | `MSLXDFF_<ID>_SHARE_KEYS` | — | 任意供应商的共享开关覆盖（`1/true/on/yes` 视为开） |

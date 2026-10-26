@@ -49,5 +49,8 @@ test("源码级：SIGKILL / fuser / pid 路径三处护栏都在（防后人改�
 test("daemon 侧：不在自身进程里调 enableAutostart，改由独立 helper 接管", () => {
   const src = readFileSync(new URL("../src/runtime/server-lifecycle.js", import.meta.url), "utf8");
   assert.doesNotMatch(src, /await enableAutostart\(\)/, "daemon 内直接调 enableAutostart() = 举手自杀");
-  assert.match(src, /spawnAutostartHelper\(\)/, "必须派生独立进程完成接管");
+  assert.match(src, /repairAutostartOnce\(\{/, "接管由唯一 actor 完成（判据与动作自 ADR-0074 起收在 runtime/autostart-repair.js）");
+  const actor = readFileSync(new URL("../src/runtime/autostart-repair.js", import.meta.url), "utf8");
+  assert.match(actor, /spawnAutostartHelper\(\)/, "actor 内仍必须派生独立进程完成接管");
+  assert.doesNotMatch(actor, /await enableAutostart\(\)/, "actor 里 inline 调 enableAutostart() = 把刚起的 daemon 停掉");
 });

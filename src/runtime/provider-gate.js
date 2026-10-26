@@ -4,7 +4,7 @@
 // Note: auth 号型不要求 baseUrl 是硬约束（旧门禁 baseUrl&&keys 曾静默跳过整家 qoder）— 见 .agents/notes/implemented/bug-fix/2026-09-21-auth-doc-provider-gate.md
 
 /** 凭证在 auth 目录、无需 baseUrl 的「auth 号型」定制供应商（端点由各自 constants 决定）。 */
-export const AUTH_DOC_PROVIDER_IDS = ["workbuddy", "traework", "qoder", "qwenwork", "globalqwenwork", "raccoon"];
+export const AUTH_DOC_PROVIDER_IDS = ["workbuddy", "traework", "qoder", "qwenwork", "globalqwenwork", "raccoon", "todaycn"];
 
 /**
  * 免凭证供应商：上游就是 opencode zen 的免费层代理，没有 key 也能用（按出口 IP 计额度）。
@@ -35,7 +35,7 @@ export async function loadAuthDocs(gid) {  try {
             ? await import("../providers/globalqwenwork/account-store.js")
             : gid === "raccoon"
               ? await import("../providers/raccoon/account-store.js")
-            : await import("../providers/qoder/account-store.js");
+            : (gid === "todaycn" ? await import("../providers/todaycn/account-store.js") : await import("../providers/qoder/account-store.js"));
     return store.listAccountDocs();
   } catch {
     return [];

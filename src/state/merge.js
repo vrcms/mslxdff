@@ -14,6 +14,8 @@ export const COLD_WINS = new Set([
   "groupsJoined",
   "bans",
   "createdAt",
+  "autostart",
+  "autostartRepair",
 ]);
 
 export function mergeState(disk, mem) {

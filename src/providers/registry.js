@@ -51,14 +51,20 @@ export const customProviders = [
   {
     id: "railway",
     // opencode zen free 层的另一个 IP 出口（Railway 反代），只暴露 free 模型。
-    // 匹配必须排在 generic 之前，且不能与其它条目撞（railway.app 域名足够独特）。
-    match: (id, baseUrl) => id === "railway" || String(baseUrl).includes("railway.app"),
+    // 匹配必须排在 generic 之前，且不能与其它条目撞（railway.app / instabox.tech 域名足够独特）。
+    match: (id, baseUrl) => id === "railway" || /railway\.app|instabox\.tech/.test(String(baseUrl)),
     load: () => import("./railway.js").then((m) => m.createRailwayProvider),
   },
   {
     id: "raccoon",
     match: (id, baseUrl) => id === "raccoon" || String(baseUrl).includes("xiaohuanxiong.com"),
     load: () => import("./raccoon/index.js").then((m) => m.createRaccoonProvider),
+  },
+  {
+    id: "todaycn",
+    // Today AI（今日工作助手）：本机桌面登录态导入的多号轮换 + 文本契约模拟工具调用。
+    match: (id, baseUrl) => id === "todaycn" || String(baseUrl).includes("todayai.cn"),
+    load: () => import("./todaycn.js").then((m) => m.createTodaycnProvider),
   },
   // agentrouter 定制工厂已于 2026-10-21 摘除：现网成功率仅 ~48%（502/400/422/500 高发），
   // 从注册表 + 预热名单移除后网关不再解析 agentrouter/* 模型。工厂文件 src/providers/agentrouter.js

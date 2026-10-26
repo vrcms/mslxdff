@@ -59,6 +59,9 @@ export async function handleProviderModels(id, sub, args, rest) {
     } else if (id === "zcode") {
       const { createZcodeProvider } = await import("../../../providers/zcode/index.js");
       provider = createZcodeProvider({ id, apiKeys: keys, file: defaultStateFile() });
+    } else if (id === "todaycn") {
+      const { createTodaycnProvider } = await import("../../../providers/todaycn/index.js");
+      provider = createTodaycnProvider({ id, apiKeys: keys, file: defaultStateFile() });
     } else if (id === "raccoon") {
       const { createRaccoonProvider } = await import("../../../providers/raccoon/index.js");
       provider = createRaccoonProvider({ id, apiKeys: keys, file: defaultStateFile() });

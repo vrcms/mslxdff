@@ -3,7 +3,7 @@
  import { isModelAllowed as stateIsAllowed, loadProviderAllowedModels as stateLoadAllowed, loadProviderAllowAnyModels as stateLoadAllowAny } from "../state.js";
 // 定制预热名单：registry customProviders + 默认 opencode；openrouter/自配 generic 不预热（按需自拉）
 // agentrouter 已于 2026-10-21 随 registry 一并摘除（见 src/providers/registry.js 注释）。
-const CUSTOM_PREHEAT_IDS = new Set(["opencode", "workbuddy", "traework", "cline", "codearts", "qoder", "globalqwenwork", "qwenwork", "zcode", "raccoon"]);
+const CUSTOM_PREHEAT_IDS = new Set(["opencode", "workbuddy", "traework", "cline", "codearts", "qoder", "globalqwenwork", "qwenwork", "zcode", "raccoon", "todaycn"]);
  function isPreheatDisabled() {
    const raw = process.env.MSLXDFF_PREHEAT;
    if (raw === undefined || raw === null || raw === "") return false;

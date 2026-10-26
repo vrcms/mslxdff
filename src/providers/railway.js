@@ -1,12 +1,18 @@
-// Railway 定制供应商：opencode zen free 层的**另一个 IP 出口**（Railway 边缘反代 opencode.ai）。
-// 本质：同一套 zen 契约，只是出口 IP 不同 ⇒ 免费额度按出口 IP 计，等于多一份额度。
+// Railway 定制供应商：opencode zen free 层的**多个 IP 出口**（第三方边缘反代 opencode.ai）。
+// 本质：同一套 zen 契约，只是出口 IP 不同 ⇒ 免费额度按出口 IP 计，等于多份额度。
+//
+// 多出口轮流重试（顺序=优先级，缺省「新隧道 → 原 railway 反代」，判据/冷却全在 railway-endpoints.js）：
+//   429（额度被上游收走）→ 该出口歇 1 小时；本请求内出局，换另一个出口不等待
+//   5xx / 连不上 / 超时  → 该出口歇 3s；本请求内等 3s 换另一个 URL（两侧轮流），每出口最多 2 次
+//   400 / 401 / 403      → 原样交回（换出口无用；FreeTierError、模型不存在的终局判决靠它）
+// 上层（dispatcher / chat-pipeline）零感知——仍是同一个 `railway/<model>`。
 //
 // 与内置 opencode 的区别：
 //   ① 只暴露 free 模型（上游 /models 会把付费模型一起列出来，这里过滤掉）；
 //   ② 每个请求强制补 free-lane 形状（stream:true + 五个核心工具名），否则 403 FreeTierError；
 //   ③ 带 opencode 身份头（UA + client/session/request/project），否则同样 403。
 //
-// 端点：<base>/zen/v1/models、<base>/zen/v1/chat/completions（base 缺省为 Railway 反代根）。
+// 端点：<base>/zen/v1/models、<base>/zen/v1/chat/completions（base 取自出口列表）。
 import crypto from "node:crypto";
 import { createKeyRing } from "./keyring.js";
 import { collectApiKeysGeneric, envInt, createAgent, getUndici, joinUrl } from "./base.js";
@@ -15,10 +21,19 @@ import { loadProviderBaseUrl, loadProviderKeys, saveProviderConfig } from "../st
 import { ensureFreeLaneShape, aggregateChatSse } from "../free-lane.js";
 import { genId, opencodeUa, digestIdTail } from "../opencode-identity.js";
 import { joinModelId } from "./model-id.js";
+import {
+  UPSTREAM_RAILWAY_BASE,
+  resolveRailwayBases,
+  isSwapWorthyStatus,
+  createEndpointRing,
+  endpointTuning,
+  runEndpointRotation,
+} from "./railway-endpoints.js";
 
 const { UndiciFetch } = getUndici();
 
-export const DEFAULT_RAILWAY_BASE = "https://mytestip-production.up.railway.app/ai-api";
+/** 兼容旧常量：老代码（含测试）引用的「原 railway 反代根」。 */
+export const DEFAULT_RAILWAY_BASE = UPSTREAM_RAILWAY_BASE;
 export const MODELS_PATH = "/zen/v1/models";
 export const CHAT_PATH = "/zen/v1/chat/completions";
 
@@ -37,12 +52,6 @@ export function filterFreeModels(list) {
   return (Array.isArray(list) ? list : []).filter((m) => m && isFreeModelId(m.id));
 }
 
-function resolveBase(baseUrl) {
-  if (baseUrl) return String(baseUrl).trim().replace(/\/+$/, "");
-  const env = loadProviderBaseUrl("railway");
-  return env || DEFAULT_RAILWAY_BASE;
-}
-
 export function createRailwayProvider({
   id = "railway",
   baseUrl,
@@ -50,12 +59,25 @@ export function createRailwayProvider({
   apiKey,
   connectTimeoutMs = envInt("MSLXDFF_RAILWAY_TIMEOUT_MS", 60_000),
   cooldownMs = envInt("MSLXDFF_RAILWAY_COOLDOWN_MS", 30_000),
+  endpointCooldownMs,
+  endpointQuotaCooldownMs,
+  endpointRetryDelayMs,
+  endpointRounds,
   fetchImpl,
   file,
   clock = Date.now,
 } = {}) {
   if (id !== "railway") throw new Error(`railway provider id mismatch: ${id}`);
-  const resolvedBase = resolveBase(baseUrl);
+  const tuning = endpointTuning({
+    shortCooldownMs: endpointCooldownMs,
+    quotaCooldownMs: endpointQuotaCooldownMs,
+    retryDelayMs: endpointRetryDelayMs,
+    rounds: endpointRounds,
+  });
+  const endpoints = createEndpointRing(resolveRailwayBases({ baseUrl }), {
+    cooldownMs: tuning.shortCooldownMs,
+    quotaCooldownMs: tuning.quotaCooldownMs,
+  });
   if (!fetchImpl) fetchImpl = UndiciFetch || compatFetch;
 
   const rawKeys = collectApiKeysGeneric(id, apiKeys, apiKey, (pid) => loadProviderKeys(pid, file ? { file } : {}));
@@ -101,70 +123,110 @@ export function createRailwayProvider({
     };
   }
 
-  async function chat(body, opts = {}) {
-    const wantStream = body?.stream === true;
-    // free-lane 强制 stream:true：非流式请求在这里补形状，聚合回 JSON 后再返回。
-    const outBody = { ...body, stream: true };
-    ensureFreeLaneShape(outBody);
+  /** 单出口一发（不含判据，成败交由编排裁决）。 */
+  async function postTo(base, outBody, opts, key) {
     const headers = buildHeaders(opts);
-    const key = ring.size ? ring.next() : null;
     if (key) headers.Authorization = `Bearer ${key}`;
-
-    const url = joinUrl(resolvedBase, CHAT_PATH);
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(new Error(`railway timed out after ${connectTimeoutMs}ms`)), connectTimeoutMs);
-    let res;
     try {
-      res = await fetchImpl(url, {
+      return await fetchImpl(joinUrl(base, CHAT_PATH), {
         method: "POST",
         headers,
         body: JSON.stringify(outBody),
         signal: ac.signal,
         ...(dispatcher ? { dispatcher } : {}),
       });
-    } catch (err) {
+    } finally {
       clearTimeout(timer);
-      if (key) ring.onError(key);
-      throw err;
     }
-    clearTimeout(timer);
+  }
 
-    if (res.status >= 400) {
-      if (key) ring.onError(key);
-      return res;
+  /** 一发上游的分类：ok / quota(429) / swap(5xx 或连不上) / fatal(其它 4xx)。 */
+  function classifyResponse(res, key) {
+    if (res.status < 400) return { kind: "ok", result: res };
+    if (key) ring.onError(key);
+    if (res.status === 429) return { kind: "quota", result: res };
+    if (isSwapWorthyStatus(res.status)) return { kind: "swap", result: res };
+    return { kind: "fatal", result: res };
+  }
+
+  /** 出口编排放账：成功清冷却、5xx 短冷却、429 长冷却。 */
+  const endpointHooks = {
+    onOk: (base) => endpoints.noteOk(base),
+    onSwap: (base) => endpoints.noteExhausted(base),
+    onQuota: (base) => endpoints.noteQuotaExhausted(base),
+  };
+
+  async function chat(body, opts = {}) {
+    const wantStream = body?.stream === true;
+    // free-lane 强制 stream:true：非流式请求在这里补形状，聚合回 JSON 后再返回。
+    const outBody = { ...body, stream: true };
+    ensureFreeLaneShape(outBody);
+    const outcome = await runEndpointRotation({
+      bases: endpoints.order(),
+      rounds: tuning.rounds,
+      retryDelayMs: tuning.retryDelayMs,
+      ...endpointHooks,
+      attempt: async (base) => {
+        const key = ring.size ? ring.next() : null;
+        try {
+          return classifyResponse(await postTo(base, outBody, opts, key), key);
+        } catch (err) {
+          if (key) ring.onError(key);
+          return { kind: "swap", err };                  // 连不上 / 超时：等 3s 换另一个 URL
+        }
+      },
+    });
+    if (outcome.kind === "ok") {
+      const res = outcome.result;
+      return wantStream ? res : aggregateChatSse(res);   // 客户端要非流式：SSE 聚合回 JSON
     }
-    if (!wantStream) {
-      // 客户端要非流式：把上游 SSE 聚合回 chat.completion JSON
-      return aggregateChatSse(res);
-    }
-    return res;
+    if (outcome.result) return outcome.result;           // 交回上游原响应（429 / 5xx / 其它 4xx），body 完好
+    throw outcome.err || new Error("railway: no endpoint available");
   }
 
   let modelsCache = { at: 0, list: [] };
   const MODELS_TTL_MS = 10 * 60 * 1000;
 
-  async function fetchModels() {
+  async function fetchModels(base) {
     const key = ring.size ? ring.next() : null;
     const headers = { "Accept": "application/json", "User-Agent": opencodeUa() };
     if (key) headers.Authorization = `Bearer ${key}`;
-    const res = await fetchImpl(joinUrl(resolvedBase, MODELS_PATH), {
+    const res = await fetchImpl(joinUrl(base, MODELS_PATH), {
       headers,
       ...(dispatcher ? { dispatcher } : {}),
     });
-    if (!res.ok) throw new Error(`railway models: http ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(`railway models: http ${res.status}`);
+      err.status = res.status;
+      try { await res.body?.cancel?.(); } catch {}
+      throw err;
+    }
     const j = await res.json();
     return filterFreeModels(j?.data);
   }
 
   async function listModels() {
     if (clock() - modelsCache.at < MODELS_TTL_MS && modelsCache.list.length) return modelsCache.list;
-    let raw = [];
-    try {
-      raw = await fetchModels();
-    } catch {
-      return modelsCache.list; // 拉取失败：给上一次的缓存（首次则空表），不阻断启动
-    }
-    const list = raw.map((m) => ({
+    const outcome = await runEndpointRotation({
+      bases: endpoints.order(),
+      rounds: tuning.rounds,
+      retryDelayMs: tuning.retryDelayMs,
+      ...endpointHooks,
+      attempt: async (base) => {
+        try {
+          return { kind: "ok", result: await fetchModels(base) };
+        } catch (err) {
+          const status = Number(err?.status) || 0;
+          if (status === 429) return { kind: "quota", err };
+          if (status >= 400 && status < 500) return { kind: "fatal", err };   // 401/403/404：换出口无益
+          return { kind: "swap", err };
+        }
+      },
+    });
+    if (outcome.kind !== "ok" || !outcome.result) return modelsCache.list; // 全失败：给上一次缓存（首次空表）
+    const list = outcome.result.map((m) => ({
       id: joinModelId(id, m.id),
       object: "model",
       name: m.name || m.id,
@@ -194,7 +256,11 @@ export function createRailwayProvider({
     close,
     agent,
     keyRing: ring,
-    baseUrl: resolvedBase,
+    bases: [...endpoints.bases],
+    orderBases: () => endpoints.order(),
+    endpointCooldownUntil: (base) => endpoints.cooldownUntil(base),
+    tuning: { ...tuning },
+    baseUrl: endpoints.bases[0] || DEFAULT_RAILWAY_BASE,
     _isFreeModelId: isFreeModelId,
     _filterFreeModels: filterFreeModels,
   };

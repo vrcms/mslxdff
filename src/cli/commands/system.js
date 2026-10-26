@@ -228,32 +228,48 @@ export async function handleFree(args) {
 
 export async function handleAutostart(args) {
   if (!(args.includes("-enable-autostart") || args.includes("--enable-autostart") || args.includes("-disable-autostart") || args.includes("--disable-autostart") || args.includes("-autostart") || args.includes("--autostart"))) return false;
-  const { enableAutostart, disableAutostart, getAutostartStatus, autostartHelp } = await import("../../autostart.js");
+  const { enableAutostart, disableAutostart, getAutostartStatus, autostartHelp, checkAutostartHealth } = await import("../../autostart.js");
+  const { saveAutostartWanted, recordAutostartRepair, AUTOSTART_REPAIR_MAX_FAILS } = await import("../../state.js");
   if (args.includes("-enable-autostart") || args.includes("--enable-autostart")) {
     const r = await enableAutostart();
     if (r.ok) {
+      // 意愿位 + 台账：enable 成功即表态「要自启」并清零失败计数 —— daemon 每次启动的自愈据此保持注册
+      saveAutostartWanted(true);
+      recordAutostartRepair({ ok: true });
       console.log(`autostart 已启用 · ${r.method || autostartHelp()}`);
-      console.log(`验证: mslxdff -autostart status`);
+      console.log(`验证: mslxdff -autostart status ；此后注册被清理软件抹掉或注册里的路径搬家失效，daemon 启动时会自动重注入`);
     } else {
+      const rep = recordAutostartRepair({ ok: false, reason: r.error || "unknown" });
       console.error(`启用自启失败: ${r.error || "unknown"}`);
       console.error(`提示: Windows 需允许任务计划，Linux 需 systemd --user`);
+      if (rep.fails >= AUTOSTART_REPAIR_MAX_FAILS) console.error(`已连续失败 ${rep.fails} 次：daemon 启动时的自动重注入停手只告警（整块开关 MSLXDFF_AUTOSTART_REPAIR=0）`);
       process.exit(1);
     }
     process.exit(0);
   }
   if (args.includes("-disable-autostart") || args.includes("--disable-autostart")) {
     const r = await disableAutostart();
-    if (r.ok) console.log(`autostart 已禁用`);
+    if (r.ok) {
+      saveAutostartWanted(false);
+      recordAutostartRepair({ ok: true });
+      console.log(`autostart 已禁用 — 意愿已记进 state，daemon 重启不会再自动补注册；要恢复：mslxdff -enable-autostart`);
+    }
     else { console.error(`禁用失败: ${r.error}`); process.exit(1); }
     process.exit(0);
   }
   const idx = args.findIndex((x) => x === "-autostart" || x === "--autostart");
   const sub = args[idx + 1];
   if (!sub || sub === "status" || sub === "list") {
-    const s = await getAutostartStatus();
-    console.log(`autostart: ${s.enabled ? "已启用" : "未启用"} · ${s.detail || autostartHelp()}`);
+    // 与 daemon 启动自愈共用 checkAutostartHealth()：面板与自愈必须同一判据，不许两套真相
+    const h = await checkAutostartHealth();
+    const s = h.status || await getAutostartStatus();
+    const verdict = !h.wanted ? "按意愿关闭（不会自动补注册）" : (h.ok ? "已启用 · 体检通过" : `失效 → ${h.reason}`);
+    console.log(`autostart: ${verdict}`);
+    console.log(`  ${s.detail || autostartHelp()}`);
     if (s.taskToRun) console.log(`  task: ${s.taskToRun}`);
+    if (s.execStart) console.log(`  exec: ${s.execStart}`);
     if (s.unit) console.log(`  unit: ${s.unit}`);
+    if (h.repair.fails) console.log(`  重注入台账: 连续失败 ${h.repair.fails} 次（剩 ${h.budget} 次）· 上次原因 ${h.repair.reason || "-"}`);
     process.exit(0);
   }
   console.error("usage: mslxdff -enable-autostart | mslxdff -disable-autostart | mslxdff -autostart status");

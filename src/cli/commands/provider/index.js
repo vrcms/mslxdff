@@ -51,7 +51,8 @@ export async function handleProvider(args) {
     console.error("            mslxdff -provider raccoon login --password        Raccoon 手机号+密码登录（多号免扫码；密码输入不回显）");
     console.error("            mslxdff -provider raccoon quota|checkin [--json]   查积分余额 / 每日积分结算+补领登录奖励");
     console.error("            mslxdff -provider traework login|checkin|quota [--json]  SOLO 国内号：登录 / 每日签到领积分 / 查签到与积分额度（quota 只读，不烧配额）");
-    console.error("            mslxdff -provider openrouter clear                remove all keys");
+    console.error("            mslxdff -provider todaycn login [--refresh <串>]  Today AI：导入本机桌面登录态（默认）或手填第二号（多号轮换）");
+    console.error("            mslxdff -provider todaycn persona [show|apply|rollback]  查看 / 把工具格式契约写进 agent 人设（可选，控制面免费，可回滚）");
     process.exit(1);
   }
   if (id === "list" || id === "status") {
@@ -101,6 +102,10 @@ const { handleQoderLogin } = await import("./qoder-login.js");
   if (await handleZcodeLogin(id, sub, rest)) return true;
   const { handleZcodeQuota } = await import("./zcode-quota.js");
   if (await handleZcodeQuota(id, sub, rest)) return true;
+  const { handleTodaycnLogin } = await import("./todaycn-login.js");
+  if (await handleTodaycnLogin(id, sub, rest)) return true;
+  const { handleTodaycnPersona } = await import("./todaycn-persona.js");
+  if (await handleTodaycnPersona(id, sub, rest)) return true;
 
   const { handleRaccoonLogin } = await import("./raccoon-login.js");
   if (await handleRaccoonLogin(id, sub, rest)) return true;

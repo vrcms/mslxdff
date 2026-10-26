@@ -16,7 +16,7 @@ Usage:
   mslxdff -model refresh           force-refresh the model cache from the upstream
   mslxdff -debug                   live-follow the daemon event stream (requests, errors, peer forwards)
   mslxdff -stop                    stop the running daemon
-  mslxdff -restart                 restart the daemon
+  mslxdff -restart                 restart the daemon（末尾顺带体检开机自启：注册被清或注册里的路径失效会自动重注入并打印回执，MSLXDFF_AUTOSTART_REPAIR=0 关这步）
   mslxdff -uninstall               stop the daemon and delete all state/log files
   mslxdff -port N                  persist the listen port (restarts the daemon on it if running)
   mslxdff -update                  update mslxdff to the latest published version
@@ -46,9 +46,9 @@ Usage:
   mslxdff -delgroup <name>         disband a group this node leads (deletes it and its members)
   mslxdff -free                    V2EX 白嫖雷达（仅 V2EX 单源：latest+hot 按 白嫖|限免|免费额度|注册送|羊毛 过滤）
   mslxdff -free-watch              V2EX 白嫖雷达 watch 模式（每 5 分钟轮询）
-  mslxdff -enable-autostart        开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起）
-  mslxdff -disable-autostart       关闭开机自启
-  mslxdff -autostart status        查看自启状态
+  mslxdff -enable-autostart        开机自启：注册 Windows 任务计划 / Linux systemd user（重启后自动拉起），并记下意愿位；此后 daemon 每次启动自动体检，注册被清或注册里的路径失效会自己重注入
+  mslxdff -disable-autostart       关闭开机自启并记下意愿位（daemon 自愈此后不再补注册）
+  mslxdff -autostart status        自启体检：意愿 + 注册现状 + 注册内容路径是否还在 + 重注入台账（连续失败 3 次自动停手，开关 MSLXDFF_AUTOSTART_REPAIR=0）
   mslxdff -chat ["prompt"]       chat REPL（mimo-v2.5-free 优先/big-pickle 兜底，自然语言转命令，模糊匹配由模型完成，历史持久化，超长自动压缩，仅拦 -uninstall，daemon 重启不影响）
   mslxdff -resetban [ip]           clear join-failure bans (all, or one ip)
   mslxdff -use-group [on|off]     本机失败时是否走组员网络（默认 on；off 则所有供应商仅本机，MSLXDFF_USE_GROUP 环境变量可覆盖）

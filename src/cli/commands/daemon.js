@@ -80,6 +80,14 @@ export async function handleRestart(args, VERSION) {
   console.log(`endpoint:   http://localhost:${port}/v1`);
   console.log(`log:        ${logFile()}`);
   console.log(`pid:        ${pidFile()}`);
+  // ADR-0074：restart 本体也要管开机自启 —— 用户点名「每次 restart 都查一遍，不在就重新注入」。
+  // 判据与动作都在 `runtime/autostart-repair.js`（daemon 启动 2.5s 后还会查一次，靠在途互斥不重复派）。
+  // reportOk=true：连「体检通过」也要打一行，restart 的输出必须看得见自己查过了。
+  try {
+    const { repairAutostartOnce } = await import("../../runtime/autostart-repair.js");
+    const asr = await repairAutostartOnce({ log: (m) => console.log(m), reportOk: true });
+    if (asr.action === "skip-env") console.log("autostart: 自愈已按 env 关闭（MSLXDFF_NO_AUTOSTART / MSLXDFF_AUTOSTART_REPAIR=0），本次未体检");
+  } catch (e) { console.log(`autostart 体检失败：${e?.message || e}`); }
   process.exit(0);
 }
 

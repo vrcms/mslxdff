@@ -25,7 +25,7 @@
 | 调试 | `-debug` / `--debug` | 前台跟随事件流，Ctrl+C 恢复后台 |
 | 插件 | `-plugins` / `--plugins` | 列插件与 hooks |
 | 停止 | `-stop` / `--stop` | 停 daemon |
-| 重启 | `-restart` / `--restart` | 重启 daemon |
+| 重启 | `-restart` / `--restart` | 重启 daemon；末尾顺带体检开机自启（失效自动重注入并打印回执，`MSLXDFF_AUTOSTART_REPAIR=0` 关这步） |
 | 端口 | `-port N` / `--port N` | 持久化端口，运行中重启 |
 | token 读 | `-showtoken` / `--showtoken` | 打印 Bearer token |
 | token 刷 | `-refresh-token` / `--refresh-token` | 轮换并打印新 token |
@@ -80,6 +80,9 @@
 | zcode 额度 | `-provider zcode quota [--json]` | 查 ZCode 套餐名/状态/有效期 + 各模型余量（`billing/balance` 分组表格）；空套餐给领取指引、401 给重登指引 |
 | raccoon 接入 | `-provider raccoon login` | Raccoon（商汤小浣熊）扫码登录：生成 `qrcode_code`→终端二维码 + `login/mp?code=` 链接→**用微信「扫一扫」扫**并确认（浏览器直接打开链接会 404，站点 SPA 无该路由）→轮询拿 token，落盘 `auths/raccoon-<uid>.json`+state（`keys` 一律以文档为准，续期后自愈）并把兜底 6 模型并入 allowlist；`raccoon/<modelId>` 前缀路由（**OpenAI 兼容网关**，**免验证码**）；多号自动轮换：请求内撞积分不足/限流就当场换下一个号，**暂不支持手动指定用哪个号**；积分不足长冷 1h、限流短冷 30s；恒 local-only 不借出 |
 | raccoon 密码登录 | `-provider raccoon login --password` | Raccoon **手机号+密码登录**（多号免扫码）：走官方同款 `POST /api/web/auth/v1/login_with_password`，**phone/password 须 AES-128-CFB 加密**（key 硬编码于前端，见 `crypto.js`；发明文会报「手机号或密码不正确」）；TTY 下密码**关回显**（逐键 `*`），非 TTY 须 `--password=<密码>`；默认 `--nation 86`；失败给人话（「手机号或密码不正确」），回执回显手机号但**打码**、**不回显密码**；落盘/确认/领奖与扫码登录完全同路 |
+| todaycn 登录 | `-provider todaycn login [--refresh <串>]` | Today AI（今日工作助手）接入：默认**只读**解密本机桌面登录态（DPAPI+AES-GCM）导入这枚 refreshCredential（一机一号），`--refresh <串>` 手填第二号=**多号轮换唯一途径**；落盘 `auths/todaycn-<uid>.json`（0600）+state，并把 `/v1/pricing/status` 的 modelOptions 播种进 allowlist；`todaycn/<模型名>` 前缀路由，多号轮换+分档冷却（**空转中冷当场换号**）；模型位是账号级设置（按「号↔模型位」绑定）；恒 local-only 不借出 |
+| todaycn 模型 | `-provider todaycn models [--json]` | 列该号**真正可选**的模型位与消耗倍率（`/v1/pricing/status`；`/v1/llm/models` 那 35 个 id 看得见、用不了） |
+| todaycn 人设契约 | `-provider todaycn persona [show\|apply\|rollback]` | 把工具格式契约写进/摘出 agent 人设 `agentCharacter`（控制面免费、幂等可回滚；`on`/`off` 别名）。只按轮写契约时任务型请求会被平台自带工具通道劫走（零 tool_calls，实测「已经派出去抓了」），写进人设后同一句稳定回单行 JSON；契约只认「我在写一个小脚本」开头的机器请求（ADR-0075） |
 | raccoon 积分 | `-provider raccoon quota [--json]` / `checkin` | 逐号查积分五分项 / 每日积分结算+补领登录奖励——**每日积分是惰性结算**：服务端每天挂账 500 分，当天第一次访问 `office/v3/setting_info` 才入账（有效期 7 天），`checkin` 触发它（幂等）再补一次性登录奖励 3000（每号一次性、`login` 时已自动领）；判据只认账单、不认上游 `code:0`（重复领会虚回成功）；未登录给 login 指引；daemon 每日 09:00 自动跑同一套（`MSLXDFF_RACCOON_CHECKIN=0` 关，`_CHECKIN_HOUR` 改点） |
 | WorkBuddy 成长任务 | `-workbuddy growth [--json]` / `-wb growth` | 成长任务全自动（拉列表→参与→触发→领奖，串行 1.2s/1s，已领幂等跳过）；可自动 `chat_5`/`automation_1`/`skill_1`/`Model_chat_GLM5.2`，需客户端任务标 MANUAL 不发包；daemon 每日 09:30 自动（`MSLXDFF_WORKBUDDY_GROWTH=0` 关，`_GROWTH_HOUR`/`_GROWTH_MODEL` 可配） |
 | WorkBuddy 猫猫旅行 | `-workbuddy travel [--json]` / `-wb travel` | 无猫自动同意协议+领养（+300，门槛未达自动补一次对话解锁）；到站领奖 / 空闲派出（location 4）/ 旅行中跳过 |
@@ -114,9 +117,9 @@
 | 组员开关 | `-use-group [on\|off]` / `--use-group [on\|off]` | opencode 失败时是否走组员（默认 on，off 则所有供应商仅本机；key 供应商默认恒直连，`MSLXDFF_USE_GROUP_KEYS=1` 可开回；cline/workbuddy 恒禁） |
 | 白嫖雷达 | `-free` / `--free` / `-free-check` / `--free-check` | V2EX 单源白嫖雷达（`latest.json + hot.json` 按白嫖|限免|免费额度过滤） |
 | 白嫖 watch | `-free-watch` / `--free-watch` | V2EX 白嫖雷达 watch（每 5 分钟轮询） |
-| 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd） |
-| 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启 |
-| 自启状态 | `-autostart status` / `--autostart status` | 查看自启状态 |
+| 自启开 | `-enable-autostart` / `--enable-autostart` | 开机自启（Windows 任务计划 / Linux systemd）；成功落意愿位，此后 daemon 启动自愈保持注册 |
+| 自启关 | `-disable-autostart` / `--disable-autostart` | 关闭开机自启并记意愿位（自愈此后不再补） |
+| 自启体检 | `-autostart status` / `--autostart status` | 意愿 + 注册现状 + 注册内容路径健康 + 重注入台账（`MSLXDFF_AUTOSTART_REPAIR=0` 关自愈） |
 | 时区 | `-timezone [set <tz>\|clear\|status]` / `-tz` | 时区配置，默认 `Asia/Shanghai`，可设 `UTC` 等（`MSLXDFF_TZ` 覆盖） |
 | 帮助 | `-help` / `--help` / `-h` | 打印帮助 |
 

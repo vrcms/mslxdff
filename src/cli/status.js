@@ -142,13 +142,20 @@ export async function printStatus(VERSION) {
   }
 
   try {
-    const { getAutostartStatus } = await import("../autostart.js");
-    const a = await getAutostartStatus();
+    // 与 daemon 启动自愈共用 checkAutostartHealth() —— 面板绝不能比自愈少知道一层：
+    // 老写法只问「注册在不在」，注册里的 node/脚本已搬家失效时它照样印「已启用」。
+    const { checkAutostartHealth } = await import("../autostart.js");
+    const h = await checkAutostartHealth();
+    const a = h.status || {};
     const detail = a.detail || (a.enabled ? "已启用" : "未启用");
-    const label = detail.startsWith("已启用") || detail.startsWith("未启用") ? detail : `${a.enabled ? "已启用" : "未启用"} · ${detail}`;
-    console.log(`\nautostart: ${label}  —  mslxdff -autostart status`);
+    const head = !h.wanted ? "按意愿关闭（不会自动补注册）"
+      : h.ok ? (detail.startsWith("已启用") || detail.startsWith("未启用") ? detail : `已启用 · ${detail}`)
+      : `失效 → ${h.reason}（重启 daemon 会自动重注入）`;
+    console.log(`\nautostart: ${head}  —  mslxdff -autostart status`);
     if (a.taskToRun) console.log(`  task: ${a.taskToRun.slice(0, 120)}`);
+    if (a.execStart) console.log(`  exec: ${a.execStart.slice(0, 120)}`);
     if (a.unit) console.log(`  unit: ${a.unit}`);
+    if (h.repair.fails) console.log(`  重注入台账: 连续失败 ${h.repair.fails} 次（剩 ${h.budget} 次）`);
   } catch {}
   try {
     const { resolvePluginDirs, loadPlugins } = await import("../plugins.js");

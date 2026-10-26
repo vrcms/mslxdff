@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { daemonDir, readPid, isPidAlive } from "./daemon.js";
 import { writeExitMarker } from "./runtime/lifecycle-forensics.js";
+import { assessRegistrationHealth } from "./autostart-health.js";
 
 const TASK_NAME = "mslxdff";
 const SERVICE_NAME = "mslxdff";
@@ -111,6 +112,8 @@ async function winStatus() {
     enabled: true,
     detail: `已启用 · ${m ? m[1].trim() : "Ready"}${last ? ` · 上次结果 ${last[1].trim()}` : ""}`,
     taskToRun: tr ? tr[1].trim() : "",
+    taskStatus: m ? m[1].trim() : "",
+    method: "schtasks",
     raw: q.raw,
   };
 }
@@ -306,11 +309,18 @@ async function linuxStatus() {
   const unit = systemdUnitPath();
   const exists = existsSync(unit);
   if (!exists) return { enabled: false, detail: "未启用（无 systemd user unit）" };
+  // ExecStart 一并读出来：体检要拿它核对「unit 里写的 node/脚本还在不在」，
+  // 只看 `is-enabled` 会在 npm 换 prefix / 目录搬家后继续报「已启用」。
+  let execStart = "";
+  try {
+    const mm = readFileSync(unit, "utf8").match(/^ExecStart=(.+)$/m);
+    if (mm) execStart = mm[1].trim();
+  } catch {}
   const r = await execAsync("systemctl", ["--user", "is-enabled", SERVICE_NAME]);
   const enabled = !r.err && /enabled/i.test(r.stdout);
   const r2 = await execAsync("systemctl", ["--user", "is-active", SERVICE_NAME]);
   const active = !r2.err && /active/i.test(r2.stdout);
-  return { enabled, detail: `${enabled ? "已启用" : "已禁用"} · ${active ? "运行中" : "未运行"} · ${unit}`, unit };
+  return { enabled, detail: `${enabled ? "已启用" : "已禁用"} · ${active ? "运行中" : "未运行"} · ${unit}`, unit, execStart };
 }
 
 // ---------- facade ----------
@@ -332,4 +342,50 @@ export async function getAutostartStatus() {
 export function autostartHelp() {
   if (isWin()) return `Windows: schtasks 任务 "mslxdff"（ONLOGON，最高权限，当前用户登录即自启）`;
   return `Linux: systemd user unit ~/.config/systemd/user/mslxdff.service`;
+}
+
+// 注册内容体检的**纯判据**在 `src/autostart-health.js`（拆出去的理由写在那份文件头：
+// 判据零 IO 可单测，且本文件贴着仓库 20KB 硬顶）。本文件只留 IO 侧：schtasks / 注册表 / systemctl。
+export { extractRegisteredPaths, assessRegistrationHealth } from "./autostart-health.js";
+
+/**
+ * 一次完整体检 = 意愿 + 现状 + 内容健康 + 剩余预算。daemon 启动自愈与 `-autostart status`
+ * 共用这一条判据，免得「面板说没事、自愈说有」两套真相。
+ */
+export async function checkAutostartHealth({ file, exists = existsSync, platform = process.platform, supervised = null } = {}) {
+  const { loadAutostartWanted, loadAutostartRepair, autostartRepairBudget } = await import("./state.js");
+  const status = await getAutostartStatus();
+  const assess = assessRegistrationHealth({ status, exists, platform });
+  let supervisedNow = supervised;
+  if (supervisedNow === null && platform === "linux") {
+    try {
+      const { underSystemd } = await import("./runtime/proc-info.js");
+      supervisedNow = underSystemd() || await linuxSystemUnitActive();
+    } catch { supervisedNow = false; }
+  }
+  return {
+    wanted: loadAutostartWanted({ file }),
+    ok: assess.ok,
+    reason: assess.reason,
+    paths: assess.paths,
+    missing: assess.missing,
+    supervised: !!supervisedNow,
+    status,
+    repair: loadAutostartRepair({ file }),
+    budget: autostartRepairBudget({ file }),
+  };
+}
+
+/**
+ * 有没有**别的** supervisor 在管 mslxdff（system 级 unit 存在或 active）—— ADR-0064 的坑：
+ * `underSystemd()` 只看**当前进程**是不是 systemd 拉起来的，而 CLI（`mslxdff -restart`）永远不是
+ * ⇒ 少了这一问，体检会在「系统 unit 托管」的机器上判「未注册」（它查的是 **user** unit）并去接管，
+ * 与系统 unit 抢同一个端口（0.1.209 无限重启原样复发）。
+ * 判据只认精确值 `active`/`activating`：`inactive` 含子串 `active`，用正则包含判会永远为真。
+ */
+export async function linuxSystemUnitActive() {
+  try { if (existsSync("/etc/systemd/system/mslxdff.service")) return true; } catch {}
+  const r = await execAsync("systemctl", ["is-active", SERVICE_NAME]);
+  const out = String(r.stdout || "").trim();
+  return out === "active" || out === "activating";
 }
