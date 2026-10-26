@@ -194,6 +194,29 @@ describe("codearts 流式字段透传（真机帧形状回归）", () => {
     const fin = chunks.find((c) => c.choices?.[0]?.finish_reason);
     assert.equal(fin.choices[0].finish_reason, "stop");
   });
+
+  test("流式收尾补发 usage chunk（上游快照帧报 prompt/completion）", async () => {
+    const resp = sseResponse([
+      JSON.stringify({ text: "你好", prompt_tokens: 10 }),
+      JSON.stringify({ text: "你好世界", completion_tokens: 5 }),
+      JSON.stringify({ text: "[DONE]", error_code: "0" }),
+    ]);
+    const out = await sseToOpenAIResponse(resp, { model: "deepseek-v4.1-flash", id: "chatcmpl-usage" }).text();
+    const chunks = out.split("\n").filter((l) => l.startsWith("data: ") && l !== "data: [DONE]").map((l) => JSON.parse(l.slice(6)));
+    const usageChunk = chunks.find((c) => c.usage);
+    assert.ok(usageChunk, "应补发带 usage 的收尾 chunk");
+    assert.equal(usageChunk.choices.length, 0);
+    assert.deepEqual(usageChunk.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  });
+
+  test("上游未报 usage → 流式不伪造 usage chunk", async () => {
+    const resp = sseResponse([
+      JSON.stringify({ text: "你好" }),
+      JSON.stringify({ text: "[DONE]", error_code: "0" }),
+    ]);
+    const out = await sseToOpenAIResponse(resp, { model: "glm-5.3-flash", id: "chatcmpl-none" }).text();
+    assert.ok(!out.includes('"usage"'), "未报 usage 时不得补发 usage chunk");
+  });
 });
 
 describe("codearts structured QA 收紧与解包", () => {

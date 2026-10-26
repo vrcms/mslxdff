@@ -98,6 +98,20 @@ const chunkLine = (id, model, delta, finish) => {
   return `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [choice] })}\n\n`;
 };
 
+// 流式 usage 收尾：OpenAI 兼容 chunk 把 usage 放顶层（choices 之外），与 aggregateToCompletion 同形状。
+// 若上游从未给 usage（state.usage 为 null）则不伪造 —— 上游没报 → 留 null，报表层渲染 —/0。
+function usageChunk(id, model, usage) {
+  if (!usage || typeof usage !== "object") return "";
+  const pt = Number(usage.prompt_tokens) || 0;
+  const ct = Number(usage.completion_tokens) || 0;
+  const tt = Number(usage.total_tokens);
+  const total = Number.isFinite(tt) ? tt : pt + ct;
+  return `data: ${JSON.stringify({
+    id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+    choices: [], usage: { prompt_tokens: pt, completion_tokens: ct, total_tokens: total },
+  })}\n\n`;
+}
+
 /** 上游 SSE → OpenAI SSE 流式转换（快照替换/增量混合语义，保证至少一个 finish chunk + [DONE]）。 */
 export function sseToOpenAIResponse(resp, { model, id }) {
   const dec = new TextDecoder();
@@ -122,6 +136,7 @@ export function sseToOpenAIResponse(resp, { model, id }) {
             if (!ev) continue;
             if (ev.data === "[DONE]") {
               finishChunk();
+              emit(usageChunk(id, model, state.usage));
               emit("data: [DONE]\n\n");
               controller.close();
               return;
@@ -145,6 +160,7 @@ export function sseToOpenAIResponse(resp, { model, id }) {
             if (fwd.finish) finishChunk(); // 上游 finish_reason 出现即发（含 tool_calls；空 calls 自动降 stop）
             if (state.done) {
               finishChunk();
+              emit(usageChunk(id, model, state.usage));
               emit("data: [DONE]\n\n");
               controller.close();
               return;
@@ -152,6 +168,7 @@ export function sseToOpenAIResponse(resp, { model, id }) {
           }
           if (done) {
             finishChunk();
+            emit(usageChunk(id, model, state.usage));
             emit("data: [DONE]\n\n");
             controller.close();
             return;
